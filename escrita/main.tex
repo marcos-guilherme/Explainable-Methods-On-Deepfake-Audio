@@ -1,4 +1,153 @@
-\documentclass{article}
+% ==============================================================================
+% Esqueleto do artigo — Zero-Shot Cross-Lingual Audio Deepfake Detection
+% (BRSpeech-DF, pt-BR) — alvo: DFF-2026 (workshop @ ACM MM 2026, Rio de Janeiro)
+%
+% NOTA: o template oficial do DFF-2026 ainda não foi publicado (página fora do
+% ar no momento em que isso foi escrito). Este preâmbulo usa o formato padrão
+% "sigconf" do acmart, que é o mais comum em workshops ACM. Quando o CfP oficial
+% sair, troque \acmConference{}{}{} pelos dados reais e confira se pedem alguma
+% opção extra na classe (ex.: review anônima -> adicionar "anonymous" e "review").
+% ==============================================================================
+\documentclass[sigconf]{acmart}
+
+% Evita a caixa de referência bibliográfica completa no rodapé da 1a página
+% (padrão em vários workshops ACM; remova se o CfP pedir o formato completo)
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+
+\usepackage{booktabs}   % tabelas (EER/MCC/Acc, robustez)
+\usepackage{graphicx}   % figuras (curvas de robustez, GATR, oclusão)
+
 \begin{document}
-Hello, WIFS/DFF.
+
+% ------------------------------------------------------------------------
+% TODO: título de trabalho -- ajustar depois que os resultados finais saírem
+% ------------------------------------------------------------------------
+\title{Zero-Shot Cross-Lingual Audio Deepfake Detection on Brazilian Portuguese Speech}
+
+% TODO: nome completo, afiliação e e-mail de cada autor
+\author{João Victor}
+\affiliation{%
+  \institution{Universidade Federal de Goiás (UFG) / CEIA}
+  \city{Goiânia}
+  \country{Brazil}
+}
+\email{TODO@ufg.br}
+
+\renewcommand{\shortauthors}{João Victor et al.}
+
+\begin{abstract}
+% TODO (~150-200 palavras): motivação (escassez de detectores nativos em
+% pt-BR), o que foi feito (avaliação zero-shot cross-lingual de um detector
+% wav2vec 2.0 / XLS-R pré-treinado, sem fine-tuning, no BRSpeech-DF), como foi
+% avaliado (EER, MCC, Acurácia; robustez sob ruído/MP3/G.711; explicabilidade
+% no domínio do tempo via GATR e oclusão), e o achado principal (preencher
+% depois de rodar a pipeline no ambiente final).
+TODO: abstract.
+\end{abstract}
+
+\keywords{audio deepfake detection, anti-spoofing, cross-lingual, wav2vec 2.0, XLS-R, explainability, Portuguese}
+
+\maketitle
+
+% ==============================================================================
+\section{Introduction}
+% Notebook: célula 0 (markdown de abertura) tem a motivação em pt-BR --
+% traduzir e expandir, não copiar literal.
+% Pontos a cobrir:
+%  - por que deepfake de voz em pt-BR é pouco coberto na literatura
+%  - por que testar zero-shot antes de investir em fine-tuning é uma pergunta
+%    de pesquisa válida (custo, disponibilidade de dados rotulados em pt-BR)
+%  - contribuições do artigo (bullet list de 3-4 itens)
+TODO.
+
+% ==============================================================================
+\section{Related Work}
+% Os 4 papers-base (ver references.bib) + posicionar frente à revisão
+% sistemática PRISMA (ENIAC 2026) já feita por você -- deixar claro que este
+% artigo é um estudo empírico complementar, não uma sobreposição.
+\subsection{Self-Supervised Front-Ends for Anti-Spoofing}
+\citet{tak2022automatic} TODO.
+
+\subsection{Robustness and Real-World Generalization}
+\citet{channing2024toward} TODO.
+
+\subsection{Explainability in Audio Deepfake Detection}
+\citet{grinberg2025does} and \citet{fullwood2025seeing} TODO.
+
+% ==============================================================================
+\section{Methodology}
+% Notebook, seções 2-3 (pré-processamento + modelo). Descrever como pipeline,
+% não como "célula X faz Y" -- traduzir para prosa científica.
+\subsection{Pre-processing}
+% mono -> resample 16 kHz -> janela fixa de 64.600 amostras (~4.04s) ->
+% normalização (Tak et al., 2022)
+TODO.
+
+\subsection{Model}
+% front-end SSL wav2vec 2.0 / XLS-R + back-end (pooling global + linear),
+% checkpoint pré-treinado (nii-yamagishilab/mms-300m-anti-deepfake), sem
+% fine-tuning -- deixar claro que é zero-shot cross-lingual (treinado
+% majoritariamente em inglês/ASVspoof, aplicado direto em pt-BR)
+TODO.
+
+% ==============================================================================
+\section{Experimental Setup}
+% Notebook, seção 4 (dados) + CFG. Vira uma tabela de configuração.
+\begin{table}[t]
+  \caption{Experimental configuration.}
+  \label{tab:config}
+  \begin{tabular}{ll}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    Sample rate & 16{,}000 Hz \\
+    Fixed window & 64{,}600 samples ($\approx$4.04 s) \\
+    Checkpoint & \texttt{nii-yamagishilab/mms-300m-anti-deepfake} \\
+    Dataset & AKCIT-Deepfake/BRSpeech-DF (test split) \\
+    Samples per class & 200 (balanced) \\
+    Seed & 42 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+TODO: descrever o BRSpeech-DF (tamanho, origem, como o rótulo bonafide/spoof
+é resolvido), hardware usado, e re-confirmar que a versão final rodou no
+ambiente único definido (ver pendência nas instruções do projeto).
+
+% ==============================================================================
+\section{Results}
+% Notebook, seções 5-7 (inferência, métricas, robustez)
+\subsection{Zero-Shot Performance}
+% Tabela EER / MCC / Acurácia no áudio íntegro + matriz de confusão
+TODO.
+
+\subsection{Robustness Under Real-World Degradations}
+% Tabela/gráfico comparando áudio íntegro vs. ruído gaussiano vs. MP3 vs. G.711
+TODO.
+
+% ==============================================================================
+\section{Explainability}
+% Notebook, seções 8-9 (GATR + oclusão)
+\subsection{GATR: Time-Domain Relevancy}
+TODO.
+
+\subsection{Occlusion Analysis: Speech vs.\ Silence}
+% inclui o achado da agregação via VAD (fala vs. silêncio)
+TODO.
+
+% ==============================================================================
+\section{Discussion and Limitations}
+% janela fixa de 4s, tamanho de amostra (n_per_class=200 -- variância do EER),
+% generalização (um único checkpoint, um único dataset pt-BR), decisão sobre
+% incluir ou não W2V2-AASIST como baseline
+TODO.
+
+% ==============================================================================
+\section{Conclusion and Future Work}
+TODO.
+
+% ==============================================================================
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
 \end{document}
