@@ -1,12 +1,21 @@
 % ==============================================================================
-% Esqueleto do artigo — Zero-Shot Cross-Lingual Audio Deepfake Detection
-% (BRSpeech-DF, pt-BR) — alvo: DFF-2026 (workshop @ ACM MM 2026, Rio de Janeiro)
+% Esqueleto do artigo — Explicabilidade acústica de um detector de deepfake de
+% voz em pt-BR: zero-shot vs. adaptação leve (BRSpeech-DF)
+% alvo: DFF-2026 (workshop @ ACM MM 2026, Rio de Janeiro)
 %
-% NOTA: o template oficial do DFF-2026 ainda não foi publicado (página fora do
-% ar no momento em que isso foi escrito). Este preâmbulo usa o formato padrão
-% "sigconf" do acmart, que é o mais comum em workshops ACM. Quando o CfP oficial
-% sair, troque \acmConference{}{}{} pelos dados reais e confira se pedem alguma
-% opção extra na classe (ex.: review anônima -> adicionar "anonymous" e "review").
+% Este esqueleto acompanha o experimento implementado em
+%   notebooks/deepfake_brspeech_explainability.ipynb
+%
+% Ideia central (§1 do spec): explicar, em termos ACÚSTICOS, a decisão de um
+% detector caixa-preta (XLS-R) e ver como as pistas mudam antes (D_zs) vs.
+% depois (D_ad) de uma adaptação leve ao português. Duas espinhas convergentes:
+%   Espinha 1 — surrogate + SHAP (associativa, sobre MFCCs)
+%   Espinha 2 — oclusão causal espectral (intervencionista, sobre bandas mel)
+%
+% NOTA: o template oficial do DFF-2026 ainda não foi publicado. Este preâmbulo
+% usa o formato padrão "sigconf" do acmart. Quando o CfP oficial sair, troque
+% \acmConference{}{}{} pelos dados reais e confira opções extras da classe
+% (ex.: review anônima -> adicionar "anonymous" e "review").
 % ==============================================================================
 \documentclass[sigconf]{acmart}
 
@@ -15,18 +24,25 @@
 \settopmatter{printacmref=false}
 \renewcommand\footnotetextcopyrightpermission[1]{}
 
-\usepackage{booktabs}   % tabelas (EER/MCC/Acc, robustez)
-\usepackage{graphicx}   % figuras (curvas de robustez, GATR, oclusão)
+\usepackage{booktabs}     % tabelas (EER/MCC/Acc, fidelidade, testes)
+\usepackage{graphicx}     % figuras (SHAP, oclusão, DET/ROC)
+\usepackage{subcaption}   % figuras lado a lado (comparativo D_zs vs. D_ad)
+\usepackage{amsmath}      % notação estatística (P(spoof), Welch, FDR)
 
 \begin{document}
 
 % ------------------------------------------------------------------------
-% TODO: título de trabalho -- ajustar depois que os resultados finais saírem
+% TODO: título -- mutável (o atual veio de um colega). Sugestão alinhada ao
+% repositório e ao estudo de explicabilidade espectral; ajustar quando os
+% resultados finais saírem.
 % ------------------------------------------------------------------------
-\title{Zero-Shot Cross-Lingual Audio Deepfake Detection on Brazilian Portuguese Speech}
+\title{Evaluating Spectral Interpretability in Brazilian Portuguese Audio
+Deepfakes via Causal Occlusion}
+\subtitle{Como as pistas acústicas de um detector XLS-R mudam entre zero-shot e
+adaptação leve --- TODO: confirmar/traduzir}
 
 % TODO: nome completo, afiliação e e-mail de cada autor
-\author{João Victor}
+\author{}
 \affiliation{%
   \institution{Universidade Federal de Goiás (UFG) / CEIA}
   \city{Goiânia}
@@ -37,63 +53,127 @@
 \renewcommand{\shortauthors}{João Victor et al.}
 
 \begin{abstract}
-% TODO (~150-200 palavras): motivação (escassez de detectores nativos em
-% pt-BR), o que foi feito (avaliação zero-shot cross-lingual de um detector
-% wav2vec 2.0 / XLS-R pré-treinado, sem fine-tuning, no BRSpeech-DF), como foi
-% avaliado (EER, MCC, Acurácia; robustez sob ruído/MP3/G.711; explicabilidade
-% no domínio do tempo via GATR e oclusão), e o achado principal (preencher
-% depois de rodar a pipeline no ambiente final).
+% TODO (~150-200 palavras). Cobrir, nesta ordem:
+%  - motivação: detectores de deepfake de voz são caixas-pretas SSL treinadas
+%    majoritariamente em inglês; pouco se sabe sobre QUAIS pistas acústicas eles
+%    usam em pt-BR, e se essas pistas são enviesadas pelo idioma.
+%  - o que foi feito: explicabilidade acústica POPULACIONAL de um detector
+%    wav2vec 2.0 / XLS-R no BRSpeech-DF, contrastando o modelo zero-shot (D_zs)
+%    com uma adaptação leve (D_ad: XLS-R congelado + cabeça de regressão logística).
+%  - como: duas espinhas convergentes -- (1) surrogate + SHAP sobre 26 features
+%    MFCC (associativa) e (2) oclusão causal espectral por bandas mel
+%    (intervencionista), com uma camada confirmatória (Welch/Levene + FDR).
+%  - achado principal: preencher depois de rodar a pipeline no ambiente final
+%    (como as pistas se deslocam de D_zs para D_ad).
 TODO: abstract.
 \end{abstract}
 
-\keywords{audio deepfake detection, anti-spoofing, cross-lingual, wav2vec 2.0, XLS-R, explainability, Portuguese}
+\keywords{audio deepfake detection, anti-spoofing, explainability, SHAP,
+spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R, Brazilian Portuguese}
 
 \maketitle
 
 % ==============================================================================
 \section{Introduction}
-% Notebook: célula 0 (markdown de abertura) tem a motivação em pt-BR --
-% traduzir e expandir, não copiar literal.
+% Spec §1 (motivação e pergunta de pesquisa). Traduzir/expandir, não copiar.
 % Pontos a cobrir:
-%  - por que deepfake de voz em pt-BR é pouco coberto na literatura
-%  - por que testar zero-shot antes de investir em fine-tuning é uma pergunta
-%    de pesquisa válida (custo, disponibilidade de dados rotulados em pt-BR)
-%  - contribuições do artigo (bullet list de 3-4 itens)
+%  - deepfakes de voz e a escassez de análise INTERPRETÁVEL em pt-BR;
+%  - detectores SSL (XLS-R) são caixas-pretas treinadas majoritariamente em
+%    inglês/ASVspoof -> risco de pistas enviesadas pela fonética do idioma;
+%  - a pergunta de pesquisa (spec §1):
+%      "Quais características acústicas o detector usa para decidir, e como essas
+%       pistas mudam antes vs. depois de uma adaptação leve ao português?"
+%  - por que contrastar zero-shot (D_zs) vs. adaptado leve (D_ad);
+%  - contribuições (bullet list de 3-4 itens), p.ex.:
+%      (i) protocolo de explicabilidade acústica populacional para detectores
+%          caixa-preta de deepfake em pt-BR;
+%      (ii) evidência convergente associativa (SHAP/MFCC) + causal (oclusão
+%           espectral) sobre o MESMO conjunto de análise;
+%      (iii) medição de como as pistas se deslocam com adaptação leve;
+%      (iv) tabelas/figuras reprodutíveis (código e seeds fixas).
 TODO.
 
 % ==============================================================================
 \section{Related Work}
-% Os 4 papers-base (ver references.bib) + posicionar frente à revisão
-% sistemática PRISMA (ENIAC 2026) já feita por você -- deixar claro que este
-% artigo é um estudo empírico complementar, não uma sobreposição.
+% Os papers-base (ver references.bib) reposicionados para o eixo de
+% EXPLICABILIDADE acústica (não mais robustez/GATR do notebook 1). Deixar claro
+% que este é um estudo empírico de interpretabilidade, complementar à revisão
+% sistemática PRISMA (ENIAC 2026) já feita pelo grupo -- sem sobreposição.
 \subsection{Self-Supervised Front-Ends for Anti-Spoofing}
+% Front-ends SSL (wav2vec 2.0 / XLS-R) como base de detectores SOTA.
 \citet{tak2022automatic} TODO.
 
-\subsection{Robustness and Real-World Generalization}
-\citet{channing2024toward} TODO.
-
 \subsection{Explainability in Audio Deepfake Detection}
+% Métodos de explicabilidade aplicados a detecção de deepfake; lacuna: análise
+% ACÚSTICA populacional e cross-lingual.
 \citet{grinberg2025does} and \citet{fullwood2025seeing} TODO.
+
+\subsection{Cross-Lingual Generalization and Real-World Deployment}
+% Generalização entre idiomas/domínios; motiva olhar pistas específicas de pt-BR.
+\citet{channing2024toward} TODO.
 
 % ==============================================================================
 \section{Methodology}
-% Notebook, seções 2-3 (pré-processamento + modelo). Descrever como pipeline,
-% não como "célula X faz Y" -- traduzir para prosa científica.
-\subsection{Pre-processing}
-% mono -> resample 16 kHz -> janela fixa de 64.600 amostras (~4.04s) ->
-% normalização (Tak et al., 2022)
+% Spec §§3-8. Descrever como método científico, não como "célula X faz Y".
+
+\subsection{Detectors Under Study}
+% Spec §3. Mesmo front-end XLS-R CONGELADO nos dois; nada no XLS-R é retreinado.
+%  - D_zs (zero-shot): XLS-R + cabeça original do checkpoint
+%    (nii-yamagishilab/mms-300m-anti-deepfake), aplicado direto ao pt-BR.
+%  - D_ad (adaptado leve): XLS-R congelado + cabeça de REGRESSÃO LOGÍSTICA
+%    treinada sobre embeddings (pooling temporal médio -> vetor de 1024) em pt-BR.
+%    1 áudio -> 1 vetor -> 1 score P(spoof) calibrado (sem série temporal).
+% Pré-condição (spec §3): o contraste "antes/depois" só vale se D_ad melhorar o
+% EER frente a D_zs; isso é verificado ANTES de qualquer análise (ver §Results).
 TODO.
 
-\subsection{Model}
-% front-end SSL wav2vec 2.0 / XLS-R + back-end (pooling global + linear),
-% checkpoint pré-treinado (nii-yamagishilab/mms-300m-anti-deepfake), sem
-% fine-tuning -- deixar claro que é zero-shot cross-lingual (treinado
-% majoritariamente em inglês/ASVspoof, aplicado direto em pt-BR)
+\subsection{Pre-processing}
+% Spec §5 (fidelidade). mono -> resample 16 kHz -> janela fixa de 64.600
+% amostras (~4.04 s) -> normalização (Tak et al., 2022). Crítico: os MFCCs são
+% extraídos do sinal EXATAMENTE pré-processado que entra no detector, não do
+% áudio bruto (o layer_norm neutraliza energia -> afeta o MFCC 0).
+TODO.
+
+\subsection{Acoustic Features (MFCC)}
+% Spec §5. 13 MFCCs, janelas de 25 ms; colapso temporal por média + desvio
+% -> 26 features por áudio. Explicar por que 26 (13 médias + 13 desvios).
+TODO.
+
+\subsection{Spine 1 --- Surrogate + SHAP}
+% Spec §6. Para cada detector (D_zs, D_ad):
+%  1) treinar um surrogate de regressão (árvore com boosting -> TreeSHAP) para
+%     imitar o score contínuo P(spoof) a partir dos 26 MFCCs;
+%  2) reportar FIDELIDADE do surrogate (R^2 e correlação de posto num held-out)
+%     -- fidelidade baixa é ela mesma um achado;
+%  3) SHAP (global + por instância) -> importância acústica por MFCC;
+%  4) comparar os mapas D_zs vs. D_ad.
+% Deixar explícito (spec §6): a CABEÇA de D_ad (linear) != o SURROGATE (árvore).
+TODO.
+
+\subsection{Spine 2 --- Spectral Causal Occlusion}
+% Spec §7. Banco de bandas espaçadas em mel aplicadas como filtro band-stop
+% sobre a forma de onda (evita inversão mel->áudio, lossy). Oclui-se uma banda
+% por vez, passa-se pelo PRÓPRIO detector e mede-se a queda de P(spoof)
+% (baseline = áudio íntegro). Subconjunto estratificado por quadrante.
+% Evidência intervencionista sobre a caixa-preta (validade convergente com a
+% Espinha 1, que é associativa) -- eixos diferentes: bandas de frequência vs.
+% coeficientes MFCC.
+% NOTA de implementação (do notebook): o áudio é reamostrado para 16 kHz ANTES
+% do band-stop, garantindo band edges < Nyquist (8 kHz).
+TODO.
+
+\subsection{Confirmatory Statistics}
+% Spec §8. Em vez de 26 testes-T soltos (pescaria), os testes clássicos rodam
+% APENAS nos poucos MFCCs destacados pelo SHAP, com correção FDR
+% (Benjamini-Hochberg):
+%  - Welch (diferença de média) e Levene/Brown-Forsythe (diferença de variância)
+%    entre quadrantes relevantes (VN vs. FP; VP vs. FN);
+%  - Spearman entre MFCC e P(spoof) INTRA-classe (evita correlação espúria).
 TODO.
 
 % ==============================================================================
 \section{Experimental Setup}
-% Notebook, seção 4 (dados) + CFG. Vira uma tabela de configuração.
+% Spec §4 (dados/splits) + §9 (config). Vira tabela + prosa.
 \begin{table}[t]
   \caption{Experimental configuration.}
   \label{tab:config}
@@ -103,47 +183,107 @@ TODO.
     \midrule
     Sample rate & 16{,}000 Hz \\
     Fixed window & 64{,}600 samples ($\approx$4.04 s) \\
+    Front-end & wav2vec 2.0 / XLS-R (frozen) \\
     Checkpoint & \texttt{nii-yamagishilab/mms-300m-anti-deepfake} \\
-    Dataset & AKCIT-Deepfake/BRSpeech-DF (test split) \\
-    Samples per class & 200 (balanced) \\
+    Adaptation head ($D_\mathrm{ad}$) & logistic regression on 1024-d embeddings \\
+    Surrogate model & boosted trees $\rightarrow$ TreeSHAP \\
+    MFCC features & 13 coeff.\ $\times$ (mean, std) $=$ 26 \\
+    Dataset & \texttt{AKCIT-Deepfake/BRSpeech-DF} \\
+    Train per class ($D_\mathrm{ad}$ head) & 1{,}500 (balanced) \\
+    Analysis set per class (test) & 1{,}500 (balanced) \\
+    Positive class & spoof \\
     Seed & 42 \\
     \bottomrule
   \end{tabular}
 \end{table}
-TODO: descrever o BRSpeech-DF (tamanho, origem, como o rótulo bonafide/spoof
-é resolvido), hardware usado, e re-confirmar que a versão final rodou no
-ambiente único definido (ver pendência nas instruções do projeto).
+% TODO (prosa): descrever o BRSpeech-DF (origem, escala, configs bonafide/spoof),
+% como o rótulo é resolvido (bonafide=0, spoof=1), higiene contra vazamento
+% (train para a cabeça de D_ad; test SÓ para análise), hardware (GPU A100) e o
+% ambiente Docker reprodutível. Reportar os tamanhos dos 4 quadrantes (TP/TN/FP/FN)
+% e ressalvar poder estatístico se FP/FN ficarem pequenos (spec §4, §11).
+
+% Schema da Tabela Mestra (spec §14) -- uma linha por áudio, colunas por detector.
+\begin{table}[t]
+  \caption{Master table schema (one row per audio clip; \texttt{\_zs} = zero-shot,
+  \texttt{\_ad} = adapted).}
+  \label{tab:master}
+  \begin{tabular}{ll}
+    \toprule
+    Column & Description \\
+    \midrule
+    \texttt{sample\_id} & unique clip identifier \\
+    \texttt{ground\_truth} & 0 = bonafide, 1 = spoof \\
+    \texttt{spoof\_algorithm} & generator/attack (null if absent) \\
+    \texttt{p\_spoof\_\{zs,ad\}} & continuous $P(\mathrm{spoof})$ per detector \\
+    \texttt{pred\_\{zs,ad\}} & decision at EER threshold \\
+    \texttt{quadrant\_\{zs,ad\}} & TP / TN / FP / FN \\
+    \texttt{mfcc\{i\}\_mean} & mean of $i$-th MFCC ($i=1..13$) \\
+    \texttt{mfcc\{i\}\_std} & std of $i$-th MFCC ($i=1..13$) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 % ==============================================================================
 \section{Results}
-% Notebook, seções 5-7 (inferência, métricas, robustez)
-\subsection{Zero-Shot Performance}
-% Tabela EER / MCC / Acurácia no áudio íntegro + matriz de confusão
-TODO.
-
-\subsection{Robustness Under Real-World Degradations}
-% Tabela/gráfico comparando áudio íntegro vs. ruído gaussiano vs. MP3 vs. G.711
+% Spec §9 passos 3-4 + §10.
+\subsection{Zero-Shot vs.\ Adapted Performance}
+% Pré-check obrigatório (spec §3): tabela performance_table com colunas
+% detector / eer / mcc / accuracy / surrogate_r2 para D_zs e D_ad no conjunto
+% de análise. Confirmar se D_ad melhora o EER (condição para o contraste).
+% Figura: DET/ROC com o ponto de EER marcado + matriz de confusão normalizada.
+\begin{table}[t]
+  \caption{Detection performance and surrogate fidelity
+  (\texttt{performance\_table}).}
+  \label{tab:performance}
+  \begin{tabular}{lcccc}
+    \toprule
+    Detector & EER & MCC & Accuracy & Surrogate $R^2$ \\
+    \midrule
+    $D_\mathrm{zs}$ (zero-shot) & TODO & TODO & TODO & TODO \\
+    $D_\mathrm{ad}$ (adapted)   & TODO & TODO & TODO & TODO \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 TODO.
 
 % ==============================================================================
-\section{Explainability}
-% Notebook, seções 8-9 (GATR + oclusão)
-\subsection{GATR: Time-Domain Relevancy}
+\section{Explainability Analysis}
+% Spec §§6-8. Núcleo do paper: como as pistas acústicas mudam de D_zs para D_ad.
+
+\subsection{Acoustic Importance via SHAP}
+% Spec §6. Figura comparativa (beeswarm global + barra de importância média)
+% para D_zs vs. D_ad a partir de shap_importance (detector, feature,
+% mean_abs_shap). Linguagem ASSOCIATIVA ("está associado a"), spec §11.
 TODO.
 
-\subsection{Occlusion Analysis: Speech vs.\ Silence}
-% inclui o achado da agregação via VAD (fala vs. silêncio)
+\subsection{Spectral Occlusion Profiles}
+% Spec §7. Figura: queda de P(spoof) por banda de frequência (com faixa de IC),
+% comparando D_zs vs. D_ad, a partir de occlusion_table (detector, band_hz_low,
+% band_hz_high, mean_p_spoof_drop). Linguagem CAUSAL ("ocluir a banda X derruba
+% P(spoof)"), spec §11.
+TODO.
+
+\subsection{Confirmatory Tests}
+% Spec §8. Tabela confirmatory_tests (detector, feature, test, statistic,
+% p_value, q_value_fdr) nos top-MFCCs do SHAP; boxplot/violino dos MFCCs
+% destacados por quadrante.
 TODO.
 
 % ==============================================================================
 \section{Discussion and Limitations}
-% janela fixa de 4s, tamanho de amostra (n_per_class=200 -- variância do EER),
-% generalização (um único checkpoint, um único dataset pt-BR), decisão sobre
-% incluir ou não W2V2-AASIST como baseline
+% Spec §11 (riscos, limitações, calibração de linguagem):
+%  - não misturar registro associativo (Espinha 1) e causal (Espinha 2);
+%  - interpretação MFCC->fonema é frouxa (usar como pista, não prova);
+%  - quadrantes raros (FP/FN) com N baixo -> ressalvar poder;
+%  - adaptação insuficiente: se D_ad não superar D_zs, o contraste perde força;
+%  - janela fixa de ~4 s; um único checkpoint e um único dataset pt-BR.
 TODO.
 
 % ==============================================================================
 \section{Conclusion and Future Work}
+% Síntese (spec §9 passo 9) + extensões opcionais (spec §12):
+%  - análise por algoritmo gerador (coluna 'model' do config spoof -> ANOVA);
+%  - correlação embedding<->MFCC (análise representacional).
 TODO.
 
 % ==============================================================================
