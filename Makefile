@@ -1,7 +1,7 @@
 # Atalhos para o modulo Docker (ver docker/README.md).
 # Pre-requisitos no host: driver NVIDIA (CUDA 13.0) + nvidia-container-toolkit.
 
-IMAGE   ?= brspeech-deepfake:cu130
+IMAGE   ?= brspeech-deepfake:cu126
 COMPOSE ?= docker compose
 SERVICE ?= deepfake
 

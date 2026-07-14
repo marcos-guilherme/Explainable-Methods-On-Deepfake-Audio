@@ -1,5 +1,5 @@
 # Orquestracao do servico de deteccao de deepfake em GPU.
-# Requer, no host: driver NVIDIA (CUDA 13.0) + nvidia-container-toolkit.
+# Requer, no host: driver NVIDIA (CUDA >= 12.6, ex.: r550) + nvidia-container-toolkit.
 #
 # Uso rapido (ver Makefile / docker/README.md):
 #   docker compose build
@@ -10,7 +10,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    image: brspeech-deepfake:cu130
+    image: brspeech-deepfake:cu126
     # .env e OPCIONAL: sem ele a imagem funciona (acesso HF publico).
     env_file:
       - path: docker/.env
