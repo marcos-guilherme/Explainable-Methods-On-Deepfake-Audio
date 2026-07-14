@@ -2,6 +2,7 @@
 # Entrypoint da imagem: despacha entre os modos de uso.
 #   jupyter (default) -> Jupyter Lab em 0.0.0.0:8888
 #   run               -> executa um notebook de ponta a ponta via papermill
+#   run-scripts       -> executa o pipeline em estagios (brspeech_xai.cli) com um YAML
 #   bash | shell      -> shell interativo
 #   <qualquer coisa>  -> executa o comando arbitrario (ex.: python -c "...")
 set -euo pipefail
@@ -52,6 +53,14 @@ case "${MODE}" in
             --cwd "${OUT_DIR}" \
             --log-output \
             "$@"
+        ;;
+
+    run-scripts)
+        # Pipeline em estagios (pacote brspeech_xai). Primeiro arg = YAML de config.
+        CONFIG="${1:-/workspace/scripts/configs/default.yaml}"
+        if [[ $# -gt 0 ]]; then shift; fi
+        echo ">> Pipeline (scripts): config=${CONFIG}"
+        exec python -m brspeech_xai.cli --config "${CONFIG}" "$@"
         ;;
 
     bash|shell)
