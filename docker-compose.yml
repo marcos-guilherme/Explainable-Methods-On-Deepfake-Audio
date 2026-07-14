@@ -1,0 +1,37 @@
+# Orquestracao do servico de deteccao de deepfake em GPU.
+# Requer, no host: driver NVIDIA (CUDA 13.0) + nvidia-container-toolkit.
+#
+# Uso rapido (ver Makefile / docker/README.md):
+#   docker compose build
+#   docker compose up deepfake            # Jupyter Lab em :8888
+#   docker compose run --rm deepfake run  # execucao headless (papermill)
+services:
+  deepfake:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: brspeech-deepfake:cu130
+    # .env e OPCIONAL: sem ele a imagem funciona (acesso HF publico).
+    env_file:
+      - path: docker/.env
+        required: false
+    environment:
+      HF_HOME: /workspace/.hf-cache
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./results:/workspace/results          # resultados persistem no host
+      - ./notebooks:/workspace/notebooks       # edicoes ao vivo (dev interativo)
+      - hf-cache:/workspace/.hf-cache           # cache de modelo/dataset entre runs
+    shm_size: "8gb"                             # folga para dataloaders/torch
+    # Reserva de GPU (docker compose v2 + nvidia-container-toolkit).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

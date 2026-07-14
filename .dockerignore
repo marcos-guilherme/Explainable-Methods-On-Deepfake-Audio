@@ -1,0 +1,26 @@
+# Mantem o build context enxuto. A imagem so precisa de requirements.txt,
+# notebooks/ e docker/entrypoint.sh.
+.git
+.gitignore
+.github
+
+# Documentacao e artigo (nao vao para a imagem)
+docs
+escrita
+
+# Saidas e caches gerados
+results
+**/.hf-cache
+**/__pycache__
+**/*.pyc
+**/.ipynb_checkpoints
+.venv
+venv
+env
+
+# Segredos e ambientes locais
+.env
+docker/.env
+
+# Ferramentas de terminal/estado do editor
+terminals

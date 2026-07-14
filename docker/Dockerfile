@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.7
+#
+# Imagem autossuficiente para rodar os notebooks de deteccao de deepfake (XLS-R + fairseq)
+# em GPU. Todas as dependencias sao instaladas no build; nao ha nenhum passo de instalacao
+# por fora. A GPU e fornecida pelo host via nvidia-container-toolkit (docker run --gpus all).
+# Os wheels do PyTorch cu130 ja trazem as libs CUDA, entao a base pode ser uma imagem Python.
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    IN_DOCKER=1 \
+    HF_HOME=/workspace/.hf-cache \
+    HF_HUB_DISABLE_TELEMETRY=1
+
+# Dependencias de sistema:
+#   build-essential + git : compilar o fairseq 0.12.2 (extensoes Cython/C++)
+#   ffmpeg                : usado pelo pydub (degradacao MP3 no notebook zero-shot)
+#   libsndfile1           : backend do soundfile para decodificar audio
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        ffmpeg \
+        libsndfile1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Copia so o requirements primeiro, para aproveitar o cache de camadas do Docker.
+COPY requirements.txt /workspace/requirements.txt
+
+# Instalacao em ordem controlada (o par torch cu130 + fairseq 0.12.2 e a parte fragil).
+# 1) pip<24.1: os wheels do omegaconf 2.0.6 (dep do fairseq) tem metadata legada que o
+#    resolvedor do pip>=24.1 recusa (ResolutionImpossible).
+RUN python -m pip install --upgrade "pip<24.1" "setuptools<70" wheel
+
+# 2) torch/torchaudio do indice cu130 (nao resolvivel a partir do PyPI puro).
+RUN pip install \
+        torch==2.13.0 \
+        torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu130
+
+# 3) build-deps do fairseq, com numpy<2 JA presente (o fairseq nao compila com numpy>=2).
+RUN pip install \
+        numpy==1.26.4 \
+        Cython==3.2.8 \
+        omegaconf==2.0.6 \
+        hydra-core==1.0.7
+
+# 4) fairseq sem build-isolation, reaproveitando numpy/cython/torch ja instalados.
+RUN pip install --no-build-isolation fairseq==0.12.2
+
+# 5) restante das versoes pinadas + o stack de execucao dos notebooks (nao esta no
+#    requirements.txt: jupyterlab para o modo interativo, papermill para o headless,
+#    ipywidgets para as barras de progresso do tqdm no Lab).
+RUN pip install -r requirements.txt \
+    && pip install "jupyterlab>=4,<5" "papermill>=2,<3" "ipywidgets>=8,<9" \
+    && python -m ipykernel install --name python3 --display-name "Python 3"
+
+# Copia o codigo por ultimo (muda mais que as dependencias). A imagem roda sozinha,
+# sem depender de bind-mount do repositorio.
+COPY notebooks/ /workspace/notebooks/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+    && mkdir -p /workspace/results /workspace/.hf-cache
+
+EXPOSE 8888
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["jupyter"]
