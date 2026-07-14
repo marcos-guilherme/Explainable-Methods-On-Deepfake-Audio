@@ -21,12 +21,14 @@ services:
       # Desabilitar o Xet ("1") cai no fallback HTTP do "xet-bridge", que devolve 403
       # (assinatura invalida) em alguns mirrors. O cliente Xet nativo baixa normalmente.
       HF_HUB_DISABLE_XET: "0"
+      PYTHONPATH: /workspace/scripts
     ports:
       - "8888:8888"
     volumes:
       - ./results:/workspace/results          # resultados persistem no host
       - ./notebooks:/workspace/notebooks       # edicoes ao vivo (dev interativo)
       - hf-cache:/workspace/.hf-cache           # cache de modelo/dataset entre runs
+      - ./scripts:/workspace/scripts            # pacote brspeech_xai (dev interativo)
     shm_size: "8gb"                             # folga para dataloaders/torch
     # Reserva de GPU (docker compose v2 + nvidia-container-toolkit).
     deploy:

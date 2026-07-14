@@ -73,6 +73,7 @@ RUN grep -ivE '^(fairseq|torch|torchaudio)==' requirements.txt > /tmp/req.frozen
     && pip install --no-deps -r /tmp/req.frozen.txt \
     && pip install -c requirements.txt slicer numba cloudpickle \
     && pip install -c requirements.txt "jupyterlab>=4,<5" "papermill>=2,<3" "ipywidgets>=8,<9" \
+                                       "pytest>=8,<9" "pyyaml>=6,<7" \
     && python -m ipykernel install --name python3 --display-name "Python 3"
 
 # Copia o codigo por ultimo (muda mais que as dependencias). A imagem roda sozinha,
