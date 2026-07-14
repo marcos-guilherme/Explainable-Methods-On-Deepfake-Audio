@@ -17,6 +17,10 @@ services:
         required: false
     environment:
       HF_HOME: /workspace/.hf-cache
+      # Xet HABILITADO de proposito: os parquet do BRSpeech-DF sao servidos apenas via Xet.
+      # Desabilitar o Xet ("1") cai no fallback HTTP do "xet-bridge", que devolve 403
+      # (assinatura invalida) em alguns mirrors. O cliente Xet nativo baixa normalmente.
+      HF_HUB_DISABLE_XET: "0"
     ports:
       - "8888:8888"
     volumes:
