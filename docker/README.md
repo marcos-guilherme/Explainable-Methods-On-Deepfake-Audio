@@ -78,7 +78,11 @@ dataset não são re-baixados a cada execução.
   `torch cu130` já trazem as libs CUDA.
 - Ordem de instalação pensada para o `fairseq 0.12.2` (parte frágil): `pip<24.1` →
   `torch/torchaudio` (índice cu130) → `numpy<2 + cython + omegaconf + hydra` →
-  `fairseq --no-build-isolation` → `requirements.txt` + `jupyterlab`/`papermill`.
+  `fairseq` (do **git**, tag `v0.12.2`, `--no-build-isolation`) → `requirements.txt` +
+  `jupyterlab`/`papermill`.
+- O fairseq é instalado do GitHub (não do PyPI) porque o *sdist* do `0.12.2` no PyPI
+  omite `fairseq/clib/libbase/balanced_assignment.cpp`, quebrando a compilação com
+  `No such file or directory`. A tag `v0.12.2` do repositório tem o arquivo.
 - `IN_DOCKER=1` faz os notebooks pularem a célula de `%pip` automaticamente.
 
 ## Solução de problemas
@@ -87,5 +91,10 @@ dataset não são re-baixados a cada execução.
   `nvidia-container-toolkit` e se está usando `--gpus all` (ou o serviço do compose).
 - **Driver não suporta CUDA 13.0**: atualize o driver, ou troque as versões de
   `torch`/`torchaudio` (e o índice cu1xx) no `Dockerfile` para uma CUDA compatível com o host.
-- **Falha ao compilar o `fairseq`**: como fallback, troque a base do `Dockerfile` por
-  `nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04` (traz toolchain completa) e reinstale o Python.
+- **`fairseq`: `balanced_assignment.cpp: No such file or directory`**: bug do *sdist*
+  do PyPI. Já contornado instalando do git (tag `v0.12.2`) no `Dockerfile`.
+- **`fairseq`: erro de compilação C++ contra o `torch 2.13`**: se aparecer erro de
+  compilação (e não mais "No such file"), o toolchain pode não bater com o torch novo.
+  Fallbacks: (a) trocar a base por `nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04` e
+  reinstalar o Python; ou (b) fixar o ref do fairseq no commit/fork exato usado quando
+  o `requirements.txt` foi gerado.

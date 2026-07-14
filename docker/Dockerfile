@@ -49,8 +49,12 @@ RUN pip install \
         omegaconf==2.0.6 \
         hydra-core==1.0.7
 
-# 4) fairseq sem build-isolation, reaproveitando numpy/cython/torch ja instalados.
-RUN pip install --no-build-isolation fairseq==0.12.2
+# 4) fairseq a partir do git na tag v0.12.2, sem build-isolation (reaproveita
+#    numpy/cython/torch ja instalados). O sdist do fairseq==0.12.2 no PyPI omite
+#    fairseq/clib/libbase/balanced_assignment.cpp, o que quebra a compilacao da
+#    extensao libbase ("No such file or directory"); o repositorio git tem o arquivo.
+RUN pip install --no-build-isolation \
+        "fairseq @ git+https://github.com/facebookresearch/fairseq.git@v0.12.2"
 
 # 5) restante das versoes pinadas + o stack de execucao dos notebooks (nao esta no
 #    requirements.txt: jupyterlab para o modo interativo, papermill para o headless,
