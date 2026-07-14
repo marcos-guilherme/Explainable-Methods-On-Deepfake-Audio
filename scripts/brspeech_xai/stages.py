@@ -62,20 +62,25 @@ def stage_embeddings(ctx: RunContext) -> None:
 
 def stage_adapt(ctx: RunContext) -> None:
     from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
     cfg, p = ctx.cfg, ctx.paths
     samples = A.load_table(p.path("samples.parquet"))
     y_train = samples.loc[samples.split == cfg.data.train_split, "label"].to_numpy()
     y_test = samples.loc[samples.split == cfg.data.eval_split, "label"].to_numpy()
     emb_train = A.load_npy(p.path(f"emb_{cfg.data.train_split}.npy"))
     emb_test = A.load_npy(p.path(f"emb_{cfg.data.eval_split}.npy"))
-    logreg = LogisticRegression(max_iter=1000).fit(emb_train, y_train)
-    joblib.dump(logreg, p.path("d_ad.joblib"))
+    # Cabeça adaptada: padroniza + regressão logística (P(spoof) calibrado), igual ao notebook.
+    ad_head = make_pipeline(StandardScaler(),
+                            LogisticRegression(max_iter=2000, C=1.0, random_state=cfg.seed))
+    ad_head.fit(emb_train, y_train)
+    joblib.dump(ad_head, p.path("d_ad.joblib"))
     # pré-check de EER: D_zs vs D_ad no test
     det = ctx.get_detector()
     audios = list(np.load(p.path(f"audios_{cfg.data.eval_split}.npy"), allow_pickle=True))
     srs = [int(s) for s in np.load(p.path(f"srs_{cfg.data.eval_split}.npy"))]
     p_zs = np.array(score_audios(det, audios, srs))
-    p_ad = logreg.predict_proba(emb_test)[:, SPOOF_LABEL]
+    p_ad = ad_head.predict_proba(emb_test)[:, SPOOF_LABEL]
     eer_zs, _ = compute_eer(p_zs, y_test)
     eer_ad, _ = compute_eer(p_ad, y_test)
     A.save_json({"eer_zs": float(eer_zs), "eer_ad": float(eer_ad),
