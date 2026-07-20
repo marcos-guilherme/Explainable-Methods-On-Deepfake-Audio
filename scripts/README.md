@@ -44,7 +44,7 @@ hash da config) e produz artefatos consumidos pelos estágios seguintes:
 | 3 | `adapt`        | `d_ad.joblib`, `eer_precheck.json`, `p_spoof_zs.npy`, `p_spoof_ad.npy`   |
 | 4 | `master_mfcc`  | `master_table.parquet` (P(spoof), predições, quadrantes, 26 MFCCs)       |
 | 5 | `shap`         | `surrogate_{zs,ad}.joblib`, `shap_importance.csv`, figura SHAP           |
-| 6 | `occlusion`    | `occlusion_table.csv`, figura de bandas                                  |
+| 6 | `occlusion`    | `occlusion_table.csv` (queda média + IC 95% bootstrap por banda), figura divergente |
 | 7 | `confirmatory` | `confirmatory_tests.csv` (Welch/Levene + FDR nas top-SHAP)               |
 | 8 | `report`       | `performance_table.csv`, `run_manifest.json`                             |
 

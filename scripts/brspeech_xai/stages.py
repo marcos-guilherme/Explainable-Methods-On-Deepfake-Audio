@@ -13,7 +13,7 @@ from .data import SPOOF_LABEL, build_balanced_split
 from .features import MFCC_COLS, mfcc_features
 from .inference import extract_embeddings, make_p_spoof_ad, score_audios
 from .metrics import compute_eer, quadrant
-from .occlusion import mel_band_edges, occlusion_drop, stratified_idx, to_16k_mono
+from .occlusion import bootstrap_ci, mel_band_edges, occlusion_drop, stratified_idx, to_16k_mono
 from .stats import confirmatory_tests
 from .surrogate import fit_surrogate, shap_importance
 
@@ -115,11 +115,15 @@ def stage_shap(ctx: RunContext) -> None:
     p = ctx.paths
     master = A.load_table(p.path("master_table.parquet"))
     X = master[FEATURE_NAMES]
+    cfg = ctx.cfg
     parts = []
     for tag, col in [("zs", "p_spoof_zs"), ("ad", "p_spoof_ad")]:
-        surr, fid = fit_surrogate(X, master[col].to_numpy(), seed=ctx.cfg.seed)
+        surr, fid = fit_surrogate(X, master[col].to_numpy(), seed=cfg.seed,
+                                  n_estimators=cfg.shap.n_estimators,
+                                  max_depth=cfg.shap.max_depth)
         joblib.dump({"surrogate": surr, "fidelity": fid}, p.path(f"surrogate_{tag}.joblib"))
-        parts.append(shap_importance(surr, X, tag))
+        parts.append(shap_importance(surr, X, tag, max_samples=cfg.shap.max_samples,
+                                     seed=cfg.seed))
     imp = pd.concat(parts, ignore_index=True)
     A.save_table(imp, p.path("shap_importance.csv"))
     if _plots_on(ctx):
@@ -144,19 +148,22 @@ def stage_occlusion(ctx: RunContext) -> None:
         # A oclusão sempre filtra a 16 kHz (bordas < Nyquist para qualquer sr nativo).
         sub_audios = [to_16k_mono(audios[i], srs[i]) for i in idx]
         sub_srs = [16000] * len(sub_audios)
-        drops = occlusion_drop(fn, sub_audios, sub_srs, edges)  # (n_bands,) de queda média
+        # (n_clips, n_bands): queda por clipe; média + IC 95% por bootstrap sobre os clipes.
+        drops = occlusion_drop(fn, sub_audios, sub_srs, edges)
+        mean_drop = drops.mean(axis=0)
+        ci_low, ci_high = bootstrap_ci(drops, n_boot=cfg.occlusion.n_boot, seed=cfg.seed)
         for bi in range(len(edges) - 1):
             rows.append({"detector": tag, "band_hz_low": float(edges[bi]),
                          "band_hz_high": float(edges[bi + 1]),
-                         "mean_p_spoof_drop": float(drops[bi])})
+                         "mean_p_spoof_drop": float(mean_drop[bi]),
+                         "ci_low": float(ci_low[bi]), "ci_high": float(ci_high[bi]),
+                         "n": int(drops.shape[0])})
     occ = pd.DataFrame(rows)
     A.save_table(occ, p.path("occlusion_table.csv"))
     if _plots_on(ctx):
         from .plotting import plot_occlusion_bands, set_plot_style
         set_plot_style()
-        dz = occ[occ.detector == "zs"]["mean_p_spoof_drop"].to_numpy()
-        da = occ[occ.detector == "ad"]["mean_p_spoof_drop"].to_numpy()
-        plot_occlusion_bands(edges, dz, da, p.path("figures"))
+        plot_occlusion_bands(edges, occ, p.path("figures"))
 
 
 def stage_confirmatory(ctx: RunContext) -> None:

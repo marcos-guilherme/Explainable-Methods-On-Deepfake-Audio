@@ -38,11 +38,15 @@ class OcclusionConfig:
     f_min: float = 20.0
     f_max: float = 7900.0
     per_quadrant: int = 150
+    n_boot: int = 1000             # reamostras do bootstrap para o IC 95% por banda
 
 
 @dataclass
 class ShapConfig:
     top_n: int = 10
+    n_estimators: int = 200        # árvores do surrogate (RandomForest)
+    max_depth: int | None = 12     # profundidade máx.: regulariza e acelera muito o TreeSHAP
+    max_samples: int = 1000        # nº de linhas explicadas pelo SHAP (None = todas)
 
 
 @dataclass

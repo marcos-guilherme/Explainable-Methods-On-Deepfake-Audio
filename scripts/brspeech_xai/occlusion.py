@@ -22,18 +22,47 @@ def bandstop(wav: np.ndarray, low: float, high: float, sr: int = 16000) -> np.nd
 
 
 def occlusion_drop(p_spoof_fn, audios, srs, band_edges) -> np.ndarray:
-    """Queda média de P(spoof) ao ocluir cada banda (baseline = áudio íntegro).
+    """Queda de P(spoof) por clipe ao ocluir cada banda (baseline = áudio íntegro).
+
+    Sinal (mesma convenção do notebook): valor positivo = ocluir a banda derruba
+    P(spoof) (a banda SUSTENTA spoof); negativo = ocluir sobe P(spoof) (a banda
+    empurra para bonafide).
 
     p_spoof_fn: função (audio, sr) -> P(spoof) do detector alvo.
-    Returns: array (n_bands,) de queda média (baseline - ocluído).
+    Returns: matriz (n_clips, n_bands) de quedas por clipe (baseline - ocluído).
+        A média por banda é `drops.mean(axis=0)`; a incerteza vem de `bootstrap_ci`.
     """
     base = np.array([p_spoof_fn(a, sr) for a, sr in zip(audios, srs)])
-    drops = []
+    cols = []
     for lo, hi in zip(band_edges[:-1], band_edges[1:]):
         occ = np.array([p_spoof_fn(bandstop(a.astype(np.float32), lo, hi, sr), sr)
                         for a, sr in zip(audios, srs)])
-        drops.append(float(np.mean(base - occ)))
-    return np.array(drops)
+        cols.append(base - occ)
+    return np.column_stack(cols) if cols else np.empty((len(base), 0))
+
+
+def bootstrap_ci(values: np.ndarray, n_boot: int = 1000, alpha: float = 0.05,
+                 seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+    """IC percentil por bootstrap da MÉDIA, por coluna de uma matriz (n_obs, n_cols).
+
+    Reamostra as observações (linhas) com reposição `n_boot` vezes e devolve os
+    percentis (alpha/2, 1-alpha/2) das médias por coluna.
+
+    Returns: (ci_low, ci_high), cada um array (n_cols,).
+    """
+    values = np.atleast_2d(values)
+    n_obs, n_cols = values.shape
+    if n_obs < 2:
+        m = values.mean(axis=0) if n_obs else np.zeros(n_cols)
+        return m.copy(), m.copy()
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty((n_boot, n_cols), dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n_obs, size=n_obs)
+        boot_means[b] = values[idx].mean(axis=0)
+    lo = np.percentile(boot_means, 100 * (alpha / 2), axis=0)
+    hi = np.percentile(boot_means, 100 * (1 - alpha / 2), axis=0)
+    return lo, hi
 
 
 def stratified_idx(master, quad_col: str, per_quad: int = 150, seed: int = 42) -> np.ndarray:

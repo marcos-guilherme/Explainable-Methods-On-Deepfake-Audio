@@ -89,15 +89,44 @@ def plot_shap_compare(df: pd.DataFrame, figures_dir: str | Path, top_n: int = 10
     return fig
 
 
-def plot_occlusion_bands(edges, drops_zs, drops_ad, figures_dir: str | Path):
-    """Queda de P(spoof) por banda de frequência (D_zs vs D_ad)."""
+SUSTAIN_SPOOF_COLOR = "#d62728"     # queda positiva: ocluir derruba P(spoof)
+SUSTAIN_BONAFIDE_COLOR = "#1f77b4"  # queda negativa: ocluir sobe P(spoof)
+
+
+def _occlusion_panel(ax, centers, mean_drop, ci_low, ci_high, title):
+    """Um painel divergente de oclusão espectral (área com sinal + faixa de IC)."""
+    ax.fill_between(centers, 0, mean_drop, where=mean_drop >= 0, interpolate=True,
+                    color=SUSTAIN_SPOOF_COLOR, alpha=0.45, label="Sustains spoof")
+    ax.fill_between(centers, 0, mean_drop, where=mean_drop < 0, interpolate=True,
+                    color=SUSTAIN_BONAFIDE_COLOR, alpha=0.45, label="Sustains bonafide")
+    ax.fill_between(centers, ci_low, ci_high, color="#333333", alpha=0.15, linewidth=0,
+                    label="95\\% CI")
+    ax.plot(centers, mean_drop, color="#333333", lw=1.0, alpha=0.8)
+    ax.axhline(0, color="grey", ls="--", lw=0.7)
+    max_abs = float(np.max(np.abs(np.concatenate([ci_low, ci_high, mean_drop])))) or 1.0
+    ax.set_ylim(-max_abs * 1.15, max_abs * 1.15)
+    ax.set_ylabel(r"$\Delta$ P(spoof)")
+    ax.set_title(title, fontsize=8, loc="left")
+
+
+def plot_occlusion_bands(edges, occ: pd.DataFrame, figures_dir: str | Path):
+    """Perfil espectral divergente da oclusão por detector (D_zs em cima, D_ad embaixo).
+
+    Área vermelha = banda sustenta spoof (ocluir derruba P(spoof)); azul = sustenta
+    bonafide (ocluir sobe P(spoof)); faixa cinza = IC 95% (bootstrap) da queda média.
+    Espera `occ` com colunas: detector, band_hz_low, band_hz_high, mean_p_spoof_drop,
+    ci_low, ci_high.
+    """
     centers = (edges[:-1] + edges[1:]) / 2
-    fig, ax = plt.subplots(figsize=(COL_WIDTH_SINGLE, 2.6))
-    ax.plot(centers, drops_zs, marker="o", label="D_zs")
-    ax.plot(centers, drops_ad, marker="s", label="D_ad")
-    ax.axhline(0, color="grey", lw=0.5)
-    ax.set_xlabel("Frequency band center (Hz)"); ax.set_ylabel(r"$\Delta$ P(spoof)")
-    ax.legend()
+    labels = {"zs": r"$D_\mathrm{zs}$ (zero-shot)", "ad": r"$D_\mathrm{ad}$ (adapted)"}
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_SINGLE, 4.2))
+    for ax, tag in zip(axes, ["zs", "ad"]):
+        sub = occ[occ.detector == tag].sort_values("band_hz_low")
+        _occlusion_panel(ax, centers, sub["mean_p_spoof_drop"].to_numpy(),
+                         sub["ci_low"].to_numpy(), sub["ci_high"].to_numpy(),
+                         labels.get(tag, tag))
+    axes[0].legend(loc="upper right", fontsize=7)
+    axes[-1].set_xlabel("Frequency band center (Hz)")
     fig.tight_layout()
     save_fig(fig, "occlusion_bands_zs_vs_ad", figures_dir)
     return fig

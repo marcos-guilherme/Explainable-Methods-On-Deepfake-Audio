@@ -20,9 +20,25 @@ def test_fit_surrogate_reports_fidelity():
     assert -1.0 <= fid["r2"] <= 1.0
 
 
+def test_fit_surrogate_respects_max_depth():
+    X, target = _toy_frame()
+    surr, _ = fit_surrogate(X, target, n_estimators=20, max_depth=4)
+    assert surr.n_estimators == 20
+    assert all(est.get_depth() <= 4 for est in surr.estimators_)
+
+
 def test_shap_importance_shape():
     X, target = _toy_frame()
     surr, _ = fit_surrogate(X, target)
     imp = shap_importance(surr, X, "zs")
     assert set(["detector", "feature", "mean_abs_shap"]).issubset(imp.columns)
     assert len(imp) == 26
+
+
+def test_shap_importance_subsamples_rows():
+    # 26 features de importância independem de quantas linhas foram explicadas.
+    X, target = _toy_frame(n=300)
+    surr, _ = fit_surrogate(X, target, n_estimators=20, max_depth=4)
+    imp_full = shap_importance(surr, X, "zs", max_samples=None)
+    imp_sub = shap_importance(surr, X, "zs", max_samples=50)
+    assert len(imp_full) == 26 and len(imp_sub) == 26
