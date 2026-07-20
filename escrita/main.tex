@@ -93,6 +93,47 @@ spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R, Brazilian Portugues
 %      (iv) tabelas/figuras reprodutíveis (código e seeds fixas).
 TODO.
 
+% --- Research questions and hypotheses ------------------------------------
+% Registro de linguagem (spec §11, decisão do autor): H1 e H2 são reportadas de
+% forma DESCRITIVA (sem alegação de significância); apenas H3 é INFERENCIAL
+% (teste formal + FDR). H2 é a única que admite linguagem causal (intervenção
+% no áudio); H1 permanece associativa.
+We frame the study around one research question: \emph{which acoustic cues does
+the detector rely on, and how do these cues shift after a light adaptation to
+Brazilian Portuguese?} We evaluate two detectors sharing a frozen XLS-R
+front-end: a zero-shot detector ($D_{\mathrm{zs}}$) and a lightly adapted one
+($D_{\mathrm{ad}}$).
+
+Two conditions must hold for the comparison to be meaningful. First, adaptation
+must improve detection: we require $\mathrm{EER}(D_{\mathrm{ad}}) <
+\mathrm{EER}(D_{\mathrm{zs}})$ before any cue analysis; otherwise the
+``before/after'' contrast is reported as \emph{insufficient adaptation}.
+Second, the acoustic surrogate must be faithful: SHAP-based cue attributions are
+interpreted only where the MFCC surrogate reproduces the detector score with
+high fidelity ($R^2$ and rank correlation on a held-out split); low fidelity is
+itself reported as a finding.
+
+We investigate three hypotheses:
+\begin{itemize}
+  \item \textbf{H1 (associative cue shift).} The acoustic-importance profile
+        over MFCC features differs between $D_{\mathrm{zs}}$ and
+        $D_{\mathrm{ad}}$. We assess H1 \emph{descriptively}, by comparing
+        per-feature SHAP importances; we make no significance claim here.
+  \item \textbf{H2 (causal spectral shift).} The frequency bands whose occlusion
+        reduces $P(\mathrm{spoof})$ differ between $D_{\mathrm{zs}}$ and
+        $D_{\mathrm{ad}}$. Because occlusion is an intervention on the input, we
+        report the resulting causal profiles \emph{with quantified uncertainty}
+        (95\% bootstrap confidence intervals on the per-band mean drop): a band
+        whose interval excludes zero exerts a reliable causal effect on the
+        score. We stop short of a formal significance test across detectors.
+  \item \textbf{H3 (error-linked acoustic differences).} For the MFCC features
+        most salient under SHAP, distributions differ across decision quadrants:
+        in mean between true-negative and false-positive clips (Welch's
+        $t$-test) and in variance between true-positive and false-negative clips
+        (Levene's test). H3 is tested \emph{inferentially}, controlling the
+        false discovery rate (Benjamini--Hochberg, $q<0.05$).
+\end{itemize}
+
 % ==============================================================================
 \section{Related Work}
 % Os papers-base (ver references.bib) reposicionados para o eixo de
@@ -251,19 +292,28 @@ TODO.
 % Spec §§6-8. Núcleo do paper: como as pistas acústicas mudam de D_zs para D_ad.
 
 \subsection{Acoustic Importance via SHAP}
+% Testa H1 (deslocamento associativo). Registro DESCRITIVO: comparar os perfis
+% de mean_abs_shap entre D_zs e D_ad; NÃO usar "significant/significantly".
 % Spec §6. Figura comparativa (beeswarm global + barra de importância média)
 % para D_zs vs. D_ad a partir de shap_importance (detector, feature,
 % mean_abs_shap). Linguagem ASSOCIATIVA ("está associado a"), spec §11.
 TODO.
 
 \subsection{Spectral Occlusion Profiles}
-% Spec §7. Figura: queda de P(spoof) por banda de frequência (com faixa de IC),
-% comparando D_zs vs. D_ad, a partir de occlusion_table (detector, band_hz_low,
-% band_hz_high, mean_p_spoof_drop). Linguagem CAUSAL ("ocluir a banda X derruba
-% P(spoof)"), spec §11.
+% Testa H2 (deslocamento causal). Incerteza QUANTIFICADA (IC 95% bootstrap por
+% banda): "banda cujo IC exclui zero tem efeito causal confiável"; sem teste de
+% significância formal entre detectores. Linguagem CAUSAL para o efeito da
+% intervenção ("ocluir a banda X derruba P(spoof)").
+% Figura occlusion_bands_zs_vs_ad: perfil DIVERGENTE por detector (paineis
+% empilhados D_zs/D_ad) -- area vermelha = banda sustenta spoof (ocluir derruba
+% P(spoof)); azul = sustenta bonafide (ocluir sobe P(spoof)); faixa cinza = IC 95%.
+% Tabela occlusion_table: detector, band_hz_low, band_hz_high, mean_p_spoof_drop,
+% ci_low, ci_high, n.
 TODO.
 
 \subsection{Confirmatory Tests}
+% Testa H3 (diferenças acústicas ligadas ao erro). Registro INFERENCIAL: esta é
+% a única análise onde cabe "significant after FDR correction (q < 0.05)".
 % Spec §8. Tabela confirmatory_tests (detector, feature, test, statistic,
 % p_value, q_value_fdr) nos top-MFCCs do SHAP; boxplot/violino dos MFCCs
 % destacados por quadrante.
