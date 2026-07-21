@@ -231,3 +231,5 @@ __marimo__/
 *.synctex.gz
 *.toc
 *.xdv
+
+results/

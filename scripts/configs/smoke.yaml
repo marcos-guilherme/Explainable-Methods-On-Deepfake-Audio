@@ -21,8 +21,5 @@ occlusion:
   f_max: 7900.0
   per_quadrant: 5
   n_boot: 100
-shap:
+association:
   top_n: 5
-  n_estimators: 50
-  max_depth: 8
-  max_samples: 200

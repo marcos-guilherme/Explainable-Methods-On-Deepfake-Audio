@@ -16,7 +16,7 @@ data:
 audio: {sample_rate: 16000, num_samples: 64600}
 model: {checkpoint: nii-yamagishilab/mms-300m-anti-deepfake, spoof_index: 0}
 occlusion: {n_bands: 8, f_min: 20.0, f_max: 7900.0, per_quadrant: 150}
-shap: {top_n: 10}
+association: {top_n: 10}
 output_dir: results
 """
     cfg_file = tmp_path / "c.yaml"

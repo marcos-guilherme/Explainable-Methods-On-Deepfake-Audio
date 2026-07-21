@@ -9,7 +9,7 @@ STAGES = [
     ("embeddings", S.stage_embeddings),
     ("adapt", S.stage_adapt),
     ("master_mfcc", S.stage_master_mfcc),
-    ("shap", S.stage_shap),
+    ("association", S.stage_association),
     ("occlusion", S.stage_occlusion),
     ("confirmatory", S.stage_confirmatory),
     ("report", S.stage_report),

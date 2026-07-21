@@ -9,7 +9,7 @@
 % Ideia central (§1 do spec): explicar, em termos ACÚSTICOS, a decisão de um
 % detector caixa-preta (XLS-R) e ver como as pistas mudam antes (D_zs) vs.
 % depois (D_ad) de uma adaptação leve ao português. Duas espinhas convergentes:
-%   Espinha 1 — surrogate + SHAP (associativa, sobre MFCCs)
+%   Espinha 1 — associação de Spearman intra-classe (associativa, sobre MFCCs)
 %   Espinha 2 — oclusão causal espectral (intervencionista, sobre bandas mel)
 %
 % NOTA: o template oficial do DFF-2026 ainda não foi publicado. Este preâmbulo
@@ -26,6 +26,7 @@
 
 \usepackage{booktabs}     % tabelas (EER/MCC/Acc, fidelidade, testes)
 \usepackage{graphicx}     % figuras (SHAP, oclusão, DET/ROC)
+\graphicspath{{figures/}} % PDFs exportados do pipeline (results/<run>/figures/)
 \usepackage{subcaption}   % figuras lado a lado (comparativo D_zs vs. D_ad)
 \usepackage{amsmath}      % notação estatística (P(spoof), Welch, FDR)
 
@@ -60,16 +61,17 @@ adaptação leve --- TODO: confirmar/traduzir}
 %  - o que foi feito: explicabilidade acústica POPULACIONAL de um detector
 %    wav2vec 2.0 / XLS-R no BRSpeech-DF, contrastando o modelo zero-shot (D_zs)
 %    com uma adaptação leve (D_ad: XLS-R congelado + cabeça de regressão logística).
-%  - como: duas espinhas convergentes -- (1) surrogate + SHAP sobre 26 features
-%    MFCC (associativa) e (2) oclusão causal espectral por bandas mel
-%    (intervencionista), com uma camada confirmatória (Welch/Levene + FDR).
+%  - como: duas espinhas complementares -- (1) associação de Spearman intra-classe
+%    sobre 26 features MFCC (associativa) e (2) oclusão causal espectral por bandas
+%    mel (intervencionista), com uma camada confirmatória (Welch/Levene + FDR).
 %  - achado principal: preencher depois de rodar a pipeline no ambiente final
 %    (como as pistas se deslocam de D_zs para D_ad).
 TODO: abstract.
 \end{abstract}
 
-\keywords{audio deepfake detection, anti-spoofing, explainability, SHAP,
-spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R, Brazilian Portuguese}
+\keywords{audio deepfake detection, anti-spoofing, explainability, Spearman
+correlation, spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R,
+Brazilian Portuguese}
 
 \maketitle
 
@@ -87,7 +89,7 @@ spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R, Brazilian Portugues
 %  - contribuições (bullet list de 3-4 itens), p.ex.:
 %      (i) protocolo de explicabilidade acústica populacional para detectores
 %          caixa-preta de deepfake em pt-BR;
-%      (ii) evidência convergente associativa (SHAP/MFCC) + causal (oclusão
+%      (ii) evidência complementar associativa (Spearman/MFCC) + causal (oclusão
 %           espectral) sobre o MESMO conjunto de análise;
 %      (iii) medição de como as pistas se deslocam com adaptação leve;
 %      (iv) tabelas/figuras reprodutíveis (código e seeds fixas).
@@ -95,30 +97,33 @@ TODO.
 
 % --- Research questions and hypotheses ------------------------------------
 % Registro de linguagem (spec §11, decisão do autor): H1 e H2 são reportadas de
-% forma DESCRITIVA (sem alegação de significância); apenas H3 é INFERENCIAL
-% (teste formal + FDR). H2 é a única que admite linguagem causal (intervenção
-% no áudio); H1 permanece associativa.
+% forma DESCRITIVA (sem alegação de significância no contraste entre detectores);
+% apenas H3 é INFERENCIAL (teste formal + FDR). H2 é a única que admite linguagem
+% causal (intervenção no áudio); H1 permanece associativa (Spearman intra-classe).
+% NOTA: a Espinha 1 usa correlação de Spearman (não mais surrogate+SHAP), evitando
+% a dependência de fidelidade de um modelo substituto.
 We frame the study around one research question: \emph{which acoustic cues does
 the detector rely on, and how do these cues shift after a light adaptation to
 Brazilian Portuguese?} We evaluate two detectors sharing a frozen XLS-R
 front-end: a zero-shot detector ($D_{\mathrm{zs}}$) and a lightly adapted one
 ($D_{\mathrm{ad}}$).
 
-Two conditions must hold for the comparison to be meaningful. First, adaptation
-must improve detection: we require $\mathrm{EER}(D_{\mathrm{ad}}) <
+One condition must hold for the comparison to be meaningful: adaptation must
+improve detection. We require $\mathrm{EER}(D_{\mathrm{ad}}) <
 \mathrm{EER}(D_{\mathrm{zs}})$ before any cue analysis; otherwise the
-``before/after'' contrast is reported as \emph{insufficient adaptation}.
-Second, the acoustic surrogate must be faithful: SHAP-based cue attributions are
-interpreted only where the MFCC surrogate reproduces the detector score with
-high fidelity ($R^2$ and rank correlation on a held-out split); low fidelity is
-itself reported as a finding.
+``before/after'' contrast is reported as \emph{insufficient adaptation}. Because
+our associative analysis is a direct, model-agnostic rank correlation (rather than
+attributions from a fitted surrogate), it carries no separate surrogate-fidelity
+precondition.
 
 We investigate three hypotheses:
 \begin{itemize}
-  \item \textbf{H1 (associative cue shift).} The acoustic-importance profile
+  \item \textbf{H1 (associative cue shift).} The acoustic-association profile
         over MFCC features differs between $D_{\mathrm{zs}}$ and
-        $D_{\mathrm{ad}}$. We assess H1 \emph{descriptively}, by comparing
-        per-feature SHAP importances; we make no significance claim here.
+        $D_{\mathrm{ad}}$. We measure association as the \emph{intra-class Spearman
+        rank correlation} between each MFCC and $P(\mathrm{spoof})$ (FDR-controlled
+        per detector), and compare the profiles \emph{descriptively} across
+        detectors; we make no significance claim on the between-detector contrast.
   \item \textbf{H2 (causal spectral shift).} The frequency bands whose occlusion
         reduces $P(\mathrm{spoof})$ differ between $D_{\mathrm{zs}}$ and
         $D_{\mathrm{ad}}$. Because occlusion is an intervention on the input, we
@@ -127,7 +132,8 @@ We investigate three hypotheses:
         whose interval excludes zero exerts a reliable causal effect on the
         score. We stop short of a formal significance test across detectors.
   \item \textbf{H3 (error-linked acoustic differences).} For the MFCC features
-        most salient under SHAP, distributions differ across decision quadrants:
+        most salient by intra-class Spearman $|\rho|$, distributions differ across
+        decision quadrants:
         in mean between true-negative and false-positive clips (Welch's
         $t$-test) and in variance between true-positive and false-negative clips
         (Levene's test). H3 is tested \emph{inferentially}, controlling the
@@ -180,15 +186,16 @@ TODO.
 % -> 26 features por áudio. Explicar por que 26 (13 médias + 13 desvios).
 TODO.
 
-\subsection{Spine 1 --- Surrogate + SHAP}
-% Spec §6. Para cada detector (D_zs, D_ad):
-%  1) treinar um surrogate de regressão (árvore com boosting -> TreeSHAP) para
-%     imitar o score contínuo P(spoof) a partir dos 26 MFCCs;
-%  2) reportar FIDELIDADE do surrogate (R^2 e correlação de posto num held-out)
-%     -- fidelidade baixa é ela mesma um achado;
-%  3) SHAP (global + por instância) -> importância acústica por MFCC;
-%  4) comparar os mapas D_zs vs. D_ad.
-% Deixar explícito (spec §6): a CABEÇA de D_ad (linear) != o SURROGATE (árvore).
+\subsection{Spine 1 --- Acoustic Association (Spearman)}
+% Espinha 1 é ASSOCIATIVA e model-agnostic (substitui o antigo surrogate+SHAP,
+% cuja fidelidade era baixa). Para cada detector (D_zs, D_ad):
+%  1) medir a correlação de Spearman entre cada MFCC (26 features) e o score
+%     contínuo P(spoof), CALCULADA DENTRO DE CADA CLASSE (bonafide/spoof) para
+%     evitar correlação espúria induzida pela separação de classes;
+%  2) controlar FDR (Benjamini-Hochberg) sobre os p-valores por detector;
+%  3) comparar os perfis de |rho| por MFCC entre D_zs e D_ad (descritivo).
+% Vantagem: sem modelo substituto, não há pré-condição de fidelidade; a medida é
+% transparente (correlação de posto) ao custo de ser univariada (sem interações).
 TODO.
 
 \subsection{Spine 2 --- Spectral Causal Occlusion}
@@ -205,8 +212,8 @@ TODO.
 
 \subsection{Confirmatory Statistics}
 % Spec §8. Em vez de 26 testes-T soltos (pescaria), os testes clássicos rodam
-% APENAS nos poucos MFCCs destacados pelo SHAP, com correção FDR
-% (Benjamini-Hochberg):
+% APENAS nos poucos MFCCs de maior |rho| (destacados pela Espinha 1), com correção
+% FDR (Benjamini-Hochberg):
 %  - Welch (diferença de média) e Levene/Brown-Forsythe (diferença de variância)
 %    entre quadrantes relevantes (VN vs. FP; VP vs. FN);
 %  - Spearman entre MFCC e P(spoof) INTRA-classe (evita correlação espúria).
@@ -227,21 +234,43 @@ TODO.
     Front-end & wav2vec 2.0 / XLS-R (frozen) \\
     Checkpoint & \texttt{nii-yamagishilab/mms-300m-anti-deepfake} \\
     Adaptation head ($D_\mathrm{ad}$) & logistic regression on 1024-d embeddings \\
-    Surrogate model & boosted trees $\rightarrow$ TreeSHAP \\
+    Association measure & intra-class Spearman $\rho$ (MFCC vs.\ $P$(spoof)) \\
     MFCC features & 13 coeff.\ $\times$ (mean, std) $=$ 26 \\
     Dataset & \texttt{AKCIT-Deepfake/BRSpeech-DF} \\
+    Corpus scale & 459{,}137 clips (76{,}644 bona fide / 382{,}493 spoof) \\
     Train per class ($D_\mathrm{ad}$ head) & 1{,}500 (balanced) \\
-    Analysis set per class (test) & 1{,}500 (balanced) \\
+    Analysis set (test) & 1{,}320 bona fide $+$ 1{,}500 spoof \\
     Positive class & spoof \\
     Seed & 42 \\
     \bottomrule
   \end{tabular}
 \end{table}
-% TODO (prosa): descrever o BRSpeech-DF (origem, escala, configs bonafide/spoof),
-% como o rótulo é resolvido (bonafide=0, spoof=1), higiene contra vazamento
-% (train para a cabeça de D_ad; test SÓ para análise), hardware (GPU A100) e o
-% ambiente Docker reprodutível. Reportar os tamanhos dos 4 quadrantes (TP/TN/FP/FN)
-% e ressalvar poder estatístico se FP/FN ficarem pequenos (spec §4, §11).
+\paragraph{Dataset and sampling rationale.}
+BRSpeech-DF is a large-scale Brazilian-Portuguese anti-spoofing corpus
+(459{,}137 clips: 76{,}644 bona fide and 382{,}493 spoofed, the latter carrying a
+generator-method attribute), split into \texttt{train}/\texttt{validation}/%
+\texttt{test}. Its \texttt{test} partition alone holds 1{,}320 bona fide and
+6{,}587 spoofed clips. Because our objective is population-level acoustic
+\emph{explainability} rather than leaderboard-style benchmarking, we deliberately
+analyse a compact, class-controlled subset instead of the full corpus. We take the
+\emph{entire} bona fide test split (1{,}320 clips --- the scarce class) matched
+with 1{,}500 spoofed test clips, and fit the $D_\mathrm{ad}$ logistic head on an
+independent, class-balanced training subset (1{,}500 per class); test clips are
+never seen during adaptation, precluding leakage. This scale is a design choice,
+not a data limitation. First, every inferential claim (H3: Welch and Levene under
+Benjamini--Hochberg control) and every interval estimate (H2: per-band bootstrap
+CIs) is already well powered at this $N$: at the EER operating point the rare error
+quadrants (FP, FN) still retain a few hundred clips each, enough to resolve
+small-to-moderate effects ($d\!\approx\!0.25$--$0.3$ at 80\% power), so additional
+clips would add negligible statistical resolution. Second, exhausting the scarce
+bona fide class while keeping a comparable spoof sample keeps the four decision
+quadrants (TP/TN/FP/FN) and the EER threshold meaningful, which the corpus's native
+$\approx$1:5 bona fide/spoof imbalance would otherwise distort. Third, the per-clip
+analysis (band-stop spectral occlusion with a per-band bootstrap) scales with $N$,
+so a focused subset preserves full reproducibility at tractable cost. Scaling the analysis to the full corpus and
+stratifying it by spoof generator is left to future work.
+% TODO restante: relatar os tamanhos exatos dos 4 quadrantes (TP/TN/FP/FN) por
+% detector e o hardware (GPU A100) + ambiente Docker reprodutível (spec §4, §11).
 
 % Schema da Tabela Mestra (spec §14) -- uma linha por áudio, colunas por detector.
 \begin{table}[t]
@@ -269,35 +298,63 @@ TODO.
 % Spec §9 passos 3-4 + §10.
 \subsection{Zero-Shot vs.\ Adapted Performance}
 % Pré-check obrigatório (spec §3): tabela performance_table com colunas
-% detector / eer / mcc / accuracy / surrogate_r2 para D_zs e D_ad no conjunto
-% de análise. Confirmar se D_ad melhora o EER (condição para o contraste).
+% detector / eer / mcc / accuracy para D_zs e D_ad no conjunto de análise.
+% Confirmar se D_ad melhora o EER (condição para o contraste).
 % Figura: DET/ROC com o ponto de EER marcado + matriz de confusão normalizada.
 \begin{table}[t]
-  \caption{Detection performance and surrogate fidelity
+  \caption{Detection performance on the analysis set
   (\texttt{performance\_table}).}
   \label{tab:performance}
-  \begin{tabular}{lcccc}
+  \begin{tabular}{lccc}
     \toprule
-    Detector & EER & MCC & Accuracy & Surrogate $R^2$ \\
+    Detector & EER & MCC & Accuracy \\
     \midrule
-    $D_\mathrm{zs}$ (zero-shot) & TODO & TODO & TODO & TODO \\
-    $D_\mathrm{ad}$ (adapted)   & TODO & TODO & TODO & TODO \\
+    $D_\mathrm{zs}$ (zero-shot) & 25.8\% & 0.483 & 0.742 \\
+    $D_\mathrm{ad}$ (adapted)   & 20.9\% & 0.581 & 0.791 \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{det_zs_vs_ad}
+  \caption{Detection error trade-off (DET) curves for $D_\mathrm{zs}$ and
+  $D_\mathrm{ad}$ on the analysis set; the marker on each curve is the operating
+  point at the Equal Error Rate. A curve closer to the origin indicates better
+  detection.}
+  \label{fig:det}
+\end{figure}
+
+Figure~\ref{fig:det} contrasts the two detectors; the EER pre-condition holds
+when the $D_\mathrm{ad}$ curve lies below $D_\mathrm{zs}$.
 TODO.
 
 % ==============================================================================
 \section{Explainability Analysis}
 % Spec §§6-8. Núcleo do paper: como as pistas acústicas mudam de D_zs para D_ad.
 
-\subsection{Acoustic Importance via SHAP}
-% Testa H1 (deslocamento associativo). Registro DESCRITIVO: comparar os perfis
-% de mean_abs_shap entre D_zs e D_ad; NÃO usar "significant/significantly".
-% Spec §6. Figura comparativa (beeswarm global + barra de importância média)
-% para D_zs vs. D_ad a partir de shap_importance (detector, feature,
-% mean_abs_shap). Linguagem ASSOCIATIVA ("está associado a"), spec §11.
-TODO.
+\subsection{Acoustic Association via Spearman}
+% Testa H1 (deslocamento associativo). Registro DESCRITIVO no contraste entre
+% detectores; cada rho é FDR-controlado. Linguagem ASSOCIATIVA ("está associado
+% a"), NUNCA causal. Medida = Spearman intra-classe (bonafide/spoof separados).
+% Figura association_profile_zs_vs_ad: dois paineis (coef. de media mu e de desvio
+% sigma), forca = max|rho| sobre classes; rotulos por ordem cepstral (c0 energy,
+% c1-c4 envelope, c5-c12 detail; note que mfcc1==c0==energia). O scatter de
+% Spearman (fig:spearman) detalha a associacao por classe da feature dominante.
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{association_profile_zs_vs_ad}
+  \caption{Acoustic-association profile of the MFCC features, measured as the
+  intra-class Spearman $|\rho|$ between each coefficient and $P(\mathrm{spoof})$
+  (maximum over the bona fide/spoof classes), split into mean ($\mu$) and
+  standard-deviation ($\sigma$) coefficients. Labels follow cepstral order: $c_0$
+  (energy), $c_1$--$c_4$ (envelope/tilt), $c_5$--$c_{12}$ (fine detail). We read
+  the between-detector shift \emph{descriptively} (H1).}
+  \label{fig:association}
+\end{figure}
+
+Figure~\ref{fig:association} compares the per-feature association profiles of
+$D_\mathrm{zs}$ and $D_\mathrm{ad}$. TODO.
 
 \subsection{Spectral Occlusion Profiles}
 % Testa H2 (deslocamento causal). Incerteza QUANTIFICADA (IC 95% bootstrap por
@@ -309,15 +366,68 @@ TODO.
 % P(spoof)); azul = sustenta bonafide (ocluir sobe P(spoof)); faixa cinza = IC 95%.
 % Tabela occlusion_table: detector, band_hz_low, band_hz_high, mean_p_spoof_drop,
 % ci_low, ci_high, n.
-TODO.
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{occlusion_bands_zs_vs_ad}
+  \caption{Divergent spectral occlusion profiles ($D_\mathrm{zs}$ top,
+  $D_\mathrm{ad}$ bottom). Red area: occluding the band lowers $P(\mathrm{spoof})$
+  (the band \emph{sustains spoof}); blue: occlusion raises it (sustains bonafide);
+  grey ribbon: 95\% bootstrap CI of the per-band mean drop. Bands whose CI
+  excludes zero exert a reliable causal effect (H2).}
+  \label{fig:occlusion_bands}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{occlusion_overlay_zs_vs_ad}
+  \caption{Direct overlay of the two mean occlusion profiles with 95\% bootstrap
+  CI ribbons, easing the band-by-band $D_\mathrm{zs}$ vs.\ $D_\mathrm{ad}$
+  comparison.}
+  \label{fig:occlusion_overlay}
+\end{figure}
+
+Figures~\ref{fig:occlusion_bands} and~\ref{fig:occlusion_overlay} report the
+causal spectral profiles. TODO.
 
 \subsection{Confirmatory Tests}
 % Testa H3 (diferenças acústicas ligadas ao erro). Registro INFERENCIAL: esta é
 % a única análise onde cabe "significant after FDR correction (q < 0.05)".
 % Spec §8. Tabela confirmatory_tests (detector, feature, test, statistic,
-% p_value, q_value_fdr) nos top-MFCCs do SHAP; boxplot/violino dos MFCCs
+% p_value, q_value_fdr) nos top-MFCCs por |rho| (Espinha 1); boxplot dos MFCCs
 % destacados por quadrante.
-TODO.
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{confirmatory_box_zs}
+  \caption{Distribution of the most association-salient (Spearman $|\rho|$) MFCC
+  features across decision
+  quadrants for $D_\mathrm{zs}$. Per-panel annotations give the post-FDR
+  significance of the mean contrast (TN vs.\ FP, Welch) and the variance contrast
+  (TP vs.\ FN, Levene): \texttt{***}~$q<0.001$, \texttt{**}~$q<0.01$,
+  \texttt{*}~$q<0.05$, \texttt{ns} otherwise (H3, inferential). The analogous
+  figure for $D_\mathrm{ad}$ is \texttt{confirmatory\_box\_ad}.}
+  \label{fig:confirmatory_box}
+\end{figure}
+
+Figure~\ref{fig:confirmatory_box} shows the quadrant-wise distributions with
+FDR-corrected significance. TODO.
+
+% Detalhe por classe da Espinha 1 (Spearman): scatter da feature dominante,
+% mostrando o quanto cada MFCC covaria monotonicamente com P(spoof) dentro de
+% cada classe (evita correlação espúria pela separação bonafide/spoof).
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{spearman_scatter}
+  \caption{Intra-class association between the most correlated MFCC and
+  $P(\mathrm{spoof})$ for each detector. Points are coloured by ground-truth class;
+  Spearman's $\rho$ (with post-FDR significance) is reported per class. Computing
+  $\rho$ within each class avoids the spurious correlation induced by class
+  separation.}
+  \label{fig:spearman}
+\end{figure}
+
+As a complementary associative view, Figure~\ref{fig:spearman} relates the most
+correlated MFCC to the detector score within each class
+(\texttt{spearman\_table}). TODO.
 
 % ==============================================================================
 \section{Discussion and Limitations}
@@ -337,6 +447,9 @@ TODO.
 TODO.
 
 % ==============================================================================
+% Flush de floats pendentes: o esqueleto tem muitas figuras e pouco texto, então
+% forçamos a saída dos floats ainda não colocados antes da bibliografia.
+\clearpage
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
 

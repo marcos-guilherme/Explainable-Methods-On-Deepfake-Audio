@@ -3,8 +3,8 @@
 Port do notebook `notebooks/deepfake_brspeech_explainability.ipynb` para um pacote Python
 executável de forma headless, em estágios resumíveis, configurável por YAML + overrides de CLI.
 Compara um detector de deepfake **zero-shot** (`D_zs`) com uma versão **levemente adaptada**
-(`D_ad` = XLS-R congelado + regressão logística), usando MFCC + SHAP (surrogate) e **oclusão
-espectral causal**, com testes confirmatórios corrigidos por FDR.
+(`D_ad` = XLS-R congelado + regressão logística), usando **associação MFCC↔P(spoof)** (Spearman
+intra-classe) e **oclusão espectral causal**, com testes confirmatórios corrigidos por FDR.
 
 ## Como rodar (dentro do Docker)
 
@@ -43,10 +43,10 @@ hash da config) e produz artefatos consumidos pelos estágios seguintes:
 | 2 | `embeddings`   | `emb_train.npy`, `emb_test.npy`                                          |
 | 3 | `adapt`        | `d_ad.joblib`, `eer_precheck.json`, `p_spoof_zs.npy`, `p_spoof_ad.npy`   |
 | 4 | `master_mfcc`  | `master_table.parquet` (P(spoof), predições, quadrantes, 26 MFCCs)       |
-| 5 | `shap`         | `surrogate_{zs,ad}.joblib`, `shap_importance.csv`, figura SHAP           |
-| 6 | `occlusion`    | `occlusion_table.csv` (queda média + IC 95% bootstrap por banda), figura divergente |
-| 7 | `confirmatory` | `confirmatory_tests.csv` (Welch/Levene + FDR nas top-SHAP)               |
-| 8 | `report`       | `performance_table.csv`, `run_manifest.json`                             |
+| 5 | `association`  | `spearman_table.csv` (Spearman intra-classe MFCC↔P(spoof) + FDR); figuras: perfil de associação (painéis μ/σ, rótulos c0..c12) e scatter de Spearman |
+| 6 | `occlusion`    | `occlusion_table.csv` (queda média + IC 95% bootstrap por banda), figuras divergente + overlay |
+| 7 | `confirmatory` | `confirmatory_tests.csv` (Welch/Levene + FDR nos MFCCs de maior \|ρ\|); figuras boxplot por quadrante (H3) |
+| 8 | `report`       | `performance_table.csv`, curva DET (`det_zs_vs_ad`), `run_manifest.json`  |
 
 ## Resumibilidade
 

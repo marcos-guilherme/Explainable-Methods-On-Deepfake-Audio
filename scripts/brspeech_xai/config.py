@@ -42,11 +42,8 @@ class OcclusionConfig:
 
 
 @dataclass
-class ShapConfig:
-    top_n: int = 10
-    n_estimators: int = 200        # árvores do surrogate (RandomForest)
-    max_depth: int | None = 12     # profundidade máx.: regulariza e acelera muito o TreeSHAP
-    max_samples: int = 1000        # nº de linhas explicadas pelo SHAP (None = todas)
+class AssociationConfig:
+    top_n: int = 10                # nº de MFCCs de maior |ρ| destacados (perfil H1 + seleção H3)
 
 
 @dataclass
@@ -59,7 +56,7 @@ class RunConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     occlusion: OcclusionConfig = field(default_factory=OcclusionConfig)
-    shap: ShapConfig = field(default_factory=ShapConfig)
+    association: AssociationConfig = field(default_factory=AssociationConfig)
 
     def config_hash(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True, default=str)
@@ -70,7 +67,7 @@ class RunConfig:
 
 
 _NESTED = {"data": DataConfig, "audio": AudioConfig, "model": ModelConfig,
-           "occlusion": OcclusionConfig, "shap": ShapConfig}
+           "occlusion": OcclusionConfig, "association": AssociationConfig}
 
 
 def _coerce(value: str) -> Any:

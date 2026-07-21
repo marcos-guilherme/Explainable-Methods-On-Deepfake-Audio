@@ -14,8 +14,7 @@ from .features import MFCC_COLS, mfcc_features
 from .inference import extract_embeddings, make_p_spoof_ad, score_audios
 from .metrics import compute_eer, quadrant
 from .occlusion import bootstrap_ci, mel_band_edges, occlusion_drop, stratified_idx, to_16k_mono
-from .stats import confirmatory_tests
-from .surrogate import fit_surrogate, shap_importance
+from .stats import confirmatory_tests, spearman_intraclass, top_features_by_rho
 
 FEATURE_NAMES = MFCC_COLS
 
@@ -111,25 +110,20 @@ def stage_master_mfcc(ctx: RunContext) -> None:
     A.save_table(df, p.path("master_table.parquet"))
 
 
-def stage_shap(ctx: RunContext) -> None:
-    p = ctx.paths
+def stage_association(ctx: RunContext) -> None:
+    """Espinha 1 (associativa): Spearman intra-classe MFCC↔P(spoof), sem surrogate."""
+    cfg, p = ctx.cfg, ctx.paths
     master = A.load_table(p.path("master_table.parquet"))
-    X = master[FEATURE_NAMES]
-    cfg = ctx.cfg
-    parts = []
-    for tag, col in [("zs", "p_spoof_zs"), ("ad", "p_spoof_ad")]:
-        surr, fid = fit_surrogate(X, master[col].to_numpy(), seed=cfg.seed,
-                                  n_estimators=cfg.shap.n_estimators,
-                                  max_depth=cfg.shap.max_depth)
-        joblib.dump({"surrogate": surr, "fidelity": fid}, p.path(f"surrogate_{tag}.joblib"))
-        parts.append(shap_importance(surr, X, tag, max_samples=cfg.shap.max_samples,
-                                     seed=cfg.seed))
-    imp = pd.concat(parts, ignore_index=True)
-    A.save_table(imp, p.path("shap_importance.csv"))
+    spearman = pd.concat([spearman_intraclass(master, "zs", FEATURE_NAMES),
+                          spearman_intraclass(master, "ad", FEATURE_NAMES)],
+                         ignore_index=True)
+    A.save_table(spearman, p.path("spearman_table.csv"))
     if _plots_on(ctx):
-        from .plotting import plot_shap_compare, set_plot_style
+        from .plotting import (plot_association_profile, plot_spearman_scatter,
+                               set_plot_style)
         set_plot_style()
-        plot_shap_compare(imp, p.path("figures"), top_n=ctx.cfg.shap.top_n)
+        plot_association_profile(spearman, p.path("figures"), top_n=cfg.association.top_n)
+        plot_spearman_scatter(master, spearman, p.path("figures"))
 
 
 def stage_occlusion(ctx: RunContext) -> None:
@@ -161,20 +155,28 @@ def stage_occlusion(ctx: RunContext) -> None:
     occ = pd.DataFrame(rows)
     A.save_table(occ, p.path("occlusion_table.csv"))
     if _plots_on(ctx):
-        from .plotting import plot_occlusion_bands, set_plot_style
+        from .plotting import plot_occlusion_bands, plot_occlusion_overlay, set_plot_style
         set_plot_style()
         plot_occlusion_bands(edges, occ, p.path("figures"))
+        plot_occlusion_overlay(edges, occ, p.path("figures"))
 
 
 def stage_confirmatory(ctx: RunContext) -> None:
+    """H3: Welch/Levene + FDR nos MFCCs de maior |ρ| (seleção via Espinha 1)."""
     p = ctx.paths
     master = A.load_table(p.path("master_table.parquet"))
-    imp = A.load_table(p.path("shap_importance.csv"))
-    top = (imp.groupby("feature")["mean_abs_shap"].max()
-           .sort_values(ascending=False).head(ctx.cfg.shap.top_n).index.tolist())
-    parts = [confirmatory_tests(master, "zs", "quadrant_zs", top),
-             confirmatory_tests(master, "ad", "quadrant_ad", top)]
-    A.save_table(pd.concat(parts, ignore_index=True), p.path("confirmatory_tests.csv"))
+    spearman = A.load_table(p.path("spearman_table.csv"))
+    top = top_features_by_rho(spearman, ctx.cfg.association.top_n)
+    conf = pd.concat([confirmatory_tests(master, "zs", "quadrant_zs", top),
+                      confirmatory_tests(master, "ad", "quadrant_ad", top)],
+                     ignore_index=True)
+    A.save_table(conf, p.path("confirmatory_tests.csv"))
+    if _plots_on(ctx):
+        from .plotting import plot_confirmatory_box, set_plot_style
+        set_plot_style()
+        top_box = top[:6]  # H3: até 6 features mais salientes
+        plot_confirmatory_box(master, conf, top_box, "zs", "quadrant_zs", p.path("figures"))
+        plot_confirmatory_box(master, conf, top_box, "ad", "quadrant_ad", p.path("figures"))
 
 
 def stage_report(ctx: RunContext) -> None:
@@ -184,14 +186,16 @@ def stage_report(ctx: RunContext) -> None:
     from sklearn.metrics import accuracy_score, matthews_corrcoef
     rows = []
     for tag in ("zs", "ad"):
-        surr = joblib.load(p.path(f"surrogate_{tag}.joblib"))["fidelity"]
         eer, _ = compute_eer(master[f"p_spoof_{tag}"].to_numpy(), y)
         pred = master[f"pred_{tag}"].to_numpy()
         rows.append({"detector": tag, "eer": float(eer),
                      "mcc": float(matthews_corrcoef(y, pred)),
-                     "accuracy": float(accuracy_score(y, pred)),
-                     "surrogate_r2": surr["r2"], "surrogate_spearman": surr["spearman"]})
+                     "accuracy": float(accuracy_score(y, pred))})
     A.save_table(pd.DataFrame(rows), p.path("performance_table.csv"))
+    if _plots_on(ctx):
+        from .plotting import plot_det, set_plot_style
+        set_plot_style()
+        plot_det(master, p.path("figures"))
     A.save_json({"stages": "complete", "config_hash": ctx.cfg.config_hash()},
                 p.path("run_manifest.json"))
 
