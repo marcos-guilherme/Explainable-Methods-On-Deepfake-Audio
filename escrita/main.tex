@@ -66,12 +66,33 @@ adaptação leve --- TODO: confirmar/traduzir}
 %    mel (intervencionista), com uma camada confirmatória (Welch/Levene + FDR).
 %  - achado principal: preencher depois de rodar a pipeline no ambiente final
 %    (como as pistas se deslocam de D_zs para D_ad).
-TODO: abstract.
+State-of-the-art audio deepfake detectors are self-supervised black boxes trained
+overwhelmingly on English anti-spoofing data, leaving open which acoustic cues they
+actually exploit when applied to other languages such as Brazilian Portuguese. We
+present a population-level acoustic explainability study of a wav2vec~2.0 / XLS-R
+detector on the BRSpeech-DF corpus, contrasting the zero-shot model
+($D_\mathrm{zs}$) with a lightly adapted variant ($D_\mathrm{ad}$: frozen XLS-R
+plus a logistic read-out). We characterise the detectors along two complementary
+axes over the same analysis set: an \emph{associative} axis (intra-class Spearman
+correlation between 16 log-mel band-energy descriptors and the spoof score) and a
+\emph{causal} axis (spectral occlusion on the \emph{same} mel-band grid, with
+per-band bootstrap confidence intervals), plus a confirmatory layer (Welch and
+Levene tests under Benjamini--Hochberg control). Because both axes share one
+frequency grid, we can directly quantify their agreement. Light adaptation lowers
+the EER from 25.8\% to 20.9\% and reshapes the cues: the causal spectral footprint
+changes from a diffuse, broadband pattern (occluding almost any band lowers the
+spoof score) to a localised low-frequency reliance with an emergent mid-band cue
+that favours bona fide, while the associative profile weakens and moves toward
+mid-band energy. For the zero-shot detector the causally influential bands and the
+most associated ones broadly coincide (band-wise Spearman $\rho=0.69$), a
+correspondence that adaptation largely removes ($\rho=0.10$). Error-linked acoustic
+differences are statistically significant after FDR correction for both detectors.
+All results are reproducible from fixed seeds and released code.
 \end{abstract}
 
 \keywords{audio deepfake detection, anti-spoofing, explainability, Spearman
-correlation, spectral occlusion, MFCC, cross-lingual, wav2vec 2.0, XLS-R,
-Brazilian Portuguese}
+correlation, spectral occlusion, log-mel band energy, cross-lingual, wav2vec 2.0,
+XLS-R, Brazilian Portuguese}
 
 \maketitle
 
@@ -93,7 +114,36 @@ Brazilian Portuguese}
 %           espectral) sobre o MESMO conjunto de análise;
 %      (iii) medição de como as pistas se deslocam com adaptação leve;
 %      (iv) tabelas/figuras reprodutíveis (código e seeds fixas).
-TODO.
+Synthetic and manipulated speech has become cheap to produce and hard to detect by
+ear, motivating automatic anti-spoofing detectors. The strongest of these are built
+on self-supervised learning (SSL) front-ends such as wav2vec~2.0 / XLS-R, which
+achieve remarkable accuracy but behave as black boxes. Crucially, they are trained
+overwhelmingly on English-centric benchmarks (e.g.\ ASVspoof), so when deployed on
+other languages they may rely on cues that are entangled with the phonetics of the
+training language rather than with genuine artefacts of synthesis. For Brazilian
+Portuguese (pt-BR) in particular, little is known about \emph{which acoustic
+properties} drive a detector's decision, or whether those properties are
+language-biased.
+
+We therefore ask: \emph{which acoustic cues does an SSL deepfake detector rely on
+to decide, and how do those cues change before versus after a light adaptation to
+Brazilian Portuguese?} To answer this without retraining the representation, we
+compare two detectors that share the same frozen XLS-R front-end --- a zero-shot
+detector ($D_\mathrm{zs}$) using the checkpoint's original head, and a lightly
+adapted detector ($D_\mathrm{ad}$) that retrains only a logistic read-out on pt-BR
+embeddings. This design isolates the effect of adaptation on the \emph{use} of
+existing representations, providing a controlled ``before/after'' contrast for
+acoustic explanation.
+
+Our contributions are: (i)~a reproducible protocol for \emph{population-level}
+acoustic explainability of black-box deepfake detectors in pt-BR; (ii)~two
+complementary lines of evidence --- \emph{associative} (intra-class Spearman
+correlation over log-mel band-energy descriptors) and \emph{causal} (spectral
+occlusion with bootstrap uncertainty) --- computed on the \emph{same} analysis set
+and, crucially, on a \emph{shared} mel-frequency grid so their agreement is
+directly measurable; (iii)~a measurement of how these cues shift under light
+adaptation; and (iv)~fully reproducible tables and figures with fixed seeds and
+released code.
 
 % --- Research questions and hypotheses ------------------------------------
 % Registro de linguagem (spec §11, decisão do autor): H1 e H2 são reportadas de
@@ -119,11 +169,12 @@ precondition.
 We investigate three hypotheses:
 \begin{itemize}
   \item \textbf{H1 (associative cue shift).} The acoustic-association profile
-        over MFCC features differs between $D_{\mathrm{zs}}$ and
+        over log-mel band-energy features differs between $D_{\mathrm{zs}}$ and
         $D_{\mathrm{ad}}$. We measure association as the \emph{intra-class Spearman
-        rank correlation} between each MFCC and $P(\mathrm{spoof})$ (FDR-controlled
-        per detector), and compare the profiles \emph{descriptively} across
-        detectors; we make no significance claim on the between-detector contrast.
+        rank correlation} between each band-energy descriptor and
+        $P(\mathrm{spoof})$ (FDR-controlled per detector), and compare the profiles
+        \emph{descriptively} across detectors; we make no significance claim on the
+        between-detector contrast.
   \item \textbf{H2 (causal spectral shift).} The frequency bands whose occlusion
         reduces $P(\mathrm{spoof})$ differ between $D_{\mathrm{zs}}$ and
         $D_{\mathrm{ad}}$. Because occlusion is an intervention on the input, we
@@ -131,14 +182,20 @@ We investigate three hypotheses:
         (95\% bootstrap confidence intervals on the per-band mean drop): a band
         whose interval excludes zero exerts a reliable causal effect on the
         score. We stop short of a formal significance test across detectors.
-  \item \textbf{H3 (error-linked acoustic differences).} For the MFCC features
-        most salient by intra-class Spearman $|\rho|$, distributions differ across
-        decision quadrants:
+  \item \textbf{H3 (error-linked acoustic differences).} For the band-energy
+        features most salient by intra-class Spearman $|\rho|$, distributions
+        differ across decision quadrants:
         in mean between true-negative and false-positive clips (Welch's
         $t$-test) and in variance between true-positive and false-negative clips
         (Levene's test). H3 is tested \emph{inferentially}, controlling the
         false discovery rate (Benjamini--Hochberg, $q<0.05$).
 \end{itemize}
+
+Because H1 and H2 are expressed on the \emph{same} mel-band grid, we additionally
+quantify their \emph{agreement} for each detector as the band-wise Spearman
+correlation between the causal occlusion profile and the associative $|\rho|$
+profile: a high value means the bands the detector causally relies on are also the
+ones most associated with its score.
 
 % ==============================================================================
 \section{Related Work}
@@ -148,16 +205,43 @@ We investigate three hypotheses:
 % sistemática PRISMA (ENIAC 2026) já feita pelo grupo -- sem sobreposição.
 \subsection{Self-Supervised Front-Ends for Anti-Spoofing}
 % Front-ends SSL (wav2vec 2.0 / XLS-R) como base de detectores SOTA.
-\citet{tak2022automatic} TODO.
+\citet{tak2022automatic} established the now-dominant recipe for spoofing and
+deepfake detection: a wav2vec~2.0 self-supervised front-end, fine-tuned with
+aggressive data augmentation, feeding a lightweight back-end classifier. This
+family of models --- and its multilingual XLS-R variants --- underpins most
+state-of-the-art anti-spoofing systems and is the class of detector we study. Their
+strength, however, comes with opacity: the learned representation is a high-%
+dimensional black box, and the training data are predominantly English
+(ASVspoof-style). Our work takes such a detector as given and asks what acoustic
+information its decisions actually track when transferred to Brazilian Portuguese.
 
 \subsection{Explainability in Audio Deepfake Detection}
 % Métodos de explicabilidade aplicados a detecção de deepfake; lacuna: análise
 % ACÚSTICA populacional e cross-lingual.
-\citet{grinberg2025does} and \citet{fullwood2025seeing} TODO.
+A growing line of work opens up these detectors. \citet{grinberg2025does} probe
+what a detector attends to in the \emph{time} domain, showing that decisions can
+hinge on localised temporal regions rather than on globally distributed evidence.
+\citet{fullwood2025seeing} interpret how detector behaviour \emph{changes} under
+data augmentation, linking training-time interventions to shifts in what the model
+relies on. Our study is complementary along three axes. First, it is
+\emph{spectral} rather than temporal: we localise cues in frequency via causal
+occlusion. Second, it is \emph{population-level}: instead of explaining individual
+clips, we characterise cue usage across the whole analysis set with statistical
+uncertainty. Third, it targets a \emph{cross-lingual} setting (pt-BR) and measures
+how cues move under adaptation. This empirical, interpretability-focused study is
+also complementary to, and non-overlapping with, our group's prior PRISMA
+systematic review.
 
 \subsection{Cross-Lingual Generalization and Real-World Deployment}
 % Generalização entre idiomas/domínios; motiva olhar pistas específicas de pt-BR.
-\citet{channing2024toward} TODO.
+\citet{channing2024toward} argue that robust real-world deepfake detection requires
+closing an ``explainability gap'': detectors that generalise across domains and
+languages must be understood, not just benchmarked. Cross-lingual transfer is
+precisely where language-biased cues become a liability, since a detector tuned to
+English phonetics may latch onto spurious correlates when scored on another
+language. This motivates our focus on pt-BR and on \emph{how} the acoustic cues of
+a fixed representation are re-weighted when the read-out is adapted to the target
+language.
 
 % ==============================================================================
 \section{Methodology}
@@ -172,21 +256,51 @@ We investigate three hypotheses:
 %    1 áudio -> 1 vetor -> 1 score P(spoof) calibrado (sem série temporal).
 % Pré-condição (spec §3): o contraste "antes/depois" só vale se D_ad melhorar o
 % EER frente a D_zs; isso é verificado ANTES de qualquer análise (ver §Results).
-TODO.
+Both detectors share the same frozen wav2vec~2.0 / XLS-R front-end
+(\texttt{nii-yamagishilab/mms-300m-anti-deepfake}); nothing inside the SSL encoder
+is retrained, so any behavioural difference is attributable to the read-out alone.
+$D_\mathrm{zs}$ (zero-shot) applies the checkpoint's original anti-spoofing head
+directly to pt-BR. $D_\mathrm{ad}$ (lightly adapted) discards that head and instead
+mean-pools the frozen encoder outputs into a single 1024-dimensional embedding per
+clip, on top of which we train a logistic-regression classifier that emits a
+calibrated $P(\mathrm{spoof})$. Both detectors thus map one clip to one score,
+enabling an identical downstream analysis. The ``before/after'' contrast is only
+licensed if adaptation actually helps: we verify
+$\mathrm{EER}(D_\mathrm{ad})<\mathrm{EER}(D_\mathrm{zs})$ before conducting any cue
+analysis (Section~\ref{sec:results-perf}).
 
 \subsection{Pre-processing}
 % Spec §5 (fidelidade). mono -> resample 16 kHz -> janela fixa de 64.600
 % amostras (~4.04 s) -> normalização (Tak et al., 2022). Crítico: os MFCCs são
 % extraídos do sinal EXATAMENTE pré-processado que entra no detector, não do
 % áudio bruto (o layer_norm neutraliza energia -> afeta o MFCC 0).
-TODO.
+Each clip is converted to mono, resampled to 16\,kHz, cropped or padded to a fixed
+window of 64{,}600 samples ($\approx$4.04\,s), and normalised following
+\citet{tak2022automatic}. A key methodological point is that we extract acoustic
+features from \emph{exactly} the pre-processed signal that enters the detector, not
+from the raw waveform: the input normalisation neutralises absolute level, so
+explaining the model on raw audio would misattribute cues (in particular for the
+log-energy coefficient). Analysing the signal the model actually ``hears'' keeps the
+explanation faithful.
 
-\subsection{Acoustic Features (MFCC)}
-% Spec §5. 13 MFCCs, janelas de 25 ms; colapso temporal por média + desvio
-% -> 26 features por áudio. Explicar por que 26 (13 médias + 13 desvios).
-TODO.
+\subsection{Acoustic Features (log-mel band energy)}
+% Spec §5. Energia log-mel em 8 bandas (a MESMA grade da oclusão), janelas de
+% 25 ms; colapso temporal por média + desvio -> 16 features por áudio.
+% Escolha deliberada: viver no mesmo eixo de frequência da intervenção causal.
+We summarise each clip with the \emph{log-mel band energy} on the same eight
+mel-spaced bands used by the causal occlusion (Section~\ref{subsec:occlusion}),
+spanning 20--7900\,Hz. On 25\,ms windows with a 10\,ms hop we integrate the STFT
+power within each band, take the logarithm, and collapse the temporal axis into two
+statistics per band --- the mean ($\mu$) and the standard deviation ($\sigma$) ---
+yielding $8\times2=16$ features. The means capture how much energy sits in each part
+of the spectrum, while the standard deviations capture temporal \emph{variability}
+within the clip, which turns out to be discriminative for the error analysis. This
+choice is deliberate: unlike cepstral coefficients, band energies are localised in
+frequency, so the associative analysis operates on the \emph{same} axis as the
+causal occlusion analysis and the two can be compared band by band.
 
-\subsection{Spine 1 --- Acoustic Association (Spearman)}
+\subsection{Associative Analysis (Spearman)}
+\label{subsec:assoc}
 % Espinha 1 é ASSOCIATIVA e model-agnostic (substitui o antigo surrogate+SHAP,
 % cuja fidelidade era baixa). Para cada detector (D_zs, D_ad):
 %  1) medir a correlação de Spearman entre cada MFCC (26 features) e o score
@@ -196,9 +310,22 @@ TODO.
 %  3) comparar os perfis de |rho| por MFCC entre D_zs e D_ad (descritivo).
 % Vantagem: sem modelo substituto, não há pré-condição de fidelidade; a medida é
 % transparente (correlação de posto) ao custo de ser univariada (sem interações).
-TODO.
+The associative analysis measures, for each detector, how each band-energy
+descriptor is associated with the continuous score $P(\mathrm{spoof})$. We use Spearman's rank
+correlation $\rho$, computed \emph{within each class} (bona fide and spoof
+separately). The intra-class restriction is essential: because the score separates
+the two classes, pooling them would manufacture a large spurious correlation for
+almost any feature that merely differs between classes. Within a class, $\rho$
+instead reflects genuine monotonic covariation between the band energy and the
+detector's confidence. We control the false discovery rate across features per
+detector (Benjamini--Hochberg) and compare the resulting $|\rho|$ profiles between
+$D_\mathrm{zs}$ and $D_\mathrm{ad}$ \emph{descriptively}. This estimator is
+model-agnostic and transparent --- it needs no fitted surrogate and therefore has no
+fidelity precondition --- at the cost of being univariate (it does not model feature
+interactions).
 
-\subsection{Spine 2 --- Spectral Causal Occlusion}
+\subsection{Causal Analysis (Spectral Occlusion)}
+\label{subsec:occlusion}
 % Spec §7. Banco de bandas espaçadas em mel aplicadas como filtro band-stop
 % sobre a forma de onda (evita inversão mel->áudio, lossy). Oclui-se uma banda
 % por vez, passa-se pelo PRÓPRIO detector e mede-se a queda de P(spoof)
@@ -208,7 +335,33 @@ TODO.
 % coeficientes MFCC.
 % NOTA de implementação (do notebook): o áudio é reamostrado para 16 kHz ANTES
 % do band-stop, garantindo band edges < Nyquist (8 kHz).
-TODO.
+The causal analysis intervenes directly on the input. We partition the spectrum into
+eight mel-spaced bands spanning 20--7900\,Hz and, one band at a time, remove it with
+a band-stop filter applied to the waveform (operating on the waveform avoids the
+lossy mel$\rightarrow$audio inversion). The filtered clip is passed through the
+\emph{same} detector, and we record the drop in $P(\mathrm{spoof})$ relative to the
+intact-audio baseline; a positive drop means the band was \emph{sustaining} the
+spoof score. We apply this to a quadrant-stratified subset (600 clips per band) and
+quantify uncertainty with a per-band bootstrap (95\% CI on the mean drop): a band
+whose interval excludes zero exerts a reliable causal effect. Because occlusion is
+an intervention on the audio, the occlusion analysis yields interventional evidence
+that converges with --- but is methodologically independent of --- the associative
+analysis. Crucially, both analyses are defined on the \emph{same} eight bands, so
+this agreement can be measured band by band rather than merely asserted (see
+Section~\ref{subsec:convergence}). For implementation safety, audio is resampled to
+16\,kHz before filtering, keeping all band edges below the 8\,kHz Nyquist limit.
+
+\subsection{Convergence of the Two Analyses}
+\label{subsec:convergence}
+% Concordância causal x associativa na MESMA grade: Spearman entre |queda de
+% oclusão| por banda e max|rho| associativo por banda (por detector).
+Because the associative and causal analyses share one mel-band grid, we summarise
+their agreement per detector with a single band-wise Spearman correlation between the
+causal profile (the magnitude of the mean occlusion drop per band) and the
+associative profile (the per-band maximum $|\rho|$ over statistics and classes). With
+only eight bands this correlation is a descriptive summary rather than a powered
+test; a high value indicates that the bands the detector causally relies on are also
+those most associated with its score.
 
 \subsection{Confirmatory Statistics}
 % Spec §8. Em vez de 26 testes-T soltos (pescaria), os testes clássicos rodam
@@ -217,7 +370,17 @@ TODO.
 %  - Welch (diferença de média) e Levene/Brown-Forsythe (diferença de variância)
 %    entre quadrantes relevantes (VN vs. FP; VP vs. FN);
 %  - Spearman entre MFCC e P(spoof) INTRA-classe (evita correlação espúria).
-TODO.
+To avoid a fishing expedition over all 16 loosely motivated $t$-tests, the
+confirmatory layer restricts formal testing to the few band-energy features already
+flagged as most salient by the associative analysis (largest intra-class $|\rho|$).
+On those features
+we run two contrasts tied
+to the detector's error structure: a Welch $t$-test for a \emph{mean} difference
+between correctly and incorrectly rejected clips (TN vs.\ FP), and a Levene test for
+a \emph{variance} difference between caught and missed spoofs (TP vs.\ FN). All
+$p$-values are corrected for multiple comparisons with the Benjamini--Hochberg
+procedure, and we report significance as $q<0.05$. This is the only part of the
+study framed inferentially; the associative and causal analyses remain descriptive.
 
 % ==============================================================================
 \section{Experimental Setup}
@@ -234,8 +397,9 @@ TODO.
     Front-end & wav2vec 2.0 / XLS-R (frozen) \\
     Checkpoint & \texttt{nii-yamagishilab/mms-300m-anti-deepfake} \\
     Adaptation head ($D_\mathrm{ad}$) & logistic regression on 1024-d embeddings \\
-    Association measure & intra-class Spearman $\rho$ (MFCC vs.\ $P$(spoof)) \\
-    MFCC features & 13 coeff.\ $\times$ (mean, std) $=$ 26 \\
+    Association measure & intra-class Spearman $\rho$ (band energy vs.\ $P$(spoof)) \\
+    Acoustic features & 8 mel bands $\times$ (mean, std) $=$ 16 \\
+    Frequency bands & 8 mel-spaced, 20--7900 Hz (shared with occlusion) \\
     Dataset & \texttt{AKCIT-Deepfake/BRSpeech-DF} \\
     Corpus scale & 459{,}137 clips (76{,}644 bona fide / 382{,}493 spoof) \\
     Train per class ($D_\mathrm{ad}$ head) & 1{,}500 (balanced) \\
@@ -269,8 +433,26 @@ $\approx$1:5 bona fide/spoof imbalance would otherwise distort. Third, the per-c
 analysis (band-stop spectral occlusion with a per-band bootstrap) scales with $N$,
 so a focused subset preserves full reproducibility at tractable cost. Scaling the analysis to the full corpus and
 stratifying it by spoof generator is left to future work.
-% TODO restante: relatar os tamanhos exatos dos 4 quadrantes (TP/TN/FP/FN) por
-% detector e o hardware (GPU A100) + ambiente Docker reprodutível (spec §4, §11).
+
+\begin{table}[t]
+  \caption{Decision-quadrant sizes on the analysis set at the EER threshold, per
+  detector (TP/TN: correct spoof/bona-fide; FP/FN: errors).}
+  \label{tab:quadrants}
+  \begin{tabular}{lcccc}
+    \toprule
+    Detector & TP & TN & FP & FN \\
+    \midrule
+    $D_\mathrm{zs}$ (zero-shot) & 1{,}113 & 979 & 341 & 387 \\
+    $D_\mathrm{ad}$ (adapted)   & 1{,}186 & 1{,}044 & 276 & 314 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The four decision quadrants at the EER threshold are reported in
+Table~\ref{tab:quadrants}: adaptation increases both correct quadrants (TP, TN) and
+shrinks both error quadrants (FP, FN), yet each rare quadrant still retains a few
+hundred clips, supporting the confirmatory tests of H3. All experiments run in a
+reproducible Docker environment on a single NVIDIA A100 GPU, with fixed seeds.
 
 % Schema da Tabela Mestra (spec §14) -- uma linha por áudio, colunas por detector.
 \begin{table}[t]
@@ -287,8 +469,8 @@ stratifying it by spoof generator is left to future work.
     \texttt{p\_spoof\_\{zs,ad\}} & continuous $P(\mathrm{spoof})$ per detector \\
     \texttt{pred\_\{zs,ad\}} & decision at EER threshold \\
     \texttt{quadrant\_\{zs,ad\}} & TP / TN / FP / FN \\
-    \texttt{mfcc\{i\}\_mean} & mean of $i$-th MFCC ($i=1..13$) \\
-    \texttt{mfcc\{i\}\_std} & std of $i$-th MFCC ($i=1..13$) \\
+    \texttt{band\{k\}\_mean} & mean log-energy of $k$-th band ($k=1..8$) \\
+    \texttt{band\{k\}\_std} & std of log-energy of $k$-th band ($k=1..8$) \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -297,6 +479,7 @@ stratifying it by spoof generator is left to future work.
 \section{Results}
 % Spec §9 passos 3-4 + §10.
 \subsection{Zero-Shot vs.\ Adapted Performance}
+\label{sec:results-perf}
 % Pré-check obrigatório (spec §3): tabela performance_table com colunas
 % detector / eer / mcc / accuracy para D_zs e D_ad no conjunto de análise.
 % Confirmar se D_ad melhora o EER (condição para o contraste).
@@ -325,9 +508,18 @@ stratifying it by spoof generator is left to future work.
   \label{fig:det}
 \end{figure}
 
-Figure~\ref{fig:det} contrasts the two detectors; the EER pre-condition holds
-when the $D_\mathrm{ad}$ curve lies below $D_\mathrm{zs}$.
-TODO.
+On the analysis set of 2{,}820 clips (1{,}500 spoof and 1{,}320 bona fide),
+the light adaptation lowers the EER from 25.8\% to 20.9\% --- a 4.9-point
+absolute (about 19\% relative) reduction --- while MCC rises from 0.483 to 0.581
+and accuracy from 0.742 to 0.791 (Table~\ref{tab:performance}). Consistently,
+the $D_\mathrm{ad}$ DET curve in Figure~\ref{fig:det} lies inside that of
+$D_\mathrm{zs}$ across operating points, so the EER pre-condition
+($\mathrm{EER}(D_\mathrm{ad})<\mathrm{EER}(D_\mathrm{zs})$) holds and the
+before/after cue comparison is warranted. Adaptation also reduces both error
+types: false positives fall from 341 to 276 and false negatives from 387 to 314.
+Because only the linear read-out is retrained on top of the frozen XLS-R
+front-end, these gains reflect a re-weighting of pre-existing representations
+rather than new features learned for Brazilian Portuguese.
 
 % ==============================================================================
 \section{Explainability Analysis}
@@ -337,24 +529,38 @@ TODO.
 % Testa H1 (deslocamento associativo). Registro DESCRITIVO no contraste entre
 % detectores; cada rho é FDR-controlado. Linguagem ASSOCIATIVA ("está associado
 % a"), NUNCA causal. Medida = Spearman intra-classe (bonafide/spoof separados).
-% Figura association_profile_zs_vs_ad: dois paineis (coef. de media mu e de desvio
-% sigma), forca = max|rho| sobre classes; rotulos por ordem cepstral (c0 energy,
-% c1-c4 envelope, c5-c12 detail; note que mfcc1==c0==energia). O scatter de
-% Spearman (fig:spearman) detalha a associacao por classe da feature dominante.
+% Figura association_profile_zs_vs_ad: dois paineis (energia de banda mu e desvio
+% sigma), forca = max|rho| sobre classes; eixo x = bandas ordenadas por frequencia.
+% O scatter de Spearman (fig:spearman) detalha a associacao por classe da banda
+% dominante.
 \begin{figure}[tbp]
   \centering
   \includegraphics[width=\columnwidth]{association_profile_zs_vs_ad}
-  \caption{Acoustic-association profile of the MFCC features, measured as the
-  intra-class Spearman $|\rho|$ between each coefficient and $P(\mathrm{spoof})$
-  (maximum over the bona fide/spoof classes), split into mean ($\mu$) and
-  standard-deviation ($\sigma$) coefficients. Labels follow cepstral order: $c_0$
-  (energy), $c_1$--$c_4$ (envelope/tilt), $c_5$--$c_{12}$ (fine detail). We read
-  the between-detector shift \emph{descriptively} (H1).}
+  \caption{Acoustic-association profile of the log-mel band-energy features,
+  measured as the intra-class Spearman $|\rho|$ between each band descriptor and
+  $P(\mathrm{spoof})$ (maximum over the bona fide/spoof classes), split into mean
+  ($\mu$, top) and standard-deviation ($\sigma$, bottom) descriptors and ordered by
+  frequency band along the $x$-axis. We read the between-detector shift
+  \emph{descriptively} (H1).}
   \label{fig:association}
 \end{figure}
 
-Figure~\ref{fig:association} compares the per-feature association profiles of
-$D_\mathrm{zs}$ and $D_\mathrm{ad}$. TODO.
+Figure~\ref{fig:association} compares the per-band association profiles of
+$D_\mathrm{zs}$ and $D_\mathrm{ad}$. For the zero-shot detector, the score is most
+strongly associated with \emph{low-band energy means}: the 20--282\,Hz band
+(intra-class $\rho=+0.45$ in spoof, $+0.39$ in bona fide) and the 282--639\,Hz band
+($\rho=+0.41$ in both classes), with secondary mid-band contributions at
+1.79--2.69 and 2.69--3.93\,kHz ($\rho\approx+0.38$ in spoof). All are positive: more
+band energy co-varies with a higher spoof score. Under adaptation the profile both
+\emph{weakens} and \emph{moves upward in frequency}: $D_\mathrm{ad}$'s strongest
+associations are mid-band energy means that turn \emph{negative} in bona-fide clips
+(1.79--2.69\,kHz $\rho=-0.34$; 2.69--3.93\,kHz $\rho=-0.33$; 1.13--1.79\,kHz
+$\rho=-0.29$), together with mid-band energy \emph{variability} in spoof clips
+(2.69--3.93\,kHz\,$\sigma$ $\rho=+0.25$). Descriptively, then, $D_\mathrm{zs}$
+is associated mainly with low-band energy, whereas $D_\mathrm{ad}$'s (weaker)
+univariate associations sit in the mid band. All associations cited above are FDR-significant
+per detector ($q\ll0.01$); we make no significance claim on the between-detector
+contrast itself.
 
 \subsection{Spectral Occlusion Profiles}
 % Testa H2 (deslocamento causal). Incerteza QUANTIFICADA (IC 95% bootstrap por
@@ -370,10 +576,11 @@ $D_\mathrm{zs}$ and $D_\mathrm{ad}$. TODO.
   \centering
   \includegraphics[width=\columnwidth]{occlusion_bands_zs_vs_ad}
   \caption{Divergent spectral occlusion profiles ($D_\mathrm{zs}$ top,
-  $D_\mathrm{ad}$ bottom). Red area: occluding the band lowers $P(\mathrm{spoof})$
-  (the band \emph{sustains spoof}); blue: occlusion raises it (sustains bonafide);
-  grey ribbon: 95\% bootstrap CI of the per-band mean drop. Bands whose CI
-  excludes zero exert a reliable causal effect (H2).}
+  $D_\mathrm{ad}$ bottom). Red area: occluding the band lowers $P(\mathrm{spoof})$,
+  so the band \emph{contributes to the spoof decision}; blue: occlusion raises it,
+  so the band \emph{contributes to a bona-fide decision}; grey ribbon: 95\% bootstrap
+  CI of the per-band mean drop. Bands whose CI excludes zero have a reliable causal
+  effect (H2).}
   \label{fig:occlusion_bands}
 \end{figure}
 
@@ -387,7 +594,46 @@ $D_\mathrm{zs}$ and $D_\mathrm{ad}$. TODO.
 \end{figure}
 
 Figures~\ref{fig:occlusion_bands} and~\ref{fig:occlusion_overlay} report the
-causal spectral profiles. TODO.
+causal spectral profiles (each band occluded on 600 clips; 95\% bootstrap CI).
+For $D_\mathrm{zs}$ the effect is broadband and one-signed: occluding almost any
+band lowers $P(\mathrm{spoof})$ --- seven of eight bands have a CI excluding zero
+(all but 639--1125\,Hz) --- so energy across the whole spectrum contributes to the
+spoof decision. The effect is largest at low frequencies (20--639\,Hz, mean drop
+$\approx0.04$) and at 1788--2693\,Hz ($0.037$). Adaptation turns this diffuse pattern
+into a band-selective one and reverses one mid band: for $D_\mathrm{ad}$ the positive
+contribution concentrates at 20--282\,Hz ($0.060$) and 639--1125\,Hz ($0.052$), the
+282--639\,Hz band becomes null (CI includes zero), and 1125--1788\,Hz \emph{changes
+sign} (mean drop $=-0.016$, CI $[-0.025,-0.007]$): occluding it \emph{raises}
+$P(\mathrm{spoof})$, so that band instead contributes to a bona-fide decision. In
+causal terms, adaptation concentrates the detector's spectral reliance on low
+frequencies and introduces a mid-band cue that favours bona fide, absent in the
+zero-shot model.
+
+\subsection{Convergence of the Two Analyses}
+% Figura spine_convergence_zs_vs_ad: barras = |queda causal| por banda; linha =
+% |rho| associativo por banda (eixo direito); titulo traz o rho de concordancia.
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\columnwidth]{spine_convergence_zs_vs_ad}
+  \caption{Agreement between the associative and causal analyses on the shared
+  mel-band grid ($D_\mathrm{zs}$ top, $D_\mathrm{ad}$ bottom). Bars: magnitude of the
+  causal occlusion drop per band; line (right axis): associative $|\rho|$ per band.
+  Each title reports the band-wise Spearman correlation between the two profiles.}
+  \label{fig:convergence}
+\end{figure}
+
+Because both analyses live on the same eight bands, we can ask whether the bands the
+detector \emph{causally} relies on are the same ones its score is \emph{associated}
+with (Figure~\ref{fig:convergence}). For the zero-shot detector the two profiles are
+broadly consistent: the band-wise Spearman correlation is $\rho=0.69$, with both the
+causal drops and the associations largest in the low bands. With only eight bands
+this is suggestive rather than conclusive ($p=0.06$, not significant at the $0.05$
+level), so we read it as descriptive support rather than proof. For the adapted
+detector the correspondence essentially vanishes ($\rho=0.10$, $p=0.82$): its causal
+footprint (low bands plus a mid-band cue that favours bona fide) is no longer tracked
+by the univariate association ranking. We do not speculate on the source of this
+divergence; we simply note that, for $D_\mathrm{ad}$, band-level claims should rest
+on the causal analysis rather than the associative one.
 
 \subsection{Confirmatory Tests}
 % Testa H3 (diferenças acústicas ligadas ao erro). Registro INFERENCIAL: esta é
@@ -398,8 +644,8 @@ causal spectral profiles. TODO.
 \begin{figure}[tbp]
   \centering
   \includegraphics[width=\columnwidth]{confirmatory_box_zs}
-  \caption{Distribution of the most association-salient (Spearman $|\rho|$) MFCC
-  features across decision
+  \caption{Distribution of the most association-salient (Spearman $|\rho|$)
+  band-energy features across decision
   quadrants for $D_\mathrm{zs}$. Per-panel annotations give the post-FDR
   significance of the mean contrast (TN vs.\ FP, Welch) and the variance contrast
   (TP vs.\ FN, Levene): \texttt{***}~$q<0.001$, \texttt{**}~$q<0.01$,
@@ -409,7 +655,23 @@ causal spectral profiles. TODO.
 \end{figure}
 
 Figure~\ref{fig:confirmatory_box} shows the quadrant-wise distributions with
-FDR-corrected significance. TODO.
+FDR-corrected significance. Testing the ten most $|\rho|$-salient band-energy
+features across decision quadrants, 9 of 20 tests are significant after
+Benjamini--Hochberg correction ($q<0.05$) for $D_\mathrm{zs}$ and 13 of 20 for
+$D_\mathrm{ad}$. The mean contrast between correct and incorrect rejections
+(TN vs.\ FP, Welch) is largest for the low-band energy means in $D_\mathrm{zs}$
+--- 282--639\,Hz ($t=-16.1$, $q=2{\times}10^{-49}$) and 20--282\,Hz ($t=-15.3$)
+--- and their variability (20--282\,Hz\,$\sigma$: $t=+13.3$; 282--639\,Hz\,$\sigma$:
+$t=+12.1$). In $D_\mathrm{ad}$ the same low-band variability (20--282\,Hz\,$\sigma$:
+$t=+6.8$) is joined by \emph{mid-band} energy means (1.79--2.69\,kHz: $t=+6.7$;
+1.13--1.79\,kHz: $t=+6.7$; 2.69--3.93\,kHz: $t=+6.1$), echoing the mid-band shift
+seen in the association and occlusion profiles. The variance contrast between caught
+and missed spoofs (TP vs.\ FN, Levene) is dominated by the low-band energy
+variability 20--282\,Hz\,$\sigma$ (Levene $W=33.6$, $q=2{\times}10^{-8}$ for
+$D_\mathrm{zs}$; $W=72.8$, $q=7{\times}10^{-16}$ for $D_\mathrm{ad}$): spoof clips
+the detector misses carry markedly different low-band variability from those it
+catches. These tests significantly link specific frequency bands to the detectors'
+error structure, with low-band variability recurring for both detectors.
 
 % Detalhe por classe da Espinha 1 (Spearman): scatter da feature dominante,
 % mostrando o quanto cada MFCC covaria monotonicamente com P(spoof) dentro de
@@ -417,17 +679,28 @@ FDR-corrected significance. TODO.
 \begin{figure}[tbp]
   \centering
   \includegraphics[width=\columnwidth]{spearman_scatter}
-  \caption{Intra-class association between the most correlated MFCC and
-  $P(\mathrm{spoof})$ for each detector. Points are coloured by ground-truth class;
-  Spearman's $\rho$ (with post-FDR significance) is reported per class. Computing
-  $\rho$ within each class avoids the spurious correlation induced by class
-  separation.}
+  \caption{Intra-class association between the most correlated band-energy feature
+  and $P(\mathrm{spoof})$ for each detector. Points are coloured by ground-truth
+  class; Spearman's $\rho$ (with post-FDR significance) is reported per class.
+  Computing $\rho$ within each class avoids the spurious correlation induced by
+  class separation.}
   \label{fig:spearman}
 \end{figure}
 
 As a complementary associative view, Figure~\ref{fig:spearman} relates the most
-correlated MFCC to the detector score within each class
-(\texttt{spearman\_table}). TODO.
+correlated band-energy feature to the detector score within each class
+(\texttt{spearman\_table}). The association is monotonic and class-dependent. For
+$D_\mathrm{zs}$ the low-band energy mean (20--282\,Hz) rises with
+$P(\mathrm{spoof})$ in both classes ($\rho=+0.45$ in spoof, $+0.39$ in bona fide;
+both $q<10^{-47}$), i.e.\ higher low-frequency energy co-varies with a higher spoof
+score.
+For $D_\mathrm{ad}$ the dominant cue is the mid-band energy mean (1.79--2.69\,kHz):
+it \emph{lowers} the score among bona-fide clips ($\rho=-0.34$, $q<10^{-34}$) yet is
+essentially flat among spoof clips ($\rho=+0.06$), showing the cue acts chiefly by
+\emph{depressing the score of genuine speech} rather than by discriminating within
+the spoof class. Computing $\rho$ within each class is therefore essential: pooling
+the classes would manufacture a spurious global correlation from the score's
+bona-fide/spoof separation alone.
 
 % ==============================================================================
 \section{Discussion and Limitations}
@@ -437,14 +710,50 @@ correlated MFCC to the detector score within each class
 %  - quadrantes raros (FP/FN) com N baixo -> ressalvar poder;
 %  - adaptação insuficiente: se D_ad não superar D_zs, o contraste perde força;
 %  - janela fixa de ~4 s; um único checkpoint e um único dataset pt-BR.
-TODO.
+Several caveats bound the interpretation of these results. \emph{Registers do not
+mix.} The associative analysis and the causal analysis answer different questions;
+we keep their language separate and treat their agreement as corroboration rather
+than as a single proof. Only H3 is stated inferentially. \emph{Adaptation is shallow by
+design.} $D_\mathrm{ad}$ retrains only a linear read-out on a frozen encoder, so the
+observed cue shifts reflect a \emph{re-weighting} of pre-existing XLS-R
+representations, not new features learned for pt-BR; a fully fine-tuned encoder could
+move cues further, and our conclusions should not be extrapolated to that regime.
+\emph{Occlusion has a confound.} Band-stop filtering both removes a band's content
+and injects filtering artefacts; a detector might react to the distortion itself
+rather than to the missing band, so an occlusion effect localises \emph{where} the
+model is sensitive without proving the band's content is the sole cause.
+\emph{Band energy is not phonetics.} Log-mel band energies index where spectral
+power sits, not phonemes; we use them as acoustic pointers, not as phonetic proof.
+\emph{The associative analysis is univariate.} Spearman correlations score one band
+at a time and cannot capture cross-band interactions. Because its $D_\mathrm{ad}$
+profile no longer tracks the causal one (band-wise agreement $\rho=0.10$), we base
+band-level claims about $D_\mathrm{ad}$ on the occlusion analysis. \emph{Power in
+rare quadrants.} The FP and FN quadrants, though numbering in the hundreds, are the
+smallest, so small effects there may go undetected. Finally, the study uses a single
+checkpoint, a single pt-BR corpus, and a fixed $\approx$4\,s window; generalisation
+across models, languages, and durations remains to be established.
 
 % ==============================================================================
 \section{Conclusion and Future Work}
 % Síntese (spec §9 passo 9) + extensões opcionais (spec §12):
 %  - análise por algoritmo gerador (coluna 'model' do config spoof -> ANOVA);
 %  - correlação embedding<->MFCC (análise representacional).
-TODO.
+We presented a population-level, dual-axis acoustic explanation of a black-box
+XLS-R deepfake detector on Brazilian Portuguese, contrasting a zero-shot model with
+a lightly adapted one. Associative (intra-class Spearman) and causal (spectral
+occlusion) evidence, computed on a shared mel-band grid, agree that light adaptation
+reshapes the detector's acoustic reliance: from a diffuse, broadband use of
+low-band spectral energy toward a localised low-frequency footprint with an emergent
+mid-band cue that favours bona fide, alongside a clear EER improvement. Placing both
+analyses on the same frequency axis let us quantify their agreement directly: it is
+moderate for the zero-shot detector (band-wise $\rho=0.69$, though only suggestive at
+eight bands) and essentially absent after adaptation ($\rho=0.10$), locating where
+the two views of the model agree and where they do not. Error-linked acoustic
+differences are statistically significant under FDR control for both detectors. Future work includes stratifying the analysis by spoof generator (the
+corpus exposes a generator-method attribute, enabling per-algorithm ANOVA), scaling
+to the full corpus, correlating band-energy descriptors with the XLS-R embedding
+space to bridge acoustic and representational views, and extending the protocol to
+fully fine-tuned detectors and additional languages.
 
 % ==============================================================================
 % Flush de floats pendentes: o esqueleto tem muitas figuras e pouco texto, então
