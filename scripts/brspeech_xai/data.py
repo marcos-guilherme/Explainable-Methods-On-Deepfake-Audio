@@ -96,18 +96,18 @@ def build_balanced_split(dataset_id, split, n_per_class, loader="auto", seed=42)
     if loader in ("auto", "stream"):
         try:
             a, s, lbl, prov = _collect_stream(dataset_id, split, n_per_class)
-            LOGGER.info("coleta via streaming: %d audios (%s)", len(a), split)
+            LOGGER.info(f"coleta via streaming: {len(a)} audios ({split})")
             return _shuffle(a, s, lbl, prov, seed)
         except (HfHubHTTPError, Exception) as exc:  # noqa: BLE001
             if loader == "stream" or not _is_xet_signature_error(exc):
                 raise
-            LOGGER.warning("streaming falhou (%s); fallback para download", type(exc).__name__)
+            LOGGER.warning(f"streaming falhou ({type(exc).__name__}); fallback para download")
     # download por classe
     audios, srs, labels, prov = [], [], [], []
     for label in (0, 1):
         a, s, p = _collect_download(dataset_id, label, split, n_per_class)
         audios += a; srs += s; labels += [label] * len(a); prov += p
-        LOGGER.info("download %s/%s: %d audios", LABEL_NAMES[label], split, len(a))
+        LOGGER.info(f"download {LABEL_NAMES[label]}/{split}: {len(a)} audios")
     return _shuffle(audios, srs, labels, prov, seed)
 
 

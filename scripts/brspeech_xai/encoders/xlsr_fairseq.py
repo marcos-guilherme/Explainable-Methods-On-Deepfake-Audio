@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from tqdm.auto import tqdm
 
+from ..logging_utils import progress
 from ..preprocessing import preprocess
 
 
@@ -30,7 +30,8 @@ class XlsrFairseqEmbedder:
                            batch_size: int = 8) -> np.ndarray:
         """Embedding por áudio: média sobre os frames do XLS-R (== AdaptiveAvgPool1d)."""
         embs: list[np.ndarray] = []
-        for i in range(0, len(audios), batch_size):
+        for i in progress(range(0, len(audios), batch_size),
+                          desc="embeddings XLS-R", unit="batch"):
             wavs = [preprocess(a, sr) for a, sr in zip(audios[i:i + batch_size],
                                                        srs[i:i + batch_size])]
             batch = torch.stack(wavs).to(self.device)            # (B, T)
@@ -41,10 +42,10 @@ class XlsrFairseqEmbedder:
 
     def spoof_prob_batch(self, audios: list[np.ndarray], srs: list[int],
                          batch_size: int = 8, norm_mode: str = "layernorm",
-                         desc: str = "Inferencia") -> np.ndarray:
+                         desc: str = "inferência zero-shot") -> np.ndarray:
         """P(spoof) zero-shot para uma lista de áudios brutos (em lotes, sem gradiente)."""
         scores: list[float] = []
-        for start in tqdm(range(0, len(audios), batch_size), desc=desc):
+        for start in progress(range(0, len(audios), batch_size), desc=desc, unit="batch"):
             batch_audios = audios[start:start + batch_size]
             batch_srs = srs[start:start + batch_size]
             batch = torch.stack(

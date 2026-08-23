@@ -37,11 +37,11 @@ def main(argv=None) -> int:
     set_seed(cfg.seed)
     paths = RunPaths(root=Path(args.run_dir))
     logger = get_logger(logfile=paths.path("run.log"))
-    logger.info("RESUME run_dir=%s device=%s hash=%s", args.run_dir, cfg.device,
-                cfg.config_hash())
+    logger.info(f"RESUME run_dir={args.run_dir} device={cfg.device} "
+                f"hash={cfg.config_hash()}")
     run_stages(cfg, paths, logger, ctx_extra={"plots": not args.no_plots},
                start=args.start, only=args.only, force=args.force)
-    logger.info("pipeline concluído: %s", paths.root)
+    logger.info(f"pipeline concluído: {paths.root}")
     return 0
 
 

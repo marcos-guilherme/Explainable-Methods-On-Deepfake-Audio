@@ -1,8 +1,11 @@
 """Orquestração resumível dos estágios (skip via 'done markers' por hash de config)."""
 from __future__ import annotations
 
+import time
+
 from . import artifacts as A
 from . import stages as S
+from .logging_utils import format_duration
 
 STAGES = [
     ("collect", S.stage_collect),
@@ -30,16 +33,38 @@ def run_stages(cfg, paths, logger, ctx_extra, start=None, only=None, force=False
     # Reconfigura a grade compartilhada (H1 e H2) ANTES de qualquer estágio.
     configure_bands(cfg.bands.n_bands, cfg.bands.f_min, cfg.bands.f_max)
     chash = cfg.config_hash()
-    for name, fn in _selected(start, only):
+    selected = _selected(start, only)
+    total = len(selected)
+    durations: dict[str, float] = {}
+    for i, (name, fn) in enumerate(selected, 1):
         if not force and A.is_done(paths, name, chash):
             if logger:
-                logger.info("estágio '%s' já concluído; pulando", name)
+                logger.info(f"[{i}/{total}] estágio '{name}' já concluído; pulando")
             continue
         if logger:
-            logger.info(">> executando estágio: %s", name)
+            logger.info(f"[{i}/{total}] ▶ estágio: {name}")
+        started = time.perf_counter()
         ctx = _make_ctx(cfg, paths, logger, ctx_extra)
         fn(ctx)
-        A.write_done(paths, name, chash, meta={})
+        elapsed = time.perf_counter() - started
+        durations[name] = elapsed
+        A.write_done(paths, name, chash, meta={"seconds": round(elapsed, 3)})
+        if logger:
+            done = format_duration(sum(durations.values()))
+            logger.info(f"[{i}/{total}] ✓ '{name}' em {format_duration(elapsed)}"
+                        f" (acumulado {done})")
+    if logger and durations:
+        _log_timing_summary(logger, durations)
+
+
+def _log_timing_summary(logger, durations: dict[str, float]) -> None:
+    """Tabela final: tempo por estágio e fração do total (ajuda a achar gargalos)."""
+    total = sum(durations.values())
+    logger.info("resumo de tempos por estágio:")
+    for name, seconds in durations.items():
+        share = 100.0 * seconds / total if total else 0.0
+        logger.info(f"  {name:<13}{format_duration(seconds):>10}  ({share:4.1f}%)")
+    logger.info(f"  {'TOTAL':<13}{format_duration(total):>10}")
 
 
 def _make_ctx(cfg, paths, logger, ctx_extra):

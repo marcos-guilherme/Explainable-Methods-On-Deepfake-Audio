@@ -6,6 +6,7 @@ import torch
 from scipy.signal import butter, sosfiltfilt
 
 from .bands import mel_band_edges  # noqa: F401 (re-exportado; fonte única em bands.py)
+from .logging_utils import progress
 from .preprocessing import resample_to_16k, to_mono
 
 
@@ -15,7 +16,7 @@ def bandstop(wav: np.ndarray, low: float, high: float, sr: int = 16000) -> np.nd
     return sosfiltfilt(sos, wav).astype(np.float32)
 
 
-def occlusion_drop(p_spoof_fn, audios, srs, band_edges) -> np.ndarray:
+def occlusion_drop(p_spoof_fn, audios, srs, band_edges, desc="oclusão") -> np.ndarray:
     """Queda de P(spoof) por clipe ao ocluir cada banda (baseline = áudio íntegro).
 
     Sinal (mesma convenção do notebook): valor positivo = ocluir a banda derruba
@@ -23,19 +24,22 @@ def occlusion_drop(p_spoof_fn, audios, srs, band_edges) -> np.ndarray:
     empurra para bonafide).
 
     p_spoof_fn: função (audio, sr) -> P(spoof) do detector alvo.
+    desc: rótulo da barra de progresso (varre uma banda por passo).
     Returns: matriz (n_clips, n_bands) de quedas por clipe (baseline - ocluído).
         A média por banda é `drops.mean(axis=0)`; a incerteza vem de `bootstrap_ci`.
     """
     base = np.array([p_spoof_fn(a, sr) for a, sr in zip(audios, srs)])
     cols = []
-    for lo, hi in zip(band_edges[:-1], band_edges[1:]):
+    bands = list(zip(band_edges[:-1], band_edges[1:]))
+    for lo, hi in progress(bands, desc=desc, unit="band"):
         occ = np.array([p_spoof_fn(bandstop(a.astype(np.float32), lo, hi, sr), sr)
                         for a, sr in zip(audios, srs)])
         cols.append(base - occ)
     return np.column_stack(cols) if cols else np.empty((len(base), 0))
 
 
-def grouped_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices) -> np.ndarray:
+def grouped_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices,
+                           desc="oclusão de grupo") -> np.ndarray:
     """Queda de P(spoof) por clipe ao ocluir um GRUPO de bandas de uma só vez.
 
     Diferente de `occlusion_drop` (uma banda por vez), aqui removemos todas as bandas
@@ -54,7 +58,7 @@ def grouped_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices) ->
     if not band_indices:
         return np.zeros(len(base), dtype=np.float64)
     occ = []
-    for a, sr in zip(audios, srs):
+    for a, sr in progress(list(zip(audios, srs)), desc=desc, unit="clip"):
         wav = a.astype(np.float32)
         for bi in band_indices:
             wav = bandstop(wav, band_edges[bi], band_edges[bi + 1], sr)
