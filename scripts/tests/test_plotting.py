@@ -82,6 +82,26 @@ def test_spine_convergence(tmp_path):
     assert (tmp_path / "spine_convergence_zs_vs_ad.pdf").exists()
 
 
+def test_plots_without_zero_shot(tmp_path):
+    """Encoder só-extrator (sem D_zs): as figuras rodam só com o detector 'ad'."""
+    P.set_plot_style()
+    master = _master()
+    master = master.drop(columns=["p_spoof_zs", "quadrant_zs"])  # simula ausência de D_zs
+    occ = _occ_full()
+    occ = occ[occ.detector == "ad"].reset_index(drop=True)
+    spearman = _spearman_df()
+    spearman = spearman[spearman.detector == "ad"].reset_index(drop=True)
+    agree = cross_spine_agreement(occ, spearman)
+    P.plot_occlusion_bands(BAND_EDGES, occ, tmp_path)
+    P.plot_occlusion_overlay(BAND_EDGES, occ, tmp_path)
+    P.plot_spine_convergence(BAND_EDGES, occ, spearman, agree, tmp_path)
+    P.plot_association_profile(spearman, tmp_path, top_n=5)
+    P.plot_det(master, tmp_path)
+    for name in ("occlusion_bands_zs_vs_ad", "occlusion_overlay_zs_vs_ad",
+                 "spine_convergence_zs_vs_ad", "det_zs_vs_ad"):
+        assert (tmp_path / f"{name}.pdf").exists()
+
+
 def test_convergence_intervention(tmp_path):
     P.set_plot_style()
     rng = np.random.default_rng(0)

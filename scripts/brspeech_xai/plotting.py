@@ -285,13 +285,15 @@ def plot_occlusion_bands(edges, occ: pd.DataFrame, figures_dir: str | Path):
     ci_low, ci_high.
     """
     centers = (edges[:-1] + edges[1:]) / 2
-    labels = {"zs": r"$D_\mathrm{zs}$ (zero-shot)", "ad": r"$D_\mathrm{ad}$ (adapted)"}
-    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_SINGLE, 4.2))
-    for ax, tag in zip(axes, ["zs", "ad"]):
+    tags = [t for t in ("zs", "ad") if not occ[occ.detector == t].empty]
+    fig, axes = plt.subplots(len(tags), 1, sharex=True, squeeze=False,
+                             figsize=(COL_WIDTH_SINGLE, 2.1 * len(tags)))
+    axes = axes[:, 0]
+    for ax, tag in zip(axes, tags):
         sub = occ[occ.detector == tag].sort_values("band_hz_low")
         _occlusion_panel(ax, centers, sub["mean_p_spoof_drop"].to_numpy(),
                          sub["ci_low"].to_numpy(), sub["ci_high"].to_numpy(),
-                         labels.get(tag, tag))
+                         DETECTOR_LABEL[tag])
     axes[0].legend(loc="upper right", fontsize=7)
     axes[-1].set_xlabel("Frequency band center (Hz)")
     fig.tight_layout()
@@ -538,7 +540,7 @@ def plot_det(master: pd.DataFrame, figures_dir: str | Path):
     y = master["ground_truth"].to_numpy()
     ticks = [0.01, 0.02, 0.05, 0.1, 0.2, 0.4]
     fig, ax = plt.subplots(figsize=(COL_WIDTH_SINGLE, 3.2))
-    for tag in ("zs", "ad"):
+    for tag in [t for t in ("zs", "ad") if f"p_spoof_{t}" in master.columns]:
         scores = master[f"p_spoof_{tag}"].to_numpy()
         fpr, tpr, _ = roc_curve(y, scores, pos_label=1)
         fnr = 1.0 - tpr
@@ -619,8 +621,11 @@ def plot_spine_convergence(edges, occ: pd.DataFrame, spearman: pd.DataFrame,
     direita). O título traz o ρ de concordância (Spearman) por detector."""
     centers = (edges[:-1] + edges[1:]) / 2
     n_bands = len(centers)
-    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_SINGLE, 4.2))
-    for ax, tag in zip(axes, ("zs", "ad")):
+    tags = [t for t in ("zs", "ad") if not occ[occ.detector == t].empty]
+    fig, axes = plt.subplots(len(tags), 1, sharex=True, squeeze=False,
+                             figsize=(COL_WIDTH_SINGLE, 2.1 * len(tags)))
+    axes = axes[:, 0]
+    for ax, tag in zip(axes, tags):
         sub = occ[occ.detector == tag].sort_values("band_hz_low")
         causal = np.abs(sub["mean_p_spoof_drop"].to_numpy())
         assoc = _band_assoc_strength(spearman, tag, n_bands)

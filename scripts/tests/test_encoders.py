@@ -20,8 +20,26 @@ class _FakeEmbedder:
         return np.zeros((len(audios), 3), dtype=np.float32)
 
 
-def test_default_registry_lists_xlsr():
+def test_default_registry_lists_xlsr_and_hf_ssl():
     assert "xlsr_fairseq" in available_encoders()
+    assert "hf_ssl" in available_encoders()
+
+
+def test_hf_ssl_builder_reads_hf_fields(monkeypatch):
+    # Despacha para hf_ssl passando checkpoint/layer/pooling, sem carregar transformers.
+    captured = {}
+
+    def fake_builder(cfg, device):
+        captured.update(checkpoint=cfg.checkpoint, layer=cfg.layer,
+                        pooling=cfg.pooling, device=device)
+        return _FakeEmbedder(device)
+
+    monkeypatch.setitem(encoders._BUILDERS, "hf_ssl", fake_builder)
+    cfg = SimpleNamespace(encoder="hf_ssl", checkpoint="facebook/hubert-base-ls960",
+                          layer=-1, pooling="mean", spoof_index=0)
+    build_encoder(cfg, device="cpu")
+    assert captured == {"checkpoint": "facebook/hubert-base-ls960", "layer": -1,
+                        "pooling": "mean", "device": "cpu"}
 
 
 def test_unknown_encoder_raises():

@@ -5,7 +5,7 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
-from .config import dump_resolved, load_config
+from .config import dump_resolved, encoder_slug, load_config
 from .logging_utils import get_logger
 from .pipeline import run_stages
 from .seed import set_seed
@@ -31,7 +31,8 @@ def main(argv=None) -> int:
         cfg.device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(cfg.seed)
     run_id = f"{cfg.run_name}-{dt.datetime.now():%Y%m%d-%H%M%S}"
-    root = Path(cfg.output_dir) / run_id
+    # Agrupa as runs por versão de encoder: results/<encoder>/<run_id>/.
+    root = Path(cfg.output_dir) / encoder_slug(cfg.model) / run_id
     from .artifacts import RunPaths
     paths = RunPaths(root=root)
     logger = get_logger(logfile=paths.path("run.log"))

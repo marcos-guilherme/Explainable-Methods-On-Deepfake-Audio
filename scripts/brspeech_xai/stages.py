@@ -27,6 +27,15 @@ def _analysis_split(cfg: RunConfig) -> str:
     return POOL_SPLIT if cfg.adapt.cross_fit else cfg.data.eval_split
 
 
+def _present_detectors(master) -> list[str]:
+    """Detectores com score disponível na tabela mestra (ordem fixa zs, ad).
+
+    Encoders só-extratores (has_zero_shot=False) não geram D_zs; os estágios a
+    jusante devem iterar apenas os detectores presentes, em vez de assumir zs+ad.
+    """
+    return [t for t in ("zs", "ad") if f"p_spoof_{t}" in master.columns]
+
+
 def _p_spoof_zs(embedder, audios, srs) -> np.ndarray:
     """P(spoof) zero-shot (D_zs) do encoder, exigindo suporte a zero-shot.
 
@@ -113,17 +122,20 @@ def _adapt_crossfit(ctx: RunContext) -> None:
     final_head = make()
     final_head.fit(emb, y)
     joblib.dump(final_head, p.path("d_ad.joblib"))
-    # D_zs pontua todos os áudios do pool diretamente.
-    enc = ctx.get_embedder()
-    audios = list(np.load(p.path(f"audios_{POOL_SPLIT}.npy"), allow_pickle=True))
-    srs = [int(s) for s in np.load(p.path(f"srs_{POOL_SPLIT}.npy"))]
-    p_zs = _p_spoof_zs(enc, audios, srs)
-    eer_zs, _ = compute_eer(p_zs, y)
     eer_ad, _ = compute_eer(p_ad, y)
-    A.save_json({"mode": "crossfit", "head": cfg.adapt.head, "cv_folds": cfg.adapt.cv_folds,
-                 "n_pool": int(len(y)), "eer_zs": float(eer_zs), "eer_ad": float(eer_ad),
-                 "improved": bool(eer_ad < eer_zs)}, p.path("eer_precheck.json"))
-    A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+    enc = ctx.get_embedder()
+    precheck = {"mode": "crossfit", "head": cfg.adapt.head, "cv_folds": cfg.adapt.cv_folds,
+                "n_pool": int(len(y)), "eer_ad": float(eer_ad),
+                "has_zero_shot": bool(getattr(enc, "has_zero_shot", False))}
+    # D_zs (congelado) pontua o pool direto, só quando o encoder expõe zero-shot.
+    if getattr(enc, "has_zero_shot", False):
+        audios = list(np.load(p.path(f"audios_{POOL_SPLIT}.npy"), allow_pickle=True))
+        srs = [int(s) for s in np.load(p.path(f"srs_{POOL_SPLIT}.npy"))]
+        p_zs = _p_spoof_zs(enc, audios, srs)
+        eer_zs, _ = compute_eer(p_zs, y)
+        precheck.update(eer_zs=float(eer_zs), improved=bool(eer_ad < eer_zs))
+        A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+    A.save_json(precheck, p.path("eer_precheck.json"))
     A.save_npy(p_ad.astype(np.float32), p.path("p_spoof_ad.npy"))
 
 
@@ -139,17 +151,20 @@ def _adapt_legacy(ctx: RunContext) -> None:
     ad_head = build_head(cfg.adapt.head, cfg.seed)
     ad_head.fit(emb_train, y_train)
     joblib.dump(ad_head, p.path("d_ad.joblib"))
-    enc = ctx.get_embedder()
-    audios = list(np.load(p.path(f"audios_{cfg.data.eval_split}.npy"), allow_pickle=True))
-    srs = [int(s) for s in np.load(p.path(f"srs_{cfg.data.eval_split}.npy"))]
-    p_zs = _p_spoof_zs(enc, audios, srs)
     p_ad = ad_head.predict_proba(emb_test)[:, SPOOF_LABEL]
-    eer_zs, _ = compute_eer(p_zs, y_test)
     eer_ad, _ = compute_eer(p_ad, y_test)
-    A.save_json({"mode": "holdout", "head": cfg.adapt.head,
-                 "eer_zs": float(eer_zs), "eer_ad": float(eer_ad),
-                 "improved": bool(eer_ad < eer_zs)}, p.path("eer_precheck.json"))
-    A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+    enc = ctx.get_embedder()
+    precheck = {"mode": "holdout", "head": cfg.adapt.head, "eer_ad": float(eer_ad),
+                "has_zero_shot": bool(getattr(enc, "has_zero_shot", False))}
+    # D_zs (congelado) pontua o split de avaliação, só quando há zero-shot.
+    if getattr(enc, "has_zero_shot", False):
+        audios = list(np.load(p.path(f"audios_{cfg.data.eval_split}.npy"), allow_pickle=True))
+        srs = [int(s) for s in np.load(p.path(f"srs_{cfg.data.eval_split}.npy"))]
+        p_zs = _p_spoof_zs(enc, audios, srs)
+        eer_zs, _ = compute_eer(p_zs, y_test)
+        precheck.update(eer_zs=float(eer_zs), improved=bool(eer_ad < eer_zs))
+        A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+    A.save_json(precheck, p.path("eer_precheck.json"))
     A.save_npy(p_ad.astype(np.float32), p.path("p_spoof_ad.npy"))
 
 
@@ -161,16 +176,20 @@ def stage_features(ctx: RunContext) -> None:
     test = samples[samples.split == split].reset_index(drop=True)
     audios = list(np.load(p.path(f"audios_{split}.npy"), allow_pickle=True))
     srs = [int(s) for s in np.load(p.path(f"srs_{split}.npy"))]
-    p_zs = A.load_npy(p.path("p_spoof_zs.npy"))
-    p_ad = A.load_npy(p.path("p_spoof_ad.npy"))
     y = test["label"].to_numpy()
-    thr_zs = compute_eer(p_zs, y)[1]
-    thr_ad = compute_eer(p_ad, y)[1]
     feats = np.vstack([mel_band_features(a, s) for a, s in zip(audios, srs)])
-    df = pd.DataFrame({"sample_id": test.index, "ground_truth": y,
-                       "p_spoof_zs": p_zs, "pred_zs": (p_zs >= thr_zs).astype(int),
-                       "p_spoof_ad": p_ad, "pred_ad": (p_ad >= thr_ad).astype(int)})
-    df["quadrant_zs"] = [quadrant(t, pz) for t, pz in zip(df.ground_truth, df.pred_zs)]
+    df = pd.DataFrame({"sample_id": test.index, "ground_truth": y})
+    # D_zs só existe quando o encoder expõe zero-shot (arquivo gravado no stage_adapt).
+    if p.path("p_spoof_zs.npy").exists():
+        p_zs = A.load_npy(p.path("p_spoof_zs.npy"))
+        thr_zs = compute_eer(p_zs, y)[1]
+        df["p_spoof_zs"] = p_zs
+        df["pred_zs"] = (p_zs >= thr_zs).astype(int)
+        df["quadrant_zs"] = [quadrant(t, pz) for t, pz in zip(df.ground_truth, df.pred_zs)]
+    p_ad = A.load_npy(p.path("p_spoof_ad.npy"))
+    thr_ad = compute_eer(p_ad, y)[1]
+    df["p_spoof_ad"] = p_ad
+    df["pred_ad"] = (p_ad >= thr_ad).astype(int)
     df["quadrant_ad"] = [quadrant(t, pa) for t, pa in zip(df.ground_truth, df.pred_ad)]
     for j, name in enumerate(bands.BAND_COLS):
         df[name] = feats[:, j]
@@ -181,9 +200,8 @@ def stage_association(ctx: RunContext) -> None:
     """Espinha 1 (associativa): Spearman intra-classe energia-de-banda↔P(spoof)."""
     cfg, p = ctx.cfg, ctx.paths
     master = A.load_table(p.path("master_table.parquet"))
-    spearman = pd.concat([spearman_intraclass(master, "zs", bands.BAND_COLS),
-                          spearman_intraclass(master, "ad", bands.BAND_COLS)],
-                         ignore_index=True)
+    spearman = pd.concat([spearman_intraclass(master, t, bands.BAND_COLS)
+                          for t in _present_detectors(master)], ignore_index=True)
     A.save_table(spearman, p.path("spearman_table.csv"))
     if _plots_on(ctx):
         from .plotting import (plot_association_profile,
@@ -290,8 +308,8 @@ def stage_confirmatory(ctx: RunContext) -> None:
     master = A.load_table(p.path("master_table.parquet"))
     spearman = A.load_table(p.path("spearman_table.csv"))
     top = top_features_by_rho(spearman, ctx.cfg.association.top_n)
-    conf = pd.concat([confirmatory_tests(master, "zs", "quadrant_zs", top),
-                      confirmatory_tests(master, "ad", "quadrant_ad", top)],
+    dets = _present_detectors(master)
+    conf = pd.concat([confirmatory_tests(master, t, f"quadrant_{t}", top) for t in dets],
                      ignore_index=True)
     A.save_table(conf, p.path("confirmatory_tests.csv"))
     if _plots_on(ctx):
@@ -299,11 +317,10 @@ def stage_confirmatory(ctx: RunContext) -> None:
                                set_plot_style)
         set_plot_style()
         top_box = top[:6]  # H3: até 6 features mais salientes (boxplots de apoio)
-        plot_confirmatory_box(master, conf, top_box, "zs", "quadrant_zs", p.path("figures"))
-        plot_confirmatory_box(master, conf, top_box, "ad", "quadrant_ad", p.path("figures"))
-        # Figura principal de H3: tamanho de efeito (média TN-FP e variância TP-FN).
-        plot_confirmatory_effects(master, conf, top, "zs", "quadrant_zs", p.path("figures"))
-        plot_confirmatory_effects(master, conf, top, "ad", "quadrant_ad", p.path("figures"))
+        for t in dets:
+            plot_confirmatory_box(master, conf, top_box, t, f"quadrant_{t}", p.path("figures"))
+            # Figura principal de H3: tamanho de efeito (média TN-FP e variância TP-FN).
+            plot_confirmatory_effects(master, conf, top, t, f"quadrant_{t}", p.path("figures"))
 
 
 def stage_report(ctx: RunContext) -> None:
@@ -312,7 +329,7 @@ def stage_report(ctx: RunContext) -> None:
     y = master["ground_truth"].to_numpy()
     from sklearn.metrics import accuracy_score, matthews_corrcoef
     rows = []
-    for tag in ("zs", "ad"):
+    for tag in _present_detectors(master):
         eer, _ = compute_eer(master[f"p_spoof_{tag}"].to_numpy(), y)
         pred = master[f"pred_{tag}"].to_numpy()
         rows.append({"detector": tag, "eer": float(eer),

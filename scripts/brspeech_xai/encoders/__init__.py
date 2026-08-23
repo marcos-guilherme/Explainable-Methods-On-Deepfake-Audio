@@ -41,10 +41,17 @@ def _build_xlsr_fairseq(model_cfg, device: str) -> AudioEmbedder:
                                spoof_index=model_cfg.spoof_index, device=device)
 
 
+def _build_hf_ssl(model_cfg, device: str) -> AudioEmbedder:
+    from .hf_ssl import HFSSLEmbedder
+    return HFSSLEmbedder(checkpoint=model_cfg.checkpoint, layer=model_cfg.layer,
+                         pooling=model_cfg.pooling, device=device)
+
+
 # nome -> construtor. O import pesado (torch/fairseq/transformers) fica dentro de cada
 # construtor, para não carregar nada quando o encoder não é usado.
 _BUILDERS = {
     "xlsr_fairseq": _build_xlsr_fairseq,
+    "hf_ssl": _build_hf_ssl,
 }
 
 

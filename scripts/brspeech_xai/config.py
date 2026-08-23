@@ -94,6 +94,17 @@ class RunConfig:
         return asdict(self)
 
 
+def encoder_slug(model: ModelConfig) -> str:
+    """Identificador de pasta por versão de encoder (agrupa as runs em results/<slug>/).
+
+    Ex.: 'xlsr_fairseq'; para o HuggingFace, inclui o checkpoint ('hf_ssl-hubert-base-ls960')
+    para distinguir versões do mesmo backend.
+    """
+    if model.encoder == "hf_ssl":
+        return f"hf_ssl-{model.checkpoint.split('/')[-1]}"
+    return model.encoder
+
+
 _NESTED = {"data": DataConfig, "audio": AudioConfig, "model": ModelConfig,
            "bands": BandsConfig, "occlusion": OcclusionConfig,
            "association": AssociationConfig, "adapt": AdaptConfig}

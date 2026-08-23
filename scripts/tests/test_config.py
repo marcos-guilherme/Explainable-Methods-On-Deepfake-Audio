@@ -1,4 +1,11 @@
-from brspeech_xai.config import RunConfig, load_config
+from brspeech_xai.config import ModelConfig, RunConfig, encoder_slug, load_config
+
+
+def test_encoder_slug_groups_by_version():
+    assert encoder_slug(ModelConfig()) == "xlsr_fairseq"
+    assert encoder_slug(ModelConfig(encoder="hf_ssl",
+                                    checkpoint="facebook/hubert-base-ls960")) \
+        == "hf_ssl-hubert-base-ls960"
 
 
 def test_load_default_and_override(tmp_path):
