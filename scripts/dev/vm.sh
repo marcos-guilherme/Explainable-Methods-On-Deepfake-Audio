@@ -13,6 +13,7 @@
 #   scripts/dev/vm.sh smoke                      # run rápido (configs/smoke.yaml), em 1º plano
 #   scripts/dev/vm.sh run [CONFIG] [-- --set k=v ...]   # run em 2º plano (nohup + log)
 #   scripts/dev/vm.sh run-fg [CONFIG] [-- ...]   # run em 1º plano (bloqueia; para depurar)
+#   scripts/dev/vm.sh resume RUN_DIR [-- --from STAGE --force]  # reprocessa estágios de uma run existente
 #   scripts/dev/vm.sh logs                       # acompanha o log da última run (tail -f)
 #   scripts/dev/vm.sh status                      # containers rodando + últimas linhas do log
 #   scripts/dev/vm.sh fetch [DEST]               # baixa results/ da VM (default: ./results)
@@ -159,6 +160,34 @@ case "$cmd" in
             "${SSH[@]}" "cd ${VM_DIR} && nohup docker compose run --rm -T deepfake run-scripts ${cfg} ${overrides} > ${remote_log} 2>&1 & echo \"PID remoto: \$!\""
             log "acompanhe com: $0 logs   |   baixe com: $0 fetch"
         fi
+        ;;
+
+    resume)
+        # Reprocessa estágios de uma run EXISTENTE (reaproveita embeddings/adapt/features),
+        # usando o config.resolved.yaml da própria run para preservar a grade de bandas.
+        do_sync
+        run_dir_arg="${1:-}"; shift || true
+        [[ "${1:-}" == "--" ]] && shift || true
+        if [[ -z "$run_dir_arg" ]]; then
+            log "uso: $0 resume RUN_DIR [-- --from STAGE --force]"
+            log "ex.: $0 resume default-20260823-154103 -- --from association --force"
+            exit 2
+        fi
+        case "$run_dir_arg" in
+            /*) rdir="$run_dir_arg" ;;
+            results/*) rdir="/workspace/${run_dir_arg}" ;;
+            *) rdir="/workspace/results/${run_dir_arg}" ;;
+        esac
+        extra="${*:---from association --force}"   # default: regenera figuras de association em diante
+        ts="$(date +%Y%m%d-%H%M%S)"
+        remote_log="logs/resume-${ts}.log"
+        log "resume em 2º plano: ${rdir} ${extra}"
+        log "log remoto: ${VM_DIR}/${remote_log}"
+        "${SSH[@]}" "cd ${VM_DIR} && nohup docker compose run --rm -T deepfake \
+            python /workspace/scripts/dev/resume_run.py \
+            --config ${rdir}/config.resolved.yaml --run-dir ${rdir} ${extra} \
+            > ${remote_log} 2>&1 & echo \"PID remoto: \$!\""
+        log "acompanhe com: $0 logs   |   baixe com: $0 fetch"
         ;;
 
     logs)
