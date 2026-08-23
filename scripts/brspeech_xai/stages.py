@@ -13,6 +13,7 @@ from .adaptation import make_p_spoof_ad
 from .config import RunConfig
 from .data import SPOOF_LABEL, build_balanced_split
 from .features import mel_band_features
+from .logging_utils import progress
 from .metrics import compute_eer, quadrant
 from .occlusion import (bootstrap_ci, grouped_occlusion_drop, mel_band_edges,
                         occlusion_drop, stratified_idx, to_16k_mono)
@@ -93,6 +94,8 @@ def stage_embeddings(ctx: RunContext) -> None:
     for name, _split, _n in _collect_specs(cfg):
         audios = list(np.load(p.path(f"audios_{name}.npy"), allow_pickle=True))
         srs = list(np.load(p.path(f"srs_{name}.npy")))
+        if ctx.logger:
+            ctx.logger.info(f"embeddings '{name}': {len(audios)} clipes ({enc.name})")
         emb = enc.extract_embeddings(audios, [int(s) for s in srs])
         A.save_npy(emb.astype(np.float32), p.path(f"emb_{name}.npy"))
 
@@ -177,7 +180,12 @@ def stage_features(ctx: RunContext) -> None:
     audios = list(np.load(p.path(f"audios_{split}.npy"), allow_pickle=True))
     srs = [int(s) for s in np.load(p.path(f"srs_{split}.npy"))]
     y = test["label"].to_numpy()
-    feats = np.vstack([mel_band_features(a, s) for a, s in zip(audios, srs)])
+    if ctx.logger:
+        ctx.logger.info(f"features log-mel: {len(audios)} clipes × "
+                        f"{cfg.bands.n_bands} bandas (μ/σ)")
+    feats = np.vstack([mel_band_features(a, s)
+                       for a, s in progress(list(zip(audios, srs)),
+                                            desc="features log-mel", unit="clip")])
     df = pd.DataFrame({"sample_id": test.index, "ground_truth": y})
     # D_zs só existe quando o encoder expõe zero-shot (arquivo gravado no stage_adapt).
     if p.path("p_spoof_zs.npy").exists():
@@ -239,8 +247,10 @@ def _convergence_intervention(cfg, master, audios, srs, edges, targets):
         idx = stratified_idx(test_master, quad_col, cfg.occlusion.per_quadrant, seed=cfg.seed)
         sub_audios = [to_16k_mono(audios[i], srs[i]) for i in idx]
         sub_srs = [16000] * len(sub_audios)
-        d_top = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, top)
-        d_bottom = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, bottom)
+        d_top = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, top,
+                                       desc=f"convergência {tag} top-{k}")
+        d_bottom = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, bottom,
+                                          desc=f"convergência {tag} bottom-{k}")
         stat = paired_intervention_test(d_top, d_bottom, seed=cfg.seed,
                                         n_boot=cfg.occlusion.n_boot)
         rows.append({"detector": tag, "k_bands": k,
@@ -271,8 +281,11 @@ def stage_occlusion(ctx: RunContext) -> None:
         # A oclusão sempre filtra a 16 kHz (bordas < Nyquist para qualquer sr nativo).
         sub_audios = [to_16k_mono(audios[i], srs[i]) for i in idx]
         sub_srs = [16000] * len(sub_audios)
+        if ctx.logger:
+            ctx.logger.info(f"oclusão {tag}: {len(sub_audios)} clipes × "
+                            f"{cfg.bands.n_bands} bandas")
         # (n_clips, n_bands): queda por clipe; média + IC 95% por bootstrap sobre os clipes.
-        drops = occlusion_drop(fn, sub_audios, sub_srs, edges)
+        drops = occlusion_drop(fn, sub_audios, sub_srs, edges, desc=f"oclusão {tag}")
         mean_drop = drops.mean(axis=0)
         ci_low, ci_high = bootstrap_ci(drops, n_boot=cfg.occlusion.n_boot, seed=cfg.seed)
         for bi in range(len(edges) - 1):

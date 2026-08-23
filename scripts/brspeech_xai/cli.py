@@ -37,11 +37,26 @@ def main(argv=None) -> int:
     paths = RunPaths(root=root)
     logger = get_logger(logfile=paths.path("run.log"))
     dump_resolved(cfg, paths.path("config.resolved.yaml"))
-    logger.info("run_id=%s device=%s hash=%s", run_id, cfg.device, cfg.config_hash())
+    _log_run_header(logger, cfg, run_id, root)
     run_stages(cfg, paths, logger, ctx_extra={"plots": not args.no_plots},
                start=args.start, only=args.only, force=args.force)
-    logger.info("pipeline concluído: %s", root)
+    logger.info(f"pipeline concluído: {root}")
     return 0
+
+
+def _log_run_header(logger, cfg, run_id: str, root) -> None:
+    """Cabeçalho do run: dá o panorama (encoder, device, grade, dados) num relance."""
+    logger.info("=" * 60)
+    logger.info(f"run_id={run_id} | encoder={cfg.model.encoder} | device={cfg.device}")
+    logger.info(f"checkpoint={cfg.model.checkpoint} | hash={cfg.config_hash()}")
+    logger.info(f"bandas={cfg.bands.n_bands} "
+                f"[{cfg.bands.f_min:.0f}-{cfg.bands.f_max:.0f} Hz] | "
+                f"head={cfg.adapt.head} | cross_fit={cfg.adapt.cross_fit}")
+    logger.info(f"dados: treino={cfg.data.n_train_per_class}/classe, "
+                f"análise={cfg.data.n_analysis_per_class}/classe "
+                f"(split={cfg.data.analysis_split})")
+    logger.info(f"saída: {root}")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

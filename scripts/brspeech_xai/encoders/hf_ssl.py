@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..logging_utils import progress
 from ..preprocessing import resample_to_16k, to_mono
 
 
@@ -65,7 +66,8 @@ class HFSSLEmbedder:
                            batch_size: int = 8) -> np.ndarray:
         """Embedding por clipe: média dos frames da camada ``self.layer`` (H-dim)."""
         embs: list[np.ndarray] = []
-        for i in range(0, len(audios), batch_size):
+        for i in progress(range(0, len(audios), batch_size),
+                          desc=f"embeddings {self.checkpoint.split('/')[-1]}", unit="batch"):
             wavs = [self._to_16k_mono(a, sr) for a, sr in zip(audios[i:i + batch_size],
                                                               srs[i:i + batch_size])]
             inputs = self._processor(wavs, sampling_rate=16000, return_tensors="pt",
