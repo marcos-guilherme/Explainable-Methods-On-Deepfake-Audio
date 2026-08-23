@@ -49,6 +49,9 @@ def test_association_and_occlusion(tmp_path):
     P.set_plot_style()
     P.plot_association_profile(_spearman_df(), tmp_path, top_n=5)
     P.plot_association_profile_signed(_spearman_df(), tmp_path)
+    for tag in ("zs", "ad"):
+        P.plot_association_profile_single(_spearman_df(), tag, tmp_path)
+        assert (tmp_path / f"association_profile_{tag}.pdf").exists()
     edges, occ = _occ_df()
     P.plot_occlusion_bands(edges, occ, tmp_path)
     P.plot_occlusion_overlay(edges, occ, tmp_path)
@@ -77,6 +80,22 @@ def test_spine_convergence(tmp_path):
     agree = cross_spine_agreement(occ, spearman)
     P.plot_spine_convergence(BAND_EDGES, occ, spearman, agree, tmp_path)
     assert (tmp_path / "spine_convergence_zs_vs_ad.pdf").exists()
+
+
+def test_convergence_intervention(tmp_path):
+    P.set_plot_style()
+    rng = np.random.default_rng(0)
+    pairs = {"zs": (rng.normal(0.04, 0.01, 80), rng.normal(0.01, 0.01, 80)),
+             "ad": (rng.normal(0.02, 0.01, 80), rng.normal(0.02, 0.01, 80))}
+    conv = pd.DataFrame([
+        {"detector": "zs", "median_diff": 0.03, "ci_low": 0.02, "ci_high": 0.04,
+         "cohen_dz": 1.2, "wilcoxon_p": 1e-6},
+        {"detector": "ad", "median_diff": 0.0, "ci_low": -0.01, "ci_high": 0.01,
+         "cohen_dz": 0.02, "wilcoxon_p": 0.8},
+    ])
+    P.plot_convergence_intervention(pairs, conv, tmp_path)
+    assert (tmp_path / "convergence_intervention_zs_vs_ad.pdf").exists()
+    assert (tmp_path / "convergence_intervention_zs_vs_ad.png").exists()
 
 
 def test_confirmatory_box_and_scatter_and_det(tmp_path):

@@ -14,9 +14,10 @@ from .config import RunConfig
 from .data import SPOOF_LABEL, build_balanced_split
 from .features import mel_band_features
 from .metrics import compute_eer, quadrant
-from .occlusion import bootstrap_ci, mel_band_edges, occlusion_drop, stratified_idx, to_16k_mono
-from .stats import (confirmatory_tests, cross_spine_agreement, spearman_intraclass,
-                    top_features_by_rho)
+from .occlusion import (bootstrap_ci, grouped_occlusion_drop, mel_band_edges,
+                        occlusion_drop, stratified_idx, to_16k_mono)
+from .stats import (confirmatory_tests, convergence_bands, cross_spine_agreement,
+                    paired_intervention_test, spearman_intraclass, top_features_by_rho)
 
 POOL_SPLIT = "pool"  # nome lógico do split de análise no modo cross-fit
 
@@ -187,11 +188,48 @@ def stage_association(ctx: RunContext) -> None:
     if _plots_on(ctx):
         from .plotting import (plot_association_profile,
                                plot_association_profile_signed,
+                               plot_association_profile_single,
                                plot_spearman_scatter, set_plot_style)
         set_plot_style()
         plot_association_profile(spearman, p.path("figures"), top_n=cfg.association.top_n)
         plot_association_profile_signed(spearman, p.path("figures"))
+        for tag in ("zs", "ad"):
+            if (spearman.detector == tag).any():
+                plot_association_profile_single(spearman, tag, p.path("figures"))
         plot_spearman_scatter(master, spearman, p.path("figures"))
+
+
+def _convergence_intervention(cfg, master, audios, srs, edges, targets):
+    """Teste de convergência H1->H2 por intervenção (ver plot_convergence_intervention).
+
+    Rankeia |ρ| associativo numa metade dos clipes e oclui, na outra metade, os grupos
+    de bandas mais e menos associadas, comparando as quedas de P(spoof) pareadas por
+    clipe. Metades disjuntas evitam selecionar e testar nos mesmos dados.
+
+    Returns:
+        (pairs, table): `pairs` = {tag: (drop_top, drop_bottom)} por clipe;
+        `table` = DataFrame com um teste pareado por detector.
+    """
+    k = cfg.occlusion.convergence_k or max(1, cfg.bands.n_bands // 3)
+    perm = np.random.default_rng(cfg.seed).permutation(len(master))
+    half = len(perm) // 2
+    rank_master, test_master = master.iloc[perm[:half]], master.iloc[perm[half:]]
+    pairs, rows = {}, []
+    for tag, quad_col, fn in targets:
+        sp = spearman_intraclass(rank_master, tag, bands.BAND_COLS)
+        top, bottom = convergence_bands(sp, tag, cfg.bands.n_bands, k)
+        idx = stratified_idx(test_master, quad_col, cfg.occlusion.per_quadrant, seed=cfg.seed)
+        sub_audios = [to_16k_mono(audios[i], srs[i]) for i in idx]
+        sub_srs = [16000] * len(sub_audios)
+        d_top = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, top)
+        d_bottom = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, bottom)
+        stat = paired_intervention_test(d_top, d_bottom, seed=cfg.seed,
+                                        n_boot=cfg.occlusion.n_boot)
+        rows.append({"detector": tag, "k_bands": k,
+                     "top_bands": ";".join(map(str, top)),
+                     "bottom_bands": ";".join(map(str, bottom)), **stat})
+        pairs[tag] = (d_top, d_bottom)
+    return pairs, pd.DataFrame(rows)
 
 
 def stage_occlusion(ctx: RunContext) -> None:
@@ -231,13 +269,19 @@ def stage_occlusion(ctx: RunContext) -> None:
     spearman = A.load_table(p.path("spearman_table.csv"))
     agree = cross_spine_agreement(occ, spearman)
     A.save_table(agree, p.path("spine_agreement.csv"))
+    # Convergência por INTERVENÇÃO (H1->H2): teste pareado por clipe, mais robusto que o
+    # ρ agregado sobre poucas bandas. Ranking e oclusão usam metades disjuntas de clipes.
+    conv_pairs, conv = _convergence_intervention(cfg, master, audios, srs, edges, targets)
+    A.save_table(conv, p.path("convergence_intervention.csv"))
     if _plots_on(ctx):
-        from .plotting import (plot_occlusion_bands, plot_occlusion_overlay,
-                               plot_spine_convergence, set_plot_style)
+        from .plotting import (plot_convergence_intervention, plot_occlusion_bands,
+                               plot_occlusion_overlay, plot_spine_convergence,
+                               set_plot_style)
         set_plot_style()
         plot_occlusion_bands(edges, occ, p.path("figures"))
         plot_occlusion_overlay(edges, occ, p.path("figures"))
         plot_spine_convergence(edges, occ, spearman, agree, p.path("figures"))
+        plot_convergence_intervention(conv_pairs, conv, p.path("figures"))
 
 
 def stage_confirmatory(ctx: RunContext) -> None:

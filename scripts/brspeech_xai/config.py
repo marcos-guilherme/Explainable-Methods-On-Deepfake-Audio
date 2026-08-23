@@ -53,6 +53,7 @@ class BandsConfig:
 class OcclusionConfig:
     per_quadrant: int = 150
     n_boot: int = 1000             # reamostras do bootstrap para o IC 95% por banda
+    convergence_k: int = 0         # nº de bandas top/bottom no teste de convergência (0 = auto: n_bands//3)
 
 
 @dataclass

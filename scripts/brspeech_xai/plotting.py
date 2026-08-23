@@ -120,6 +120,27 @@ def plot_association_profile(spearman: pd.DataFrame, figures_dir: str | Path,
     return fig
 
 
+def plot_association_profile_single(spearman: pd.DataFrame, detector_tag: str,
+                                    figures_dir: str | Path):
+    """Perfil de associação |ρ| por banda para UM detector (painéis μ e σ).
+
+    Mesma leitura do `plot_association_profile`, mas isolando um detector para
+    inspecioná-lo sem as barras do outro por cima. Salva `association_profile_{tag}`
+    (H1, descritiva). Força = |ρ| de Spearman intra-classe (máx. sobre classes)."""
+    strength = (spearman[spearman.detector == detector_tag]
+                .assign(abs_rho=lambda d: d["rho"].abs())
+                .groupby(["detector", "feature"])["abs_rho"].max().reset_index())
+    is_std = strength["feature"].str.endswith("_std")
+    lab = DETECTOR_LABEL[detector_tag]
+    dot = " \u00b7 "
+    fig, axes = plt.subplots(2, 1, figsize=(COL_WIDTH_SINGLE, 4.6))
+    _assoc_panel(axes[0], strength[~is_std], lab + dot + r"Band energy $\mu$")
+    _assoc_panel(axes[1], strength[is_std], lab + dot + r"Band energy $\sigma$")
+    fig.tight_layout()
+    save_fig(fig, f"association_profile_{detector_tag}", figures_dir)
+    return fig
+
+
 _FLIP_SHADE = "#f2c744"
 
 
@@ -618,4 +639,53 @@ def plot_spine_convergence(edges, occ: pd.DataFrame, spearman: pd.DataFrame,
     axes[-1].set_xlabel("Frequency band center (Hz)")
     fig.tight_layout()
     save_fig(fig, "spine_convergence_zs_vs_ad", figures_dir)
+    return fig
+
+
+def plot_convergence_intervention(pairs: dict, conv: pd.DataFrame,
+                                  figures_dir: str | Path):
+    """Convergência H1→H2 por intervenção causal (teste pareado por clipe).
+
+    Um painel por detector. Cada painel mostra a distribuição, por clipe, da queda de
+    P(spoof) ao ocluir as bandas MAIS associadas (escolhidas pelo H1) versus as MENOS
+    associadas. As bandas são escolhidas numa partição de clipes independente da usada
+    aqui, para evitar circularidade. A diferença mediana (mais − menos), o IC 95% e o
+    p de Wilcoxon aparecem no título: uma diferença positiva indica que as bandas
+    apontadas pelo H1 também causam mais queda, ou seja, as duas espinhas convergem.
+
+    Args:
+        pairs: {tag: (drop_top, drop_bottom)} com as quedas por clipe.
+        conv: tabela de `paired_intervention_test` por detector.
+    """
+    tags = [t for t in ("zs", "ad") if t in pairs]
+    fig, axes = plt.subplots(1, len(tags), figsize=(COL_WIDTH_DOUBLE, 3.4),
+                             squeeze=False)
+    axes = axes[0]
+    for ax, tag in zip(axes, tags):
+        d_top, d_bottom = pairs[tag]
+        data = [np.asarray(d_top, float), np.asarray(d_bottom, float)]
+        parts = ax.violinplot(data, positions=[0, 1], widths=0.8,
+                              showmeans=False, showextrema=False, showmedians=True)
+        for body, col in zip(parts["bodies"], (DETECTOR_COLOR[tag], "#999999")):
+            body.set_facecolor(col)
+            body.set_alpha(0.45)
+            body.set_edgecolor("#333333")
+        parts["cmedians"].set_color("#333333")
+        ax.axhline(0.0, color="black", lw=0.8, ls=":")
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["mais\nassociadas (H1)", "menos\nassociadas (H1)"],
+                           fontsize=8)
+        ax.set_ylabel(r"$\Delta P(\mathrm{spoof})$ por clipe")
+        row = conv[conv.detector == tag]
+        if len(row):
+            r = row.iloc[0]
+            title = (f"{DETECTOR_LABEL[tag]}\n"
+                     f"$\\Delta$mediana = {r.median_diff:.3f} "
+                     f"[{r.ci_low:.3f}, {r.ci_high:.3f}]")
+            ax.set_title(title, fontsize=8, loc="left")
+            ax.text(0.98, 0.03, f"$d_z$={r.cohen_dz:.2f} · p={r.wilcoxon_p:.1e}",
+                    transform=ax.transAxes, ha="right", va="bottom", fontsize=7,
+                    color="#555555")
+    fig.tight_layout()
+    save_fig(fig, "convergence_intervention_zs_vs_ad", figures_dir)
     return fig

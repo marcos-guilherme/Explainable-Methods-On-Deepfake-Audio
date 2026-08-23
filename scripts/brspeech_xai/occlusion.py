@@ -35,6 +35,33 @@ def occlusion_drop(p_spoof_fn, audios, srs, band_edges) -> np.ndarray:
     return np.column_stack(cols) if cols else np.empty((len(base), 0))
 
 
+def grouped_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices) -> np.ndarray:
+    """Queda de P(spoof) por clipe ao ocluir um GRUPO de bandas de uma só vez.
+
+    Diferente de `occlusion_drop` (uma banda por vez), aqui removemos todas as bandas
+    de `band_indices` simultaneamente (band-stops encadeados). Serve ao teste de
+    convergência: ocluir o grupo de bandas mais associadas (H1) versus o menos
+    associadas, medindo o efeito causal conjunto por clipe.
+
+    Args:
+        band_indices: índices 0-based das bandas a remover (referem-se a `band_edges`).
+
+    Returns:
+        Vetor (n_clips,) de quedas `base - ocluído` por clipe. Grupo vazio => zeros.
+    """
+    band_indices = list(band_indices)
+    base = np.array([p_spoof_fn(a, sr) for a, sr in zip(audios, srs)])
+    if not band_indices:
+        return np.zeros(len(base), dtype=np.float64)
+    occ = []
+    for a, sr in zip(audios, srs):
+        wav = a.astype(np.float32)
+        for bi in band_indices:
+            wav = bandstop(wav, band_edges[bi], band_edges[bi + 1], sr)
+        occ.append(p_spoof_fn(wav, sr))
+    return base - np.array(occ)
+
+
 def bootstrap_ci(values: np.ndarray, n_boot: int = 1000, alpha: float = 0.05,
                  seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     """IC percentil por bootstrap da MÉDIA, por coluna de uma matriz (n_obs, n_cols).

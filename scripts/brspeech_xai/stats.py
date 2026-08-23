@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import false_discovery_control, levene, spearmanr, ttest_ind
+from scipy.stats import false_discovery_control, levene, spearmanr, ttest_ind, wilcoxon
 
 from .bands import band_index
 
@@ -69,6 +69,75 @@ def cross_spine_agreement(occlusion: pd.DataFrame,
                      "p_value": float(res.pvalue) if res else float("nan"),
                      "n_bands": int(ok.sum())})
     return pd.DataFrame(rows)
+
+
+def band_assoc_strength(spearman: pd.DataFrame, detector_tag: str,
+                        n_bands: int) -> np.ndarray:
+    """max|ρ| associativo por banda (sobre μ/σ e classes) para um detector.
+
+    Returns:
+        Array (n_bands,) com a força de associação de cada banda; NaN se ausente.
+    """
+    sp = spearman[spearman.detector == detector_tag].assign(abs_rho=lambda d: d["rho"].abs())
+    sp = sp.assign(band=[band_index(f)[0] for f in sp["feature"]])
+    m = sp.groupby("band")["abs_rho"].max()
+    return np.array([float(m.get(b, np.nan)) for b in range(n_bands)])
+
+
+def convergence_bands(spearman: pd.DataFrame, detector_tag: str, n_bands: int,
+                      k: int) -> tuple[list[int], list[int]]:
+    """Bandas top-k e bottom-k por força de associação |ρ| (H1), para um detector.
+
+    Usado para escolher, de forma independente da oclusão, quais bandas o H1 diz
+    serem mais e menos associadas ao score, antes de testar o efeito causal delas.
+
+    Returns:
+        (top_bands, bottom_bands), índices 0-based ordenados por |ρ| decrescente
+        (top) e crescente (bottom). Bandas com |ρ| ausente vão para o fim do ranking.
+    """
+    strength = band_assoc_strength(spearman, detector_tag, n_bands)
+    order = np.argsort(np.nan_to_num(strength, nan=-np.inf))  # ascendente
+    bottom = order[:k].tolist()
+    top = order[::-1][:k].tolist()
+    return top, bottom
+
+
+def paired_intervention_test(drop_top: np.ndarray, drop_bottom: np.ndarray,
+                             seed: int = 42, n_boot: int = 1000) -> dict:
+    """Teste pareado por clipe da convergência H1→H2.
+
+    Compara, no mesmo clipe, a queda de P(spoof) ao ocluir as bandas mais associadas
+    (`drop_top`) versus as menos associadas (`drop_bottom`). Uma diferença positiva
+    indica que as bandas apontadas pelo H1 também causam mais queda (as duas espinhas
+    convergem). Reporta a diferença mediana com IC 95% (bootstrap de pares), o
+    tamanho de efeito de Cohen d_z e o p de Wilcoxon (postos sinalizados).
+
+    Returns:
+        dict com n_pairs, median_diff, ci_low, ci_high, cohen_dz, wilcoxon_p,
+        mean_drop_top, mean_drop_bottom.
+    """
+    a = np.asarray(drop_top, dtype=np.float64)
+    b = np.asarray(drop_bottom, dtype=np.float64)
+    diff = a - b
+    n = int(len(diff))
+    if n == 0:
+        return {"n_pairs": 0, "median_diff": float("nan"), "ci_low": float("nan"),
+                "ci_high": float("nan"), "cohen_dz": float("nan"),
+                "wilcoxon_p": float("nan"), "mean_drop_top": float("nan"),
+                "mean_drop_bottom": float("nan")}
+    rng = np.random.default_rng(seed)
+    boots = np.array([np.median(diff[rng.integers(0, n, n)]) for _ in range(n_boot)])
+    sd = diff.std(ddof=1) if n > 1 else 0.0
+    dz = float(diff.mean() / sd) if sd > 0 else float("nan")
+    try:
+        p = float(wilcoxon(a, b).pvalue)
+    except ValueError:  # todas as diferenças nulas => sem teste
+        p = float("nan")
+    return {"n_pairs": n, "median_diff": float(np.median(diff)),
+            "ci_low": float(np.percentile(boots, 2.5)),
+            "ci_high": float(np.percentile(boots, 97.5)),
+            "cohen_dz": dz, "wilcoxon_p": p,
+            "mean_drop_top": float(a.mean()), "mean_drop_bottom": float(b.mean())}
 
 
 def top_features_by_rho(spearman: pd.DataFrame, top_n: int) -> list[str]:
