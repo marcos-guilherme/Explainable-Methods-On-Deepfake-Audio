@@ -233,3 +233,7 @@ __marimo__/
 *.xdv
 
 results/
+
+# Binários gerados (figuras e paper): não versionar, gerar localmente
+*.pdf
+*.png
