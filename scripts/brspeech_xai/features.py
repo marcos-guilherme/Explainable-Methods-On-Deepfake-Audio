@@ -1,68 +1,66 @@
-"""Features MFCC: 13 coeficientes colapsados por média/desvio -> 26 features.
+"""Features acústicas: energia log-mel por banda, colapsada por média/desvio.
 
-Extraídas do MESMO sinal pré-processado que entra no detector (mono/16k/janela/layer_norm),
-garantindo que a descrição acústica corresponde ao que o modelo ouve.
+Extraídas do MESMO sinal pré-processado que entra no detector (mono/16k/janela/
+layer_norm), garantindo que a descrição acústica corresponde ao que o modelo ouve.
+
+Usa a MESMA partição de frequência da oclusão (`bands.BAND_EDGES`), de modo que a
+Espinha 1 (associação) e a Espinha 2 (oclusão causal) vivem no mesmo eixo de Hz.
 """
 from __future__ import annotations
 
-import re
-from functools import lru_cache
-
 import numpy as np
 
-MFCC_COLS = [f"mfcc{i}_mean" for i in range(1, 14)] + [f"mfcc{i}_std" for i in range(1, 14)]
+# Grade de banda: fonte única em bands.py. Importamos o MÓDULO (não os globais) para
+# enxergar reconfigurações de resolução feitas por configure_bands em tempo de execução.
+from . import bands
+from .bands import band_group, band_index, band_label, mel_band_edges  # noqa: F401
+
+# Framing do espectrograma (mesmo da antiga MFCC): win 25 ms, hop 10 ms @ 16 kHz.
+_N_FFT = 400
+_HOP = 160
+_SR = 16000
+_EPS = 1e-10
 
 
-@lru_cache(maxsize=1)
-def _mfcc_transform():
-    """Instancia o transform MFCC sob demanda (evita importar torch no import do módulo,
-    permitindo usar os utilitários de rótulo sem a dependência pesada)."""
-    import torchaudio
-    return torchaudio.transforms.MFCC(
-        sample_rate=16000, n_mfcc=13,
-        melkwargs={"n_fft": 400, "win_length": 400, "hop_length": 160, "n_mels": 40},
-    )  # win 25 ms, hop 10 ms @ 16 kHz
-
-# torchaudio retorna c0..c12; nossas colunas mfcc1..mfcc13 mapeiam para c0..c12
-# (off-by-one: mfcc1 == c0 == energia log). Grupos por ordem cepstral:
-#   c0 -> energy | c1..c4 -> envelope (tilt) | c5..c12 -> detail (fino)
-_MFCC_RE = re.compile(r"^mfcc(\d+)_(mean|std)$")
+_MASK_CACHE: dict[bytes, np.ndarray] = {}
 
 
-def _cep_index(col: str) -> tuple[int, str]:
-    """Extrai (índice cepstral c, estatística) de uma coluna 'mfcc{i}_{mean,std}'."""
-    m = _MFCC_RE.match(col)
-    if not m:
-        raise ValueError(f"coluna MFCC inválida: {col!r}")
-    return int(m.group(1)) - 1, m.group(2)  # mfcc1 -> c0
+def _band_bin_masks() -> np.ndarray:
+    """Máscara booleana (n_bands, n_freq_bins) dos bins de FFT em cada banda.
+
+    Cache com chave nas bordas atuais: invalida sozinho quando configure_bands muda a grade.
+    """
+    edges = bands.BAND_EDGES
+    key = edges.tobytes()
+    masks = _MASK_CACHE.get(key)
+    if masks is None:
+        freqs = np.fft.rfftfreq(_N_FFT, d=1.0 / _SR)  # (n_freq_bins,)
+        lo, hi = edges[:-1], edges[1:]
+        masks = np.stack([(freqs >= lo[b]) & (freqs < hi[b]) for b in range(bands.N_BANDS)])
+        _MASK_CACHE[key] = masks
+    return masks
 
 
-def mfcc_group(col: str) -> str:
-    """Grupo acústico da feature: 'energy', 'envelope' ou 'detail'."""
-    c, _ = _cep_index(col)
-    if c == 0:
-        return "energy"
-    return "envelope" if c <= 4 else "detail"
+def mel_band_features(audio_array: np.ndarray, orig_sr: int) -> np.ndarray:
+    """Energia log-mel por banda -> colapso temporal (média + desvio) -> 2*N_BANDS.
 
-
-def mfcc_label(col: str) -> str:
-    """Rótulo descritivo p/ figuras, ex.: 'c0 energy·σ', 'c3 envelope·μ'."""
-    c, stat = _cep_index(col)
-    stat_sym = "\u03bc" if stat == "mean" else "\u03c3"  # μ / σ
-    return f"c{c} {mfcc_group(col)}\u00b7{stat_sym}"
-
-
-def mfcc_features(audio_array: np.ndarray, orig_sr: int) -> np.ndarray:
-    """13 MFCCs -> colapso temporal (média + desvio) -> 26 features.
+    Integra a potência da STFT nos bins de cada banda (bordas idênticas às da
+    oclusão), toma o log e resume por média e desvio ao longo dos frames.
 
     Returns:
-        Vetor (26,): [mean_1..13, std_1..13].
+        Vetor (2*N_BANDS,): [mean_band1..N, std_band1..N].
     """
     import torch
 
     from .preprocessing import preprocess
     wav = preprocess(audio_array, orig_sr)                 # (T,) normalizado
-    coeffs = _mfcc_transform()(wav.unsqueeze(0)).squeeze(0)  # (13, n_frames)
-    mean = coeffs.mean(dim=1)
-    std = coeffs.std(dim=1)
-    return torch.cat([mean, std]).numpy().astype(np.float32)
+    window = torch.hann_window(_N_FFT)
+    spec = torch.stft(wav, n_fft=_N_FFT, hop_length=_HOP, win_length=_N_FFT,
+                      window=window, return_complex=True)  # (n_freq, n_frames)
+    power = spec.abs().pow(2).numpy()                      # (n_freq, n_frames)
+    masks = _band_bin_masks()                              # (n_bands, n_freq)
+    band_energy = masks.astype(np.float32) @ power         # (n_bands, n_frames)
+    log_energy = np.log(band_energy + _EPS)
+    mean = log_energy.mean(axis=1)
+    std = log_energy.std(axis=1)
+    return np.concatenate([mean, std]).astype(np.float32)

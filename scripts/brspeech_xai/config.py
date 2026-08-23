@@ -18,6 +18,9 @@ class DataConfig:
     eval_split: str = "test"
     n_train_per_class: int = 1500
     n_test_per_class: int = 1500
+    # Cross-fit: pool único de análise (usado quando adapt.cross_fit=True).
+    analysis_split: str = "train"   # split-fonte do pool (train tem reais de sobra)
+    n_analysis_per_class: int = 10000
 
 
 @dataclass
@@ -28,22 +31,44 @@ class AudioConfig:
 
 @dataclass
 class ModelConfig:
+    # encoder: chave do registry em brspeech_xai.encoders (default preserva o XLS-R).
+    encoder: str = "xlsr_fairseq"
     checkpoint: str = "nii-yamagishilab/mms-300m-anti-deepfake"
     spoof_index: int = 0
+    # Reservados para encoders futuros (ex.: SSL do HuggingFace); ignorados pelo XLS-R.
+    layer: int = -1                 # qual hidden state usar (encoders multi-camada)
+    pooling: str = "mean"           # estratégia de pooling dos frames
+
+
+@dataclass
+class BandsConfig:
+    # Grade de frequência ÚNICA e compartilhada por features (H1) e oclusão (H2), para
+    # as duas espinhas viverem no mesmo eixo de Hz. Default 8 preserva a run de referência.
+    n_bands: int = 8
+    f_min: float = 20.0
+    f_max: float = 7900.0
 
 
 @dataclass
 class OcclusionConfig:
-    n_bands: int = 8
-    f_min: float = 20.0
-    f_max: float = 7900.0
     per_quadrant: int = 150
     n_boot: int = 1000             # reamostras do bootstrap para o IC 95% por banda
 
 
 @dataclass
 class AssociationConfig:
-    top_n: int = 10                # nº de MFCCs de maior |ρ| destacados (perfil H1 + seleção H3)
+    top_n: int = 10                # nº de bandas de maior |ρ| destacadas (perfil H1 + seleção H3)
+
+
+@dataclass
+class AdaptConfig:
+    # Padrão = holdout (head treina no train, análise no test): distribuição
+    # representativa/difícil, onde H3 tem erros para analisar. O modo cross_fit
+    # (pool grande do train) fica disponível, mas foi descartado como padrão porque
+    # o split train é fácil demais (ad ~perfeito) e degenera o H3.
+    cross_fit: bool = False        # se True: scores OOF do D_ad por K-fold no pool
+    cv_folds: int = 5              # nº de folds do StratifiedKFold (modo cross_fit)
+    head: str = "logistic"         # logistic | mlp (head leve sobre embeddings congelados)
 
 
 @dataclass
@@ -55,8 +80,10 @@ class RunConfig:
     data: DataConfig = field(default_factory=DataConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    bands: BandsConfig = field(default_factory=BandsConfig)
     occlusion: OcclusionConfig = field(default_factory=OcclusionConfig)
     association: AssociationConfig = field(default_factory=AssociationConfig)
+    adapt: AdaptConfig = field(default_factory=AdaptConfig)
 
     def config_hash(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True, default=str)
@@ -67,7 +94,8 @@ class RunConfig:
 
 
 _NESTED = {"data": DataConfig, "audio": AudioConfig, "model": ModelConfig,
-           "occlusion": OcclusionConfig, "association": AssociationConfig}
+           "bands": BandsConfig, "occlusion": OcclusionConfig,
+           "association": AssociationConfig, "adapt": AdaptConfig}
 
 
 def _coerce(value: str) -> Any:

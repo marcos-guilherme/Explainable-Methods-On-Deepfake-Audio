@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 
 from brspeech_xai import plotting as P
+from brspeech_xai.bands import BAND_EDGES, N_BANDS
+from brspeech_xai.stats import cross_spine_agreement
 
-FEATS = [f"mfcc{i}_mean" for i in range(1, 8)] + [f"mfcc{i}_std" for i in range(1, 8)]
+FEATS = ([f"band{k}_mean" for k in range(1, N_BANDS + 1)]
+         + [f"band{k}_std" for k in range(1, N_BANDS + 1)])
 
 
 def _master(n=120, seed=0):
@@ -45,12 +48,35 @@ def _occ_df():
 def test_association_and_occlusion(tmp_path):
     P.set_plot_style()
     P.plot_association_profile(_spearman_df(), tmp_path, top_n=5)
+    P.plot_association_profile_signed(_spearman_df(), tmp_path)
     edges, occ = _occ_df()
     P.plot_occlusion_bands(edges, occ, tmp_path)
     P.plot_occlusion_overlay(edges, occ, tmp_path)
-    for name in ("association_profile_zs_vs_ad", "occlusion_bands_zs_vs_ad",
-                 "occlusion_overlay_zs_vs_ad"):
+    for name in ("association_profile_zs_vs_ad", "association_profile_signed_zs_vs_ad",
+                 "occlusion_bands_zs_vs_ad", "occlusion_overlay_zs_vs_ad"):
         assert (tmp_path / f"{name}.pdf").exists() and (tmp_path / f"{name}.png").exists()
+
+
+def _occ_full():
+    """Tabela de oclusão nas N_BANDS bandas reais (para a figura de convergência)."""
+    lows, highs = BAND_EDGES[:-1], BAND_EDGES[1:]
+    rows = []
+    for d in ("zs", "ad"):
+        for b in range(N_BANDS):
+            m = (b + 1) * 0.01
+            rows.append({"detector": d, "band_hz_low": lows[b], "band_hz_high": highs[b],
+                         "mean_p_spoof_drop": m, "ci_low": m - 0.005, "ci_high": m + 0.005,
+                         "n": 50})
+    return pd.DataFrame(rows)
+
+
+def test_spine_convergence(tmp_path):
+    P.set_plot_style()
+    occ = _occ_full()
+    spearman = _spearman_df()
+    agree = cross_spine_agreement(occ, spearman)
+    P.plot_spine_convergence(BAND_EDGES, occ, spearman, agree, tmp_path)
+    assert (tmp_path / "spine_convergence_zs_vs_ad.pdf").exists()
 
 
 def test_confirmatory_box_and_scatter_and_det(tmp_path):
@@ -65,6 +91,9 @@ def test_confirmatory_box_and_scatter_and_det(tmp_path):
     ])
     P.plot_confirmatory_box(master, conf, top, "zs", "quadrant_zs", tmp_path)
     assert (tmp_path / "confirmatory_box_zs.pdf").exists()
+
+    P.plot_confirmatory_effects(master, conf, top, "zs", "quadrant_zs", tmp_path, n_boot=100)
+    assert (tmp_path / "confirmatory_effects_zs.pdf").exists()
 
     spearman = pd.DataFrame([
         {"detector": d, "feature": f, "class": c, "rho": (0.3 if c == "spoof" else -0.2),

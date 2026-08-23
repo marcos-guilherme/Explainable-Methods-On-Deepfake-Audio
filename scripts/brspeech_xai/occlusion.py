@@ -5,14 +5,8 @@ import numpy as np
 import torch
 from scipy.signal import butter, sosfiltfilt
 
+from .bands import mel_band_edges  # noqa: F401 (re-exportado; fonte única em bands.py)
 from .preprocessing import resample_to_16k, to_mono
-
-
-def mel_band_edges(n_bands: int = 8, f_min: float = 20.0, f_max: float = 7900.0) -> np.ndarray:
-    """n_bands+1 bordas de frequência (Hz) igualmente espaçadas em escala mel."""
-    to_mel = lambda f: 2595.0 * np.log10(1.0 + f / 700.0)
-    to_hz = lambda m: 700.0 * (10.0 ** (m / 2595.0) - 1.0)
-    return to_hz(np.linspace(to_mel(f_min), to_mel(f_max), n_bands + 1))
 
 
 def bandstop(wav: np.ndarray, low: float, high: float, sr: int = 16000) -> np.ndarray:

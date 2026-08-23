@@ -81,7 +81,18 @@ def _is_xet_signature_error(exc: Exception) -> bool:
 
 
 def build_balanced_split(dataset_id, split, n_per_class, loader="auto", seed=42):
-    """Monta subconjunto balanceado (n_per_class/classe) + proveniência, respeitando o loader."""
+    """Ponto único de carga de dados. Monta subconjunto balanceado + proveniência.
+
+    Contrato de saída (estável, para um segundo dataset plugar sem retrabalho):
+        ``(audios, srs, labels, provenance)``, com listas do mesmo tamanho, onde
+        ``labels`` usa ``SPOOF_LABEL=1`` para spoof e 0 para bonafide, e cada item de
+        ``provenance`` é um dict com ao menos ``{"config", "shard", "row_index", "label"}``.
+
+    Suposições específicas do BRSpeech-DF (rever ao adicionar outro dataset):
+        configs por classe ``bonafide``/``spoof``; config de streaming ``default``;
+        campo de rótulo ``label``. Quando entrar um segundo dataset, introduzir
+        ``data.dataset_kind`` e despachar aqui (ou promover a um registry só então).
+    """
     if loader in ("auto", "stream"):
         try:
             a, s, lbl, prov = _collect_stream(dataset_id, split, n_per_class)

@@ -29,7 +29,7 @@ Cada execução cria `results/<run_name>-<timestamp>/` com os artefatos, figuras
 
 ```bash
 docker compose run --rm deepfake run-scripts /workspace/scripts/configs/default.yaml \
-  --set data.n_test_per_class=500 --set occlusion.n_bands=12 --set seed=7
+  --set data.n_test_per_class=500 --set bands.n_bands=16 --set seed=7
 ```
 
 ## Estágios e artefatos
@@ -42,10 +42,10 @@ hash da config) e produz artefatos consumidos pelos estágios seguintes:
 | 1 | `collect`      | `audios_<split>.npy`, `srs_<split>.npy`, `samples.parquet`               |
 | 2 | `embeddings`   | `emb_train.npy`, `emb_test.npy`                                          |
 | 3 | `adapt`        | `d_ad.joblib`, `eer_precheck.json`, `p_spoof_zs.npy`, `p_spoof_ad.npy`   |
-| 4 | `master_mfcc`  | `master_table.parquet` (P(spoof), predições, quadrantes, 26 MFCCs)       |
-| 5 | `association`  | `spearman_table.csv` (Spearman intra-classe MFCC↔P(spoof) + FDR); figuras: perfil de associação (painéis μ/σ, rótulos c0..c12) e scatter de Spearman |
-| 6 | `occlusion`    | `occlusion_table.csv` (queda média + IC 95% bootstrap por banda), figuras divergente + overlay |
-| 7 | `confirmatory` | `confirmatory_tests.csv` (Welch/Levene + FDR nos MFCCs de maior \|ρ\|); figuras boxplot por quadrante (H3) |
+| 4 | `features`     | `master_table.parquet` (P(spoof), predições, quadrantes, energia log-mel por banda μ/σ) |
+| 5 | `association`  | `spearman_table.csv` (Spearman intra-classe energia-de-banda↔P(spoof) + FDR); figuras: perfil por banda (μ/σ) e scatter de Spearman |
+| 6 | `occlusion`    | `occlusion_table.csv` (queda média + IC 95% bootstrap por banda), `spine_agreement.csv` (convergência causal×associativo); figuras divergente, overlay e convergência |
+| 7 | `confirmatory` | `confirmatory_tests.csv` (Welch/Levene + FDR nas bandas de maior \|ρ\|); figuras boxplot por quadrante (H3) |
 | 8 | `report`       | `performance_table.csv`, curva DET (`det_zs_vs_ad`), `run_manifest.json`  |
 
 ## Resumibilidade

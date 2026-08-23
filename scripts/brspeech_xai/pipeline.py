@@ -8,7 +8,7 @@ STAGES = [
     ("collect", S.stage_collect),
     ("embeddings", S.stage_embeddings),
     ("adapt", S.stage_adapt),
-    ("master_mfcc", S.stage_master_mfcc),
+    ("features", S.stage_features),
     ("association", S.stage_association),
     ("occlusion", S.stage_occlusion),
     ("confirmatory", S.stage_confirmatory),
@@ -26,6 +26,9 @@ def _selected(start=None, only=None):
 
 
 def run_stages(cfg, paths, logger, ctx_extra, start=None, only=None, force=False):
+    from .bands import configure_bands
+    # Reconfigura a grade compartilhada (H1 e H2) ANTES de qualquer estágio.
+    configure_bands(cfg.bands.n_bands, cfg.bands.f_min, cfg.bands.f_max)
     chash = cfg.config_hash()
     for name, fn in _selected(start, only):
         if not force and A.is_done(paths, name, chash):

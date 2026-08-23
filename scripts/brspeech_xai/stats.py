@@ -1,9 +1,12 @@
-"""Associação (Spearman intra-classe) e testes confirmatórios (Welch/Levene) sobre os
-MFCCs de maior |ρ|, com correção FDR (Benjamini–Hochberg)."""
+"""Associação (Spearman intra-classe) e testes confirmatórios (Welch/Levene) sobre as
+features de maior |ρ|, com correção FDR (Benjamini–Hochberg)."""
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from scipy.stats import false_discovery_control, levene, spearmanr, ttest_ind
+
+from .bands import band_index
 
 # ground_truth: 1 = spoof, 0 = bonafide
 _CLASS_NAME = {0: "bonafide", 1: "spoof"}
@@ -34,6 +37,38 @@ def confirmatory_tests(master: pd.DataFrame, detector_tag: str, quad_col: str,
     if len(df):
         df["q_value_fdr"] = false_discovery_control(df["p_value"].to_numpy())
     return df
+
+
+def cross_spine_agreement(occlusion: pd.DataFrame,
+                          spearman: pd.DataFrame) -> pd.DataFrame:
+    """Concordância entre as duas espinhas na MESMA grade de bandas, por detector.
+
+    Para cada detector correlaciona (Spearman) o perfil CAUSAL (|queda de oclusão|
+    por banda) com o perfil ASSOCIATIVO (max|ρ| por banda, sobre μ/σ e classes).
+    Um ρ alto indica que as bandas causalmente importantes são também as mais
+    associadas ao score --- validade convergente verificável.
+
+    Returns:
+        DataFrame com colunas `detector, rho_causal_vs_assoc, p_value, n_bands`.
+    """
+    sp = spearman.assign(abs_rho=spearman["rho"].abs())
+    sp["band"] = [band_index(f)[0] for f in sp["feature"]]
+    rows = []
+    for det in ("zs", "ad"):
+        occ = occlusion[occlusion.detector == det].sort_values("band_hz_low")
+        if occ.empty:
+            continue
+        causal = np.abs(occ["mean_p_spoof_drop"].to_numpy())
+        spd = sp[sp.detector == det]
+        assoc = spd.groupby("band")["abs_rho"].max()
+        assoc = np.array([assoc.get(b, np.nan) for b in range(len(causal))])
+        ok = ~np.isnan(assoc)
+        res = spearmanr(causal[ok], assoc[ok]) if ok.sum() >= 3 else None
+        rows.append({"detector": det,
+                     "rho_causal_vs_assoc": float(res.statistic) if res else float("nan"),
+                     "p_value": float(res.pvalue) if res else float("nan"),
+                     "n_bands": int(ok.sum())})
+    return pd.DataFrame(rows)
 
 
 def top_features_by_rho(spearman: pd.DataFrame, top_n: int) -> list[str]:

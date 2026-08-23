@@ -14,7 +14,8 @@ import pandas as pd  # noqa: E402
 from scipy.stats import norm  # noqa: E402
 from sklearn.metrics import confusion_matrix, roc_curve  # noqa: E402
 
-from .features import mfcc_label  # noqa: E402
+from .bands import band_index, band_label  # noqa: E402
+from .metrics import compute_eer  # noqa: E402
 
 # Paleta segura para daltônicos (ordem estável entre figuras).
 CB_PALETTE = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#000000"]
@@ -84,39 +85,153 @@ def plot_confusion(scores: np.ndarray, labels: np.ndarray, threshold: float,
     return fig
 
 
-def _assoc_panel(ax, strength_panel: pd.DataFrame, top_n: int, title: str):
-    """Painel de barras horizontais top-N por |ρ| (máx. sobre classes), D_zs vs D_ad."""
-    top = (strength_panel.groupby("feature")["abs_rho"].max()
-           .sort_values(ascending=False).head(top_n).index.tolist())
-    piv = (strength_panel[strength_panel["feature"].isin(top)]
-           .pivot(index="feature", columns="detector", values="abs_rho")
-           .reindex(top))
+def _assoc_panel(ax, strength_panel: pd.DataFrame, title: str):
+    """Painel de barras de |ρ| por banda (ordenado por frequência), D_zs vs D_ad."""
+    feats = sorted(strength_panel["feature"].unique(), key=lambda f: band_index(f)[0])
+    piv = (strength_panel.pivot(index="feature", columns="detector", values="abs_rho")
+           .reindex(feats))
     detectors = [d for d in ("zs", "ad") if d in piv.columns]
-    y = np.arange(len(top))
-    h = 0.8 / max(len(detectors), 1)
+    x = np.arange(len(feats))
+    w = 0.8 / max(len(detectors), 1)
     for k, tag in enumerate(detectors):
-        ax.barh(y + (k - (len(detectors) - 1) / 2) * h, piv[tag].to_numpy(), height=h,
-                color=DETECTOR_COLOR[tag], label=DETECTOR_LABEL[tag])
-    ax.set_yticks(y, [mfcc_label(f) for f in top])
-    ax.invert_yaxis()
-    ax.set_xlabel(r"max$_\mathrm{class}\,|\rho|$ (MFCC vs. $P$(spoof))")
+        ax.bar(x + (k - (len(detectors) - 1) / 2) * w, piv[tag].to_numpy(), width=w,
+               color=DETECTOR_COLOR[tag], label=DETECTOR_LABEL[tag])
+    ax.set_xticks(x, [band_label(f).split("\u00b7")[0] for f in feats],
+                  rotation=45, ha="right", fontsize=6.5)
+    ax.set_ylabel(r"max$_\mathrm{class}\,|\rho|$")
     ax.set_title(title, fontsize=8, loc="left")
 
 
 def plot_association_profile(spearman: pd.DataFrame, figures_dir: str | Path,
                              top_n: int = 10):
-    """Perfil de associação MFCC↔P(spoof) (Espinha 1) em dois painéis: coeficientes
-    de média (μ) e de desvio (σ). Força = |ρ| de Spearman intra-classe (máx. sobre
-    classes), barras horizontais top-N por painel, D_zs vs D_ad (H1, descritiva)."""
+    """Perfil de associação energia-de-banda↔P(spoof) (Espinha 1), ordenado por
+    frequência, em dois painéis: energia média (μ) e desvio (σ) por banda. Força =
+    |ρ| de Spearman intra-classe (máx. sobre classes), D_zs vs D_ad (H1, descritiva).
+    O argumento `top_n` é mantido por compatibilidade e ignorado (mostra todas)."""
     strength = (spearman.assign(abs_rho=spearman["rho"].abs())
                 .groupby(["detector", "feature"])["abs_rho"].max().reset_index())
     is_std = strength["feature"].str.endswith("_std")
     fig, axes = plt.subplots(2, 1, figsize=(COL_WIDTH_SINGLE, 4.6))
-    _assoc_panel(axes[0], strength[~is_std], top_n, r"Mean coefficients ($\mu$)")
-    _assoc_panel(axes[1], strength[is_std], top_n, r"Std. coefficients ($\sigma$)")
-    axes[0].legend(loc="lower right", fontsize=7)
+    _assoc_panel(axes[0], strength[~is_std], r"Band energy $\mu$")
+    _assoc_panel(axes[1], strength[is_std], r"Band energy $\sigma$")
+    axes[0].legend(loc="upper right", fontsize=7)
     fig.tight_layout()
     save_fig(fig, "association_profile_zs_vs_ad", figures_dir)
+    return fig
+
+
+_FLIP_SHADE = "#f2c744"
+
+
+def _signed_assoc_panel(ax, panel_df: pd.DataFrame, feats: list[str], title: str,
+                        show_xlabels: bool = True):
+    """Painel de barras de ρ COM SINAL por banda (+ pra cima = spoof, - pra baixo =
+    bonafide), D_zs vs D_ad, ordenado por frequência. Faixas onde os dois detectores
+    têm sinais opostos ficam sombreadas (a associação inverte)."""
+    piv = (panel_df.pivot(index="feature", columns="detector", values="signed_rho")
+           .reindex(feats))
+    detectors = [d for d in ("zs", "ad") if d in piv.columns]
+    x = np.arange(len(feats))
+    if len(detectors) == 2:
+        a, b = piv["zs"].to_numpy(float), piv["ad"].to_numpy(float)
+        for i in range(len(feats)):
+            if np.isfinite(a[i]) and np.isfinite(b[i]) and a[i] * b[i] < 0:
+                ax.axvspan(i - 0.5, i + 0.5, color=_FLIP_SHADE, alpha=0.22, lw=0,
+                           zorder=0)
+    w = 0.8 / max(len(detectors), 1)
+    for k, tag in enumerate(detectors):
+        ax.bar(x + (k - (len(detectors) - 1) / 2) * w, piv[tag].to_numpy(), width=w,
+               color=DETECTOR_COLOR[tag], label=DETECTOR_LABEL[tag], zorder=3)
+    ax.axhline(0.0, color="black", lw=1.0, zorder=2)
+    ax.set_xticks(x)
+    if show_xlabels:
+        ax.set_xticklabels([band_label(f).split("\u00b7")[0] for f in feats],
+                           rotation=45, ha="right", fontsize=7)
+    else:
+        ax.set_xticklabels([])
+    ax.set_ylabel(r"$\rho$ com sinal")
+    ax.set_title(title, fontsize=9, loc="left")
+
+
+def plot_association_profile_signed(spearman: pd.DataFrame, figures_dir: str | Path):
+    """Perfil de associação COM SINAL e em formato largo (H1, descritiva).
+
+    Diferente de `plot_association_profile` (que mostra |ρ|), aqui a barra guarda o
+    sinal do ρ da classe de maior |ρ|: pra cima quando mais energia acompanha score
+    de spoof (ρ>0) e pra baixo quando acompanha bonafide (ρ<0). Dois painéis: energia
+    média (μ) e desvio (σ) por banda, D_zs vs D_ad."""
+    sp = spearman.assign(abs_rho=spearman["rho"].abs())
+    idx = sp.groupby(["detector", "feature"])["abs_rho"].idxmax()
+    signed = (sp.loc[idx, ["detector", "feature", "rho"]]
+              .rename(columns={"rho": "signed_rho"}))
+    is_std = signed["feature"].str.endswith("_std")
+    order = lambda df: sorted(df["feature"].unique(), key=lambda f: band_index(f)[0])
+    mean_feats, std_feats = order(signed[~is_std]), order(signed[is_std])
+    lim = 1.15 * max(float(np.nanmax(np.abs(signed["signed_rho"].to_numpy()))), 0.05)
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_DOUBLE, 5.2))
+    _signed_assoc_panel(axes[0], signed[~is_std], mean_feats,
+                        r"Energia média ($\mu$)", show_xlabels=False)
+    _signed_assoc_panel(axes[1], signed[is_std], std_feats,
+                        r"Variabilidade no tempo ($\sigma$)", show_xlabels=True)
+    for ax in axes:
+        ax.set_ylim(-lim, lim)
+        ax.text(0.995, 0.95, "(+) rumo a spoof", transform=ax.transAxes,
+                ha="right", va="top", fontsize=7, color="#555555")
+        ax.text(0.995, 0.05, "(\u2212) rumo a bonafide", transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=7, color="#555555")
+    from matplotlib.patches import Patch
+    handles = [Patch(color=DETECTOR_COLOR["zs"], label="zero-shot"),
+               Patch(color=DETECTOR_COLOR["ad"], label="adaptado"),
+               Patch(color=_FLIP_SHADE, alpha=0.5, label="inverte de sentido")]
+    axes[0].legend(handles=handles, loc="upper left", fontsize=7, ncol=3)
+    axes[-1].set_xlabel("Faixa de frequência (kHz)")
+    fig.tight_layout()
+    save_fig(fig, "association_profile_signed_zs_vs_ad", figures_dir)
+    return fig
+
+
+def plot_energy_distribution(master: pd.DataFrame, figures_dir: str | Path):
+    """Distribuição de energia log-mel por faixa de frequência, bonafide vs spoof.
+
+    Dois painéis (energia média μ e variabilidade σ): média + faixa do IQR (q25–q75)
+    por classe, com o tamanho de efeito (Cohen's d de spoof−bonafide) anotado por banda
+    para ancorar quão diferente é cada faixa. A linha central é a média, coerente com o
+    sinal de d. Verdade de base acústica que motiva H1/H2."""
+    bands = list(range(1, 9))
+    x = np.arange(len(bands))
+    freq = [band_label(f"band{i}_mean").split("\u00b7")[0] for i in bands]
+    bon = master[master["ground_truth"] == 0]
+    spo = master[master["ground_truth"] == 1]
+    bon_c, spo_c = CLASS_COLOR["bonafide"], CLASS_COLOR["spoof"]
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_DOUBLE, 6.0))
+    panels = [("mean", axes[0], r"Energia média ($\mu$) por banda"),
+              ("std", axes[1], r"Variabilidade no tempo ($\sigma$) por banda")]
+    for suffix, ax, title in panels:
+        cols = [f"band{i}_{suffix}" for i in bands]
+        for df, col, lab in [(bon, bon_c, "bonafide"), (spo, spo_c, "spoof")]:
+            mean = df[cols].mean().to_numpy()
+            q1 = df[cols].quantile(0.25).to_numpy()
+            q3 = df[cols].quantile(0.75).to_numpy()
+            ax.fill_between(x, q1, q3, color=col, alpha=0.18, lw=0)
+            ax.plot(x, mean, color=col, lw=2, marker="o", ms=4, label=lab, zorder=3)
+        trans = ax.get_xaxis_transform()
+        for i, c in enumerate(cols):
+            d = _cohens_d(spo[c].to_numpy(), bon[c].to_numpy())
+            strong = bool(np.isfinite(d) and abs(d) >= 0.2)
+            color = (spo_c if d > 0 else bon_c) if strong else "#9a9a9a"
+            ax.text(i, 0.965, f"d={d:+.2f}", transform=trans, ha="center", va="top",
+                    fontsize=6.3, color=color,
+                    fontweight="bold" if strong else "normal")
+        ax.set_title(title, fontsize=9, loc="left")
+        ax.set_ylabel("energia log-mel")
+        ax.margins(y=0.14)
+    axes[0].legend(loc="lower left", fontsize=8)
+    axes[-1].set_xticks(x, freq, rotation=45, ha="right", fontsize=7)
+    axes[-1].set_xlabel("Faixa de frequência (kHz)")
+    fig.suptitle("Distribuição de energia por frequência: bonafide vs spoof  "
+                 r"(média + IQR; $d$ = spoof$-$bonafide por banda)", fontsize=9)
+    fig.tight_layout()
+    save_fig(fig, "energy_distribution_bonafide_vs_spoof", figures_dir)
     return fig
 
 
@@ -202,6 +317,8 @@ def _stars(q: float | None) -> str:
 
 
 def _lookup_q(conf: pd.DataFrame, detector: str, feature: str, test: str) -> float | None:
+    if conf is None or len(conf) == 0 or "detector" not in conf.columns:
+        return None
     sel = conf[(conf.detector == detector) & (conf.feature == feature)
                & (conf.test == test)]
     return float(sel["q_value_fdr"].iloc[0]) if len(sel) else None
@@ -239,7 +356,7 @@ def plot_confirmatory_box(master: pd.DataFrame, conf: pd.DataFrame,
             med.set_color("black")
         q_mean = _lookup_q(conf, detector_tag, feat, "welch_TN_vs_FP")
         q_var = _lookup_q(conf, detector_tag, feat, "levene_TP_vs_FN")
-        ax.set_title(f"{mfcc_label(feat)}\nTN-FP {_stars(q_mean)} | TP-FN {_stars(q_var)}",
+        ax.set_title(f"{band_label(feat)}\nTN-FP {_stars(q_mean)} | TP-FN {_stars(q_var)}",
                      fontsize=7, loc="left")
         ax.tick_params(axis="x", labelsize=7)
     for j in range(n, nrows * ncols):
@@ -247,6 +364,113 @@ def plot_confirmatory_box(master: pd.DataFrame, conf: pd.DataFrame,
     fig.suptitle(DETECTOR_LABEL[detector_tag], fontsize=9)
     fig.tight_layout()
     save_fig(fig, f"confirmatory_box_{detector_tag}", figures_dir)
+    return fig
+
+
+def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
+    """Diferença de médias padronizada (pooled)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    na, nb = len(a), len(b)
+    if na < 2 or nb < 2:
+        return np.nan
+    sp = np.sqrt(((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / (na + nb - 2))
+    return (a.mean() - b.mean()) / sp if sp > 0 else np.nan
+
+
+def _log2_std_ratio(a: np.ndarray, b: np.ndarray) -> float:
+    """log2 da razão de desvios-padrão (a/b): >0 => a mais variável que b."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if len(a) < 2 or len(b) < 2:
+        return np.nan
+    sa, sb = a.std(ddof=1), b.std(ddof=1)
+    return float(np.log2(sa / sb)) if sa > 0 and sb > 0 else np.nan
+
+
+def _boot_ci(a, b, stat, n_boot=1000, seed=42):
+    """IC 95% percentil por bootstrap reamostrando cada grupo (a, b)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if len(a) < 2 or len(b) < 2:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(seed)
+    vals = np.empty(n_boot)
+    for i in range(n_boot):
+        ra = a[rng.integers(0, len(a), len(a))]
+        rb = b[rng.integers(0, len(b), len(b))]
+        vals[i] = stat(ra, rb)
+    vals = vals[np.isfinite(vals)]
+    if not len(vals):
+        return (np.nan, np.nan)
+    return (float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5)))
+
+
+def plot_confirmatory_effects(master: pd.DataFrame, conf: pd.DataFrame,
+                              features: list[str], detector_tag: str, quad_col: str,
+                              figures_dir: str | Path, n_boot: int = 1000, seed: int = 42):
+    """H3 em tamanho de efeito (forest plot): uma linha por banda, dois painéis.
+
+    Esquerda: Cohen's d (média TN vs FP) com IC 95%. Direita: log2 da razão de
+    desvios (variância TP vs FN) com IC 95%. Marcador cheio = q<0,05 (pós-FDR);
+    vazio = não significativo. Linha no zero = sem efeito. Foca magnitude+direção,
+    complementando (e sendo mais honesto que) os boxplots."""
+    feats = sorted(features, key=lambda f: band_index(f))
+    y = np.arange(len(feats))[::-1]  # primeira feature no topo
+    d_pt, d_lo, d_hi, d_sig = [], [], [], []
+    r_pt, r_lo, r_hi, r_sig = [], [], [], []
+    for f in feats:
+        tn = master.loc[master[quad_col] == "TN", f].to_numpy()
+        fp = master.loc[master[quad_col] == "FP", f].to_numpy()
+        tp = master.loc[master[quad_col] == "TP", f].to_numpy()
+        fn = master.loc[master[quad_col] == "FN", f].to_numpy()
+        d_pt.append(_cohens_d(tn, fp))
+        lo, hi = _boot_ci(tn, fp, _cohens_d, n_boot, seed)
+        d_lo.append(lo); d_hi.append(hi)
+        r_pt.append(_log2_std_ratio(tp, fn))
+        lo, hi = _boot_ci(tp, fn, _log2_std_ratio, n_boot, seed)
+        r_lo.append(lo); r_hi.append(hi)
+        qm = _lookup_q(conf, detector_tag, f, "welch_TN_vs_FP")
+        qv = _lookup_q(conf, detector_tag, f, "levene_TP_vs_FN")
+        d_sig.append(qm is not None and qm < 0.05)
+        r_sig.append(qv is not None and qv < 0.05)
+
+    fig, (axL, axR) = plt.subplots(1, 2, sharey=True,
+                                   figsize=(COL_WIDTH_DOUBLE, 0.46 * len(feats) + 1.8))
+    panels = [
+        (axL, d_pt, d_lo, d_hi, d_sig, CB_PALETTE[1],
+         "Does average energy differ?",
+         "when real audio is wrongly rejected (TN vs FP)",
+         r"Cohen's $d$   ($\approx$0: groups barely differ)"),
+        (axR, r_pt, r_lo, r_hi, r_sig, CB_PALETTE[2],
+         "Does variability differ?",
+         "when a spoof slips through (TP vs FN)",
+         r"$\log_2$ std ratio   (>0: caught spoof varies more)")]
+    for ax, pt, lo, hi, sig, color, title, subtitle, xlabel in panels:
+        pt = np.array(pt, float)
+        err = np.array([pt - np.array(lo, float), np.array(hi, float) - pt])
+        for i in range(len(feats)):
+            filled = sig[i]
+            ax.errorbar(pt[i], y[i], xerr=[[err[0, i]], [err[1, i]]], fmt="o", ms=5,
+                        color=color, ecolor=color, elinewidth=1.2, capsize=2.5,
+                        markerfacecolor=color if filled else "white",
+                        markeredgecolor=color, markeredgewidth=1.2)
+        ax.axvline(0.0, color="black", lw=1.0, ls="--")
+        ax.set_xlabel(xlabel, fontsize=7.5)
+        ax.set_title(f"{title}\n{subtitle}", fontsize=8, loc="left")
+    # Faixa cinza = "efeito pequeno" (|d|<0,2), para o leitor ver que as médias mal mudam.
+    axL.axvspan(-0.2, 0.2, color="gray", alpha=0.12, lw=0)
+    axL.text(0.0, 0.015, "small effect", transform=axL.get_xaxis_transform(),
+             ha="center", va="bottom", fontsize=6.5, color="#666666")
+    axL.margins(y=0.06)
+    axL.set_yticks(y, [band_label(f) for f in feats], fontsize=7)
+    # Legenda de significância (cheio = significativo apos correcao FDR).
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], marker="o", color="#555", markerfacecolor="#555",
+                      ls="", label=r"significant ($q<0.05$)"),
+               Line2D([0], [0], marker="o", color="#555", markerfacecolor="white",
+                      ls="", label="not significant")]
+    axR.legend(handles=handles, loc="lower right", fontsize=6.5, framealpha=0.9)
+    fig.suptitle(f"{DETECTOR_LABEL[detector_tag]} — cues linked to errors (H3)", fontsize=9)
+    fig.tight_layout()
+    save_fig(fig, f"confirmatory_effects_{detector_tag}", figures_dir)
     return fig
 
 
@@ -276,8 +500,8 @@ def plot_spearman_scatter(master: pd.DataFrame, spearman: pd.DataFrame,
                 rho = row["rho"].iloc[0]
                 q = row["q_value_fdr"].iloc[0] if "q_value_fdr" in row else float("nan")
                 lines.append(rf"{cls_name}: $\rho$={rho:.2f} ({_stars(q)})")
-        ax.set_title(f"{DETECTOR_LABEL[tag]}\n{mfcc_label(feat)}", fontsize=8, loc="left")
-        ax.set_xlabel(mfcc_label(feat))
+        ax.set_title(f"{DETECTOR_LABEL[tag]}\n{band_label(feat)}", fontsize=8, loc="left")
+        ax.set_xlabel(band_label(feat))
         ax.set_ylabel("P(spoof)")
         ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, va="top",
                 fontsize=6.5, bbox=dict(boxstyle="round", fc="white", alpha=0.7, lw=0.4))
@@ -313,4 +537,85 @@ def plot_det(master: pd.DataFrame, figures_dir: str | Path):
     ax.legend(loc="upper right", fontsize=7)
     fig.tight_layout()
     save_fig(fig, "det_zs_vs_ad", figures_dir)
+    return fig
+
+
+def _band_assoc_strength(spearman: pd.DataFrame, tag: str, n_bands: int) -> np.ndarray:
+    """max|ρ| por banda (sobre μ/σ e classes) para um detector, ordenado por banda."""
+    sp = spearman[spearman.detector == tag].assign(abs_rho=lambda d: d["rho"].abs())
+    sp = sp.assign(band=[band_index(f)[0] for f in sp["feature"]])
+    m = sp.groupby("band")["abs_rho"].max()
+    return np.array([float(m.get(b, np.nan)) for b in range(n_bands)])
+
+
+def plot_eer_threshold(master: pd.DataFrame, figures_dir: str | Path):
+    """Taxas de erro em função do limiar de decisão (D_zs em cima, D_ad embaixo).
+
+    Didática do EER: para cada detector, duas curvas cruzam no ponto de operação de
+    EER --- a taxa de rejeitar bonafide (FPR, cai com o limiar) e a de deixar passar
+    spoof (FNR, sobe com o limiar). O cruzamento (FPR = FNR) é o EER. Complementa a
+    curva DET (mesma informação, com o limiar explícito no eixo x)."""
+    y = master["ground_truth"].to_numpy()
+    # Escala logit no eixo x: os scores saturam perto de 1, então varremos o limiar em
+    # espaçamento logit para o cruzamento (EER) ficar visível em vez de colado em 1.0.
+    xticks = [0.01, 0.1, 0.5, 0.9, 0.99, 0.999]
+    thr = 1.0 / (1.0 + np.exp(-np.linspace(-8.0, 8.0, 801)))   # ~ (3e-4 .. 1-3e-4)
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_SINGLE, 4.2))
+    for ax, tag in zip(axes, ("zs", "ad")):
+        s = master[f"p_spoof_{tag}"].to_numpy()
+        bona, spoof = s[y == 0], s[y == 1]
+        fpr = np.array([(bona >= t).mean() for t in thr])   # rejeitar bonafide
+        fnr = np.array([(spoof < t).mean() for t in thr])   # deixar passar spoof
+        eer, eer_thr = compute_eer(s, y)
+        eer_thr = float(np.clip(eer_thr, thr[0], thr[-1]))
+        ax.plot(thr, fpr, color=CB_PALETTE[1], lw=1.6,
+                label="reject bonafide (FPR)")
+        ax.plot(thr, fnr, color=CB_PALETTE[0], lw=1.6,
+                label="miss spoof (FNR)")
+        ax.axvline(eer_thr, color="grey", ls="--", lw=0.7)
+        ax.plot([eer_thr], [eer], "o", color="black", ms=5, zorder=5)
+        ax.annotate(f"EER {eer * 100:.1f}%", xy=(eer_thr, eer),
+                    xytext=(-8, 8), textcoords="offset points", fontsize=8,
+                    fontweight="bold", ha="right")
+        ax.set_xscale("logit")
+        ax.set_xlim(thr[0], thr[-1])
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Error rate")
+        ax.set_title(DETECTOR_LABEL[tag], fontsize=8, loc="left")
+    axes[0].legend(loc="center left", fontsize=7, ncol=1)
+    axes[-1].set_xticks(xticks)
+    axes[-1].set_xticklabels([f"{t:g}" for t in xticks])
+    axes[-1].set_xlabel(r"Decision threshold on $P(\mathrm{spoof})$ (logit scale)")
+    fig.tight_layout()
+    save_fig(fig, "eer_threshold_zs_vs_ad", figures_dir)
+    return fig
+
+
+def plot_spine_convergence(edges, occ: pd.DataFrame, spearman: pd.DataFrame,
+                           agreement: pd.DataFrame, figures_dir: str | Path):
+    """Convergência das duas espinhas na MESMA grade de bandas (D_zs em cima, D_ad
+    embaixo): barras = |queda causal| da oclusão; linha = |ρ| associativo (eixo à
+    direita). O título traz o ρ de concordância (Spearman) por detector."""
+    centers = (edges[:-1] + edges[1:]) / 2
+    n_bands = len(centers)
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(COL_WIDTH_SINGLE, 4.2))
+    for ax, tag in zip(axes, ("zs", "ad")):
+        sub = occ[occ.detector == tag].sort_values("band_hz_low")
+        causal = np.abs(sub["mean_p_spoof_drop"].to_numpy())
+        assoc = _band_assoc_strength(spearman, tag, n_bands)
+        ax.bar(centers, causal, width=np.diff(edges) * 0.9, align="center",
+               color=DETECTOR_COLOR[tag], alpha=0.35, label="causal $|\\Delta P|$")
+        ax2 = ax.twinx()
+        ax2.plot(centers, assoc, color="#333333", lw=1.3, marker="o", ms=3,
+                 label=r"assoc.\ $|\rho|$")
+        ax2.set_ylim(bottom=0)
+        ax.set_ylim(bottom=0)
+        ax.set_ylabel(r"$|\Delta P(\mathrm{spoof})|$")
+        ax2.set_ylabel(r"$|\rho|$")
+        row = agreement[agreement.detector == tag]
+        rho_txt = f"$\\rho$={row['rho_causal_vs_assoc'].iloc[0]:.2f}" if len(row) else ""
+        ax.set_title(f"{DETECTOR_LABEL[tag]}  (agreement {rho_txt})", fontsize=8, loc="left")
+    axes[-1].set_xlabel("Frequency band center (Hz)")
+    fig.tight_layout()
+    save_fig(fig, "spine_convergence_zs_vs_ad", figures_dir)
     return fig

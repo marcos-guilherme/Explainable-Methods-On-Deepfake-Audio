@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from brspeech_xai import pipeline as P
 from brspeech_xai.artifacts import RunPaths, is_done
 
@@ -13,6 +15,9 @@ def test_pipeline_skips_done_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "STAGES", [("a", fake("a")), ("b", fake("b")), ("c", fake("c"))])
 
     class Cfg:
+        # run_stages reconfigura a grade de bandas antes dos estágios.
+        bands = SimpleNamespace(n_bands=8, f_min=20.0, f_max=7900.0)
+
         def config_hash(self):
             return "h1"
 
