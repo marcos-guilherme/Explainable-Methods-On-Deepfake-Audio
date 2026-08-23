@@ -82,7 +82,7 @@ frequency grid, we can directly quantify their agreement. Light adaptation lower
 the EER from 25.8\% to 20.9\% and reshapes the cues: the causal spectral footprint
 changes from a diffuse, broadband pattern (occluding almost any band lowers the
 spoof score) to a localised low-frequency reliance with an emergent mid-band cue
-that favours bona fide, while the associative profile weakens and moves toward
+that favours bonafide, while the associative profile weakens and moves toward
 mid-band energy. For the zero-shot detector the causally influential bands and the
 most associated ones broadly coincide (band-wise Spearman $\rho=0.69$), a
 correspondence that adaptation largely removes ($\rho=0.10$). Error-linked acoustic
@@ -312,7 +312,7 @@ causal occlusion analysis and the two can be compared band by band.
 % transparente (correlação de posto) ao custo de ser univariada (sem interações).
 The associative analysis measures, for each detector, how each band-energy
 descriptor is associated with the continuous score $P(\mathrm{spoof})$. We use Spearman's rank
-correlation $\rho$, computed \emph{within each class} (bona fide and spoof
+correlation $\rho$, computed \emph{within each class} (bonafide and spoof
 separately). The intra-class restriction is essential: because the score separates
 the two classes, pooling them would manufacture a large spurious correlation for
 almost any feature that merely differs between classes. Within a class, $\rho$
@@ -401,9 +401,9 @@ study framed inferentially; the associative and causal analyses remain descripti
     Acoustic features & 8 mel bands $\times$ (mean, std) $=$ 16 \\
     Frequency bands & 8 mel-spaced, 20--7900 Hz (shared with occlusion) \\
     Dataset & \texttt{AKCIT-Deepfake/BRSpeech-DF} \\
-    Corpus scale & 459{,}137 clips (76{,}644 bona fide / 382{,}493 spoof) \\
+    Corpus scale & 459{,}137 clips (76{,}644 bonafide / 382{,}493 spoof) \\
     Train per class ($D_\mathrm{ad}$ head) & 1{,}500 (balanced) \\
-    Analysis set (test) & 1{,}320 bona fide $+$ 1{,}500 spoof \\
+    Analysis set (test) & 1{,}320 bonafide $+$ 1{,}500 spoof \\
     Positive class & spoof \\
     Seed & 42 \\
     \bottomrule
@@ -411,13 +411,13 @@ study framed inferentially; the associative and causal analyses remain descripti
 \end{table}
 \paragraph{Dataset and sampling rationale.}
 BRSpeech-DF is a large-scale Brazilian-Portuguese anti-spoofing corpus
-(459{,}137 clips: 76{,}644 bona fide and 382{,}493 spoofed, the latter carrying a
+(459{,}137 clips: 76{,}644 bonafide and 382{,}493 spoofed, the latter carrying a
 generator-method attribute), split into \texttt{train}/\texttt{validation}/%
-\texttt{test}. Its \texttt{test} partition alone holds 1{,}320 bona fide and
+\texttt{test}. Its \texttt{test} partition alone holds 1{,}320 bonafide and
 6{,}587 spoofed clips. Because our objective is population-level acoustic
 \emph{explainability} rather than leaderboard-style benchmarking, we deliberately
 analyse a compact, class-controlled subset instead of the full corpus. We take the
-\emph{entire} bona fide test split (1{,}320 clips --- the scarce class) matched
+\emph{entire} bonafide test split (1{,}320 clips --- the scarce class) matched
 with 1{,}500 spoofed test clips, and fit the $D_\mathrm{ad}$ logistic head on an
 independent, class-balanced training subset (1{,}500 per class); test clips are
 never seen during adaptation, precluding leakage. This scale is a design choice,
@@ -427,16 +427,16 @@ CIs) is already well powered at this $N$: at the EER operating point the rare er
 quadrants (FP, FN) still retain a few hundred clips each, enough to resolve
 small-to-moderate effects ($d\!\approx\!0.25$--$0.3$ at 80\% power), so additional
 clips would add negligible statistical resolution. Second, exhausting the scarce
-bona fide class while keeping a comparable spoof sample keeps the four decision
+bonafide class while keeping a comparable spoof sample keeps the four decision
 quadrants (TP/TN/FP/FN) and the EER threshold meaningful, which the corpus's native
-$\approx$1:5 bona fide/spoof imbalance would otherwise distort. Third, the per-clip
+$\approx$1:5 bonafide/spoof imbalance would otherwise distort. Third, the per-clip
 analysis (band-stop spectral occlusion with a per-band bootstrap) scales with $N$,
 so a focused subset preserves full reproducibility at tractable cost. Scaling the analysis to the full corpus and
 stratifying it by spoof generator is left to future work.
 
 \begin{table}[t]
   \caption{Decision-quadrant sizes on the analysis set at the EER threshold, per
-  detector (TP/TN: correct spoof/bona-fide; FP/FN: errors).}
+  detector (TP/TN: correct spoof/bonafide; FP/FN: errors).}
   \label{tab:quadrants}
   \begin{tabular}{lcccc}
     \toprule
@@ -508,7 +508,7 @@ reproducible Docker environment on a single NVIDIA A100 GPU, with fixed seeds.
   \label{fig:det}
 \end{figure}
 
-On the analysis set of 2{,}820 clips (1{,}500 spoof and 1{,}320 bona fide),
+On the analysis set of 2{,}820 clips (1{,}500 spoof and 1{,}320 bonafide),
 the light adaptation lowers the EER from 25.8\% to 20.9\% --- a 4.9-point
 absolute (about 19\% relative) reduction --- while MCC rises from 0.483 to 0.581
 and accuracy from 0.742 to 0.791 (Table~\ref{tab:performance}). Consistently,
@@ -538,7 +538,7 @@ rather than new features learned for Brazilian Portuguese.
   \includegraphics[width=\columnwidth]{association_profile_zs_vs_ad}
   \caption{Acoustic-association profile of the log-mel band-energy features,
   measured as the intra-class Spearman $|\rho|$ between each band descriptor and
-  $P(\mathrm{spoof})$ (maximum over the bona fide/spoof classes), split into mean
+  $P(\mathrm{spoof})$ (maximum over the bonafide/spoof classes), split into mean
   ($\mu$, top) and standard-deviation ($\sigma$, bottom) descriptors and ordered by
   frequency band along the $x$-axis. We read the between-detector shift
   \emph{descriptively} (H1).}
@@ -548,12 +548,12 @@ rather than new features learned for Brazilian Portuguese.
 Figure~\ref{fig:association} compares the per-band association profiles of
 $D_\mathrm{zs}$ and $D_\mathrm{ad}$. For the zero-shot detector, the score is most
 strongly associated with \emph{low-band energy means}: the 20--282\,Hz band
-(intra-class $\rho=+0.45$ in spoof, $+0.39$ in bona fide) and the 282--639\,Hz band
+(intra-class $\rho=+0.45$ in spoof, $+0.39$ in bonafide) and the 282--639\,Hz band
 ($\rho=+0.41$ in both classes), with secondary mid-band contributions at
 1.79--2.69 and 2.69--3.93\,kHz ($\rho\approx+0.38$ in spoof). All are positive: more
 band energy co-varies with a higher spoof score. Under adaptation the profile both
 \emph{weakens} and \emph{moves upward in frequency}: $D_\mathrm{ad}$'s strongest
-associations are mid-band energy means that turn \emph{negative} in bona-fide clips
+associations are mid-band energy means that turn \emph{negative} in bonafide clips
 (1.79--2.69\,kHz $\rho=-0.34$; 2.69--3.93\,kHz $\rho=-0.33$; 1.13--1.79\,kHz
 $\rho=-0.29$), together with mid-band energy \emph{variability} in spoof clips
 (2.69--3.93\,kHz\,$\sigma$ $\rho=+0.25$). Descriptively, then, $D_\mathrm{zs}$
@@ -578,7 +578,7 @@ contrast itself.
   \caption{Divergent spectral occlusion profiles ($D_\mathrm{zs}$ top,
   $D_\mathrm{ad}$ bottom). Red area: occluding the band lowers $P(\mathrm{spoof})$,
   so the band \emph{contributes to the spoof decision}; blue: occlusion raises it,
-  so the band \emph{contributes to a bona-fide decision}; grey ribbon: 95\% bootstrap
+  so the band \emph{contributes to a bonafide decision}; grey ribbon: 95\% bootstrap
   CI of the per-band mean drop. Bands whose CI excludes zero have a reliable causal
   effect (H2).}
   \label{fig:occlusion_bands}
@@ -604,9 +604,9 @@ into a band-selective one and reverses one mid band: for $D_\mathrm{ad}$ the pos
 contribution concentrates at 20--282\,Hz ($0.060$) and 639--1125\,Hz ($0.052$), the
 282--639\,Hz band becomes null (CI includes zero), and 1125--1788\,Hz \emph{changes
 sign} (mean drop $=-0.016$, CI $[-0.025,-0.007]$): occluding it \emph{raises}
-$P(\mathrm{spoof})$, so that band instead contributes to a bona-fide decision. In
+$P(\mathrm{spoof})$, so that band instead contributes to a bonafide decision. In
 causal terms, adaptation concentrates the detector's spectral reliance on low
-frequencies and introduces a mid-band cue that favours bona fide, absent in the
+frequencies and introduces a mid-band cue that favours bonafide, absent in the
 zero-shot model.
 
 \subsection{Convergence of the Two Analyses}
@@ -630,7 +630,7 @@ causal drops and the associations largest in the low bands. With only eight band
 this is suggestive rather than conclusive ($p=0.06$, not significant at the $0.05$
 level), so we read it as descriptive support rather than proof. For the adapted
 detector the correspondence essentially vanishes ($\rho=0.10$, $p=0.82$): its causal
-footprint (low bands plus a mid-band cue that favours bona fide) is no longer tracked
+footprint (low bands plus a mid-band cue that favours bonafide) is no longer tracked
 by the univariate association ranking. We do not speculate on the source of this
 divergence; we simply note that, for $D_\mathrm{ad}$, band-level claims should rest
 on the causal analysis rather than the associative one.
@@ -691,16 +691,16 @@ As a complementary associative view, Figure~\ref{fig:spearman} relates the most
 correlated band-energy feature to the detector score within each class
 (\texttt{spearman\_table}). The association is monotonic and class-dependent. For
 $D_\mathrm{zs}$ the low-band energy mean (20--282\,Hz) rises with
-$P(\mathrm{spoof})$ in both classes ($\rho=+0.45$ in spoof, $+0.39$ in bona fide;
+$P(\mathrm{spoof})$ in both classes ($\rho=+0.45$ in spoof, $+0.39$ in bonafide;
 both $q<10^{-47}$), i.e.\ higher low-frequency energy co-varies with a higher spoof
 score.
 For $D_\mathrm{ad}$ the dominant cue is the mid-band energy mean (1.79--2.69\,kHz):
-it \emph{lowers} the score among bona-fide clips ($\rho=-0.34$, $q<10^{-34}$) yet is
+it \emph{lowers} the score among bonafide clips ($\rho=-0.34$, $q<10^{-34}$) yet is
 essentially flat among spoof clips ($\rho=+0.06$), showing the cue acts chiefly by
 \emph{depressing the score of genuine speech} rather than by discriminating within
 the spoof class. Computing $\rho$ within each class is therefore essential: pooling
 the classes would manufacture a spurious global correlation from the score's
-bona-fide/spoof separation alone.
+bonafide/spoof separation alone.
 
 % ==============================================================================
 \section{Discussion and Limitations}
@@ -744,7 +744,7 @@ a lightly adapted one. Associative (intra-class Spearman) and causal (spectral
 occlusion) evidence, computed on a shared mel-band grid, agree that light adaptation
 reshapes the detector's acoustic reliance: from a diffuse, broadband use of
 low-band spectral energy toward a localised low-frequency footprint with an emergent
-mid-band cue that favours bona fide, alongside a clear EER improvement. Placing both
+mid-band cue that favours bonafide, alongside a clear EER improvement. Placing both
 analyses on the same frequency axis let us quantify their agreement directly: it is
 moderate for the zero-shot detector (band-wise $\rho=0.69$, though only suggestive at
 eight bands) and essentially absent after adaptation ($\rho=0.10$), locating where
