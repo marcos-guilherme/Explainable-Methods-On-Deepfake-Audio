@@ -174,10 +174,15 @@ case "$cmd" in
         ;;
 
     fetch)
+        # Traz results/ sem os áudios crus (audios_*.npy, ~GBs): eles ficam na VM,
+        # pois só servem para recomputar oclusão (que roda lá). Figuras/tabelas/embeddings
+        # (o que interessa para escrita/análise) vêm normalmente.
         dest="${1:-${REPO_ROOT}/results}"
         mkdir -p "$dest"
-        log "baixando results/ da VM para ${dest} ..."
-        rsync -az -e "$RSH" "${VM_SSH}:${VM_DIR}/results/" "${dest}/"
+        log "baixando results/ (sem áudios crus) da VM para ${dest} ..."
+        rsync -az --info=progress2 -e "$RSH" \
+            --exclude 'audios_*.npy' \
+            "${VM_SSH}:${VM_DIR}/results/" "${dest}/"
         log "pronto."
         ;;
 
