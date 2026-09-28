@@ -30,8 +30,11 @@ class XlsrFairseqEmbedder:
                            batch_size: int = 8) -> np.ndarray:
         """Embedding por áudio: média sobre os frames do XLS-R (== AdaptiveAvgPool1d)."""
         embs: list[np.ndarray] = []
-        for i in progress(range(0, len(audios), batch_size),
-                          desc="embeddings XLS-R", unit="batch"):
+        # Batch único (ex.: scoring de 1 clipe na oclusão) não mostra barra, senão o log
+        # vira uma enxurrada de "1/1".
+        single_batch = len(audios) <= batch_size
+        for i in progress(range(0, len(audios), batch_size), desc="embeddings XLS-R",
+                          unit="batch", disable=single_batch):
             wavs = [preprocess(a, sr) for a, sr in zip(audios[i:i + batch_size],
                                                        srs[i:i + batch_size])]
             batch = torch.stack(wavs).to(self.device)            # (B, T)

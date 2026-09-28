@@ -34,7 +34,22 @@ def _ensure_console() -> None:
     # Cor só em terminal interativo; em log redirecionado sai texto limpo (sem ANSI).
     logger.add(lambda m: tqdm.write(m, end=""), format=_CONSOLE_FMT, level="INFO",
                colorize=sys.stderr.isatty())
+    _quiet_third_party()
     _console_ready = True
+
+
+def _quiet_third_party() -> None:
+    """Reduz o ruído de libs terceiras que poluem o log do run.
+
+    httpx/transformers logam cada requisição HTTP em INFO (o encoder é reconstruído por
+    estágio, então repetiria muito); o torch avisa a cada build sobre weight_norm.
+    """
+    import logging
+    import warnings
+    for name in ("httpx", "httpcore", "urllib3", "transformers", "datasets", "filelock"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    warnings.filterwarnings("ignore", message=r".*weight_norm.*is deprecated.*",
+                            category=FutureWarning)
 
 
 def get_logger(name: str = "brspeech_xai", logfile: str | Path | None = None):
@@ -52,13 +67,14 @@ def get_logger(name: str = "brspeech_xai", logfile: str | Path | None = None):
     return logger
 
 
-def progress(iterable=None, *, total=None, desc=None, unit="it"):
+def progress(iterable=None, *, total=None, desc=None, unit="it", disable=False):
     """Barra de progresso com ETA, amigável a execução headless.
 
     ``mininterval`` alto limita a frequência de atualização: no terminal a barra é
     fluida; no log redirecionado saem linhas espaçadas com percentual e tempo restante.
+    ``disable`` some com a barra (ex.: scoring de 1 clipe por vez, para não poluir o log).
     """
-    return tqdm(iterable, total=total, desc=desc, unit=unit,
+    return tqdm(iterable, total=total, desc=desc, unit=unit, disable=disable,
                 dynamic_ncols=True, mininterval=5.0, smoothing=0.1)
 
 
