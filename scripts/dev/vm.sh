@@ -14,8 +14,15 @@
 #   scripts/dev/vm.sh run [CONFIG] [-- --set k=v ...]   # run em 2º plano (nohup + log)
 #   scripts/dev/vm.sh run-fg [CONFIG] [-- ...]   # run em 1º plano (bloqueia; para depurar)
 #   scripts/dev/vm.sh resume RUN_DIR [-- --from STAGE --force]  # reprocessa estágios de uma run existente
+#   scripts/dev/vm.sh rollout RUN_DIR            # gera a figura de attention roll-out (encoder hf_ssl)
+#   scripts/dev/vm.sh dft-lrp RUN_DIR [BACKEND]  # DFT-LRP do D_ad (hf_ssl); reporta o portão de conservação
+#   scripts/dev/vm.sh rollout-compare [REF_SLUG] # grade comparando encoders HF SSL nos mesmos clipes
+#   scripts/dev/vm.sh sonify [-- FLAGS...]       # gera áudios guiados pela relevância DFT-LRP
+#   scripts/dev/vm.sh faithfulness [-- FLAGS...] # valida keep/delete/random em segundo plano
+#   scripts/dev/vm.sh faithfulness-audio [-- FLAGS...]  # exporta exemplos audíveis das intervenções
 #   scripts/dev/vm.sh logs                       # acompanha o log da última run (tail -f)
 #   scripts/dev/vm.sh status                      # containers rodando + últimas linhas do log
+#   scripts/dev/vm.sh stop                        # para runs em andamento (containers + nohup)
 #   scripts/dev/vm.sh fetch [DEST]               # baixa results/ da VM (default: ./results)
 #   scripts/dev/vm.sh shell                       # shell dentro do container
 #   scripts/dev/vm.sh ssh                         # ssh cru na VM
@@ -190,6 +197,118 @@ case "$cmd" in
         log "acompanhe com: $0 logs   |   baixe com: $0 fetch"
         ;;
 
+    rollout)
+        # Gera a figura de attention roll-out (temporal, ilustrativa) para uma run de
+        # encoder hf_ssl. Roda em 1º plano (poucos clipes, rápido) dentro do container,
+        # onde há GPU e os áudios crus. A figura fica em <run_dir>/figures/.
+        do_sync
+        run_dir_arg="${1:-}"; shift || true
+        if [[ -z "$run_dir_arg" ]]; then
+            log "uso: $0 rollout RUN_DIR"
+            log "ex.: $0 rollout results/hf_ssl-wavlm-base/wavlm-20260824-173800"
+            exit 2
+        fi
+        case "$run_dir_arg" in
+            /*) rdir="$run_dir_arg" ;;
+            results/*) rdir="/workspace/${run_dir_arg}" ;;
+            *) rdir="/workspace/results/${run_dir_arg}" ;;
+        esac
+        log "attention roll-out (1º plano): ${rdir}"
+        "${SSH[@]}" "${COMPOSE} run --rm -T deepfake \
+            python /workspace/scripts/dev/attention_rollout.py --run-dir ${rdir}"
+        log "baixe a figura com: $0 fetch"
+        ;;
+
+    dft-lrp)
+        # Roda o DFT-LRP do D_ad (encoder hf_ssl) em 1º plano no container, onde há GPU e os
+        # áudios crus. Reporta o PORTÃO de conservação no log e salva tabela/figura na run.
+        # Uso: $0 dft-lrp RUN_DIR [BACKEND] [-- FLAGS...]   (BACKEND: attnlrp [default] | gxi)
+        # FLAGS extras vão direto ao script, ex.: -- --stdft-examples 4 (heatmap tempo-frequência).
+        do_sync
+        run_dir_arg="${1:-}"; shift || true
+        backend="attnlrp"
+        if [[ "${1:-}" != "" && "${1:-}" != "--" ]]; then backend="$1"; shift || true; fi
+        [[ "${1:-}" == "--" ]] && shift || true
+        extra="$*"
+        if [[ -z "$run_dir_arg" ]]; then
+            log "uso: $0 dft-lrp RUN_DIR [attnlrp|gxi] [-- FLAGS...]"
+            log "ex.: $0 dft-lrp results/hf_ssl-wav2vec2-base/wav2vec2-20260824-134313 attnlrp"
+            log "ex.: $0 dft-lrp <RUN_DIR> attnlrp -- --stdft-examples 4   # heatmap tempo-frequência"
+            exit 2
+        fi
+        case "$run_dir_arg" in
+            /*) rdir="$run_dir_arg" ;;
+            results/*) rdir="/workspace/${run_dir_arg}" ;;
+            *) rdir="/workspace/results/${run_dir_arg}" ;;
+        esac
+        log "DFT-LRP (1º plano): ${rdir} | backend=${backend} ${extra:+| extra: ${extra}}"
+        "${SSH[@]}" "${COMPOSE} run --rm -T deepfake \
+            python /workspace/scripts/dev/dft_lrp_ad.py --run-dir ${rdir} --backend ${backend} ${extra}"
+        log "baixe a tabela/figura com: $0 fetch"
+        ;;
+
+    rollout-compare)
+        # Grade comparando o attention roll-out dos encoders HF SSL nos MESMOS clipes.
+        # Auto-descobre a última run de cada encoder em results/. REF_SLUG (opcional)
+        # escolhe o encoder de referência para a seleção dos clipes (default: wavlm).
+        # Saída: results/_aggregate/attention_rollout_compare.{png,pdf}.
+        do_sync
+        ref_slug="${1:-wavlm}"
+        log "rollout-compare (1º plano) | referência: ${ref_slug}"
+        "${SSH[@]}" "${COMPOSE} run --rm -T deepfake \
+            python /workspace/scripts/dev/attention_rollout_compare.py \
+            --results-root /workspace/results --ref-slug ${ref_slug}"
+        log "baixe a figura com: $0 fetch"
+        ;;
+
+    sonify)
+        # Sonifica a explicação DFT-LRP (soft-mask por direção) nos MESMOS clipes, comparando os
+        # encoders HF SSL conservativos. Gera .wav (original + rumo a spoof/bonafide por encoder),
+        # figura de envoltória e manifest.csv em results/_aggregate/sonification/.
+        # Uso: $0 sonify [-- --clip-indices 187 1016 --pctl 99 --floor 0]
+        do_sync
+        [[ "${1:-}" == "--" ]] && shift
+        extra="$*"
+        log "sonify (1º plano) | flags: ${extra:-<default>}"
+        "${SSH[@]}" "${COMPOSE} run --rm -T deepfake \
+            python /workspace/scripts/dev/sonify_lrp.py \
+            --results-root /workspace/results ${extra}"
+        log "baixe os áudios com: $0 fetch  (ou rsync de results/_aggregate/sonification/)"
+        ;;
+
+    faithfulness)
+        # Valida a fidelidade da explicação DFT-LRP por bandas (keep/delete/random + re-scoring).
+        # Roda em 2º plano (todos os clipes de teste => demorado). Gera curvas + CSVs em
+        # results/_aggregate/faithfulness/.
+        # Uso: $0 faithfulness [-- --encoder wav2vec2 --ks 1 2 3 4 6 8 12 --n-random 5]
+        do_sync
+        [[ "${1:-}" == "--" ]] && shift
+        extra="$*"
+        ts="$(date +%Y%m%d-%H%M%S)"
+        remote_log="logs/faithfulness-${ts}.log"
+        log "faithfulness em 2º plano | flags: ${extra:-<default>}"
+        log "log remoto: ${VM_DIR}/${remote_log}"
+        "${SSH[@]}" "cd ${VM_DIR} && nohup docker compose run --rm -T deepfake \
+            python /workspace/scripts/dev/faithfulness_bands.py \
+            --results-root /workspace/results ${extra} \
+            > ${remote_log} 2>&1 & echo \"PID remoto: \$!\""
+        log "acompanhe com: $0 logs   |   baixe com: $0 fetch"
+        ;;
+
+    faithfulness-audio)
+        # Gera só os .wav das intervenções por banda (original, keep/delete top-k e aleatório)
+        # de poucos clipes, para ouvir antes da rodada completa. 1º plano (rápido).
+        # Uso: $0 faithfulness-audio [-- --encoder wav2vec2 --audio-clips 187 1016 --audio-k 6]
+        do_sync
+        [[ "${1:-}" == "--" ]] && shift
+        extra="$*"
+        log "faithfulness-audio (1º plano) | flags: ${extra:-<default>}"
+        "${SSH[@]}" "${COMPOSE} run --rm -T deepfake \
+            python /workspace/scripts/dev/faithfulness_bands.py \
+            --results-root /workspace/results --audio-only ${extra}"
+        log "baixe os áudios com: rsync de results/_aggregate/faithfulness/audio/"
+        ;;
+
     logs)
         # Segue o log mais recente em logs/.
         "${SSH[@]}" "cd ${VM_DIR} && f=\$(ls -t logs/*.log 2>/dev/null | head -1); \
@@ -200,6 +319,18 @@ case "$cmd" in
         "${SSH[@]}" "cd ${VM_DIR} && echo '== containers ==' && docker compose ps; \
             echo '== último log ==' && f=\$(ls -t logs/*.log 2>/dev/null | head -1); \
             [[ -n \"\$f\" ]] && { echo \"\$f\"; tail -n 20 \"\$f\"; } || echo 'sem logs'"
+        ;;
+
+    stop)
+        # Para runs em andamento: os containers one-off do 'docker compose run' têm nome
+        # '...-deepfake-run-*'. Para o container (o pipeline roda dentro) e derruba o
+        # cliente nohup pendente no host, se houver.
+        log "parando runs em andamento na VM ..."
+        "${SSH[@]}" "names=\$(docker ps --filter name=deepfake-run --format '{{.Names}}'); \
+            if [[ -n \"\$names\" ]]; then echo \"\$names\" | xargs -r docker stop; \
+            else echo 'nenhum container de run ativo'; fi; \
+            pkill -f 'docker compose run' 2>/dev/null || true"
+        log "pronto. Confira com: $0 status"
         ;;
 
     fetch)
