@@ -1,0 +1,259 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figures-xlsr-24bandas/}}
+\setlength{\parskip}{0.4em}
+
+\begin{document}
+
+\begin{center}
+  {\large\textbf{Relatório de execução: XLS-R com 24 bandas}}\\[0.3em]
+  {\small Codificador \texttt{nii-yamagishilab/mms-300m-anti-deepfake}, grade de 24 faixas mel}
+\end{center}
+
+\section{A pergunta}
+
+Detectores de \emph{deepfake} de áudio de ponta costumam ser treinados em inglês.
+Queremos entender quais pistas acústicas um detector usa para decidir se um áudio
+é real ou falso, e como essas pistas mudam quando o modelo é levemente adaptado ao
+português brasileiro. Em resumo, duas perguntas:
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}]
+  \item As pistas mudam entre um modelo \emph{zero-shot} e um adaptado?
+  \item Se mudam, o que muda (para onde o foco vai no espectro, e se isso se
+        relaciona com os erros do modelo)?
+\end{enumerate}
+
+O interesse é populacional: descrever o comportamento do detector sobre um
+conjunto representativo de áudios, de forma estatística e verificável.
+
+\section{O plano em uma página}
+
+Comparamos dois detectores sobre o mesmo codificador de fala congelado
+(wav2vec~2.0 / XLS-R), o que isola o efeito da adaptação:
+
+\begin{itemize}[nosep]
+  \item $D_{\mathrm{zs}}$: o head de decisão original, sem ajuste;
+  \item $D_{\mathrm{ad}}$: um head leve (regressão logística) treinado sobre os
+        \emph{embeddings} em português.
+\end{itemize}
+
+Sobre esse par, fazemos duas análises complementares, ambas na mesma partição de
+frequência (24 faixas em escala mel, de 20~Hz a 7{,}9~kHz):
+
+\begin{itemize}[nosep]
+  \item \textbf{associativa}, que mede quais faixas acompanham o score;
+  \item \textbf{causal}, que mede quais faixas, ao serem removidas do áudio, de
+        fato alteram o score.
+\end{itemize}
+
+Em seguida, medimos a convergência entre as duas e fazemos uma etapa
+confirmatória ligada aos erros do detector.
+
+\section{Dados desta execução}
+
+O corpus é o BRSpeech-DF (cerca de 459 mil clipes, muito desbalanceado, com mais
+falsos que reais). Como o objetivo é explicabilidade, e não \emph{ranking},
+montamos um conjunto equilibrado de análise no split de \emph{teste}: todo o áudio
+real disponível (1.320 clipes, a classe escassa) somado a 1.500 falsos, num total
+de 2.820 clipes. O head de adaptação foi treinado à parte, no split de \emph{treino},
+sem sobreposição com esse conjunto. Tanto o desempenho (EER) quanto as três análises
+(associação, oclusão e confirmatória) são medidos sobre esse conjunto de teste.
+
+Como a amostra é moderada (de algumas centenas a poucos milhares de clipes por
+comparação), tratamos os achados como \emph{observacionais}: olhamos o tamanho de
+efeito, não apenas a significância.
+
+\section{O que fizemos, etapa a etapa}
+
+\begin{description}[leftmargin=1.4em]
+  \item[Pré-processamento.] Mono, 16~kHz, janela de cerca de 4 segundos e
+        normalização. As \emph{features} são extraídas do mesmo sinal que entra no
+        detector, não do áudio bruto.
+  \item[Descrição acústica.] Energia log-mel por banda, resumida por média e
+        desvio ao longo do tempo. Escolhemos essa descrição por ser localizada em
+        frequência, o que permite comparar as duas análises banda a banda.
+  \item[Desempenho.] A métrica principal é a EER (o ponto em que as duas taxas de
+        erro se igualam, quanto menor melhor), acompanhada de MCC e acurácia. Só
+        analisamos as pistas se a adaptação de fato melhorar a detecção.
+  \item[Análise associativa.] Correlação de Spearman entre cada banda e o score,
+        calculada dentro de cada classe para evitar correlação espúria, com
+        correção estatística para múltiplos testes. O sinal indica o sentido:
+        positivo quando mais energia na banda acompanha um score mais alto de
+        \emph{spoof}; negativo quando acompanha um score mais baixo (na direção de
+        \emph{bonafide}).
+  \item[Análise causal.] Remoção de uma banda por vez (filtro de fase zero) e
+        medição da queda no score, com intervalos de confiança por \emph{bootstrap}.
+  \item[Convergência.] Teste pareado por clipe: rankeamos as faixas pela força de
+        associação (H1) numa metade dos clipes e, na outra metade, ocluímos as
+        faixas mais e menos associadas, medindo o efeito causal orientado pelo
+        sentido da associação. Metades disjuntas evitam circularidade.
+  \item[Confirmatória.] Testes estatísticos formais apenas nas pistas mais
+        relevantes, ligados aos quadrantes de acerto e erro, com controle de
+        falsas descobertas. Esta é a única parte inferencial do estudo.
+\end{description}
+
+\section{Hipóteses}
+
+\begin{itemize}[nosep]
+  \item \textbf{H1 (descritiva).} As pistas de áudio que acompanham a decisão do
+        detector não são as mesmas antes e depois da adaptação.
+  \item \textbf{H2 (causal).} Ao remover uma faixa de frequência do áudio, as
+        faixas que de fato mudam a decisão são diferentes nos dois modelos.
+  \item \textbf{H3 (inferencial).} As pistas mais importantes se comportam de
+        forma diferente quando o detector acerta e quando erra.
+\end{itemize}
+
+\section{Achados}
+
+As figuras a seguir vêm da execução com 24 faixas descrita acima, sobre o conjunto
+de teste (2.820 clipes). Os valores são observacionais.
+
+\subsection*{Desempenho: a adaptação melhora a detecção}
+
+Cada painel da Figura~\ref{fig:eer} traz duas curvas de erro que se movem em
+direções opostas conforme ajustamos o limiar de decisão: a de rejeitar áudio real
+(laranja) e a de deixar passar \emph{deepfake} (azul). O ponto em que elas se
+cruzam é o EER, que resume o detector num único número. O modelo adaptado (painel
+de baixo) cruza mais embaixo, ou seja, erra menos dos dois lados ao mesmo tempo: o
+EER cai de 25{,}9\% para 20{,}9\% (com ganhos correspondentes em MCC, de 0{,}48
+para 0{,}58, e em acurácia, de 74{,}1\% para 79{,}1\%). Esse resultado é a
+pré-condição do estudo, pois só faz sentido investigar as pistas de um detector que
+de fato melhorou. O eixo horizontal está em escala \emph{logit} porque as
+probabilidades se concentram perto de~1.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.58\textwidth]{eer_threshold_zs_vs_ad}
+  \caption{Taxas de erro em função do limiar (topo: \emph{zero-shot}; base:
+  adaptado). O ponto preto marca o EER, onde as duas taxas se igualam.}
+  \label{fig:eer}
+\end{figure}
+
+\subsection*{H1: as pistas associadas à decisão se deslocam}
+
+Na Figura~\ref{fig:h1}, cada barra mede a associação entre a energia de uma faixa
+de frequência e a decisão do detector (correlação de Spearman, calculada dentro de
+cada classe). O sentido está na direção da barra: para cima quando mais energia
+naquela faixa acompanha um score mais alto de \emph{spoof} (\(\rho>0\)) e para
+baixo quando acompanha um score mais baixo, rumo a \emph{bonafide} (\(\rho<0\)). A
+altura indica a intensidade da associação.
+
+A figura tem dois painéis: o de cima usa a energia \emph{média} de cada faixa
+(\(\mu\)) e o de baixo usa a \emph{variabilidade} dessa energia ao longo do tempo
+(o desvio-padrão \(\sigma\), que é a dispersão).
+
+No painel da média (\(\mu\)), o \emph{zero-shot} mantém barras para cima em quase
+todas as 24 faixas (mais energia associada a \emph{spoof}), com pico nas faixas
+médias (cerca de 2{,}4 a 3{,}9~kHz). No adaptado, o sentido é positivo apenas nas
+faixas mais graves (até cerca de 0{,}5~kHz) e se inverte para negativo ao longo de
+quase todo o resto do espectro (das médias, por volta de 0{,}5 a 3{,}9~kHz, com o
+pico negativo perto de 3~kHz, e seguindo negativo nas agudas). Ou seja, para o
+adaptado mais energia nas faixas médias e agudas acompanha um score rumo a
+\emph{bonafide}.
+
+No painel da variabilidade (\(\sigma\)), o contraste é ainda mais amplo: o
+\emph{zero-shot} tem barras para baixo em quase todas as faixas (energia mais
+oscilante associada a \emph{bonafide}), enquanto o adaptado tem barras para cima em
+quase todas (energia mais oscilante associada a \emph{spoof}). As regiões
+sombreadas marcam as faixas em que os dois detectores têm \emph{sinais opostos}, e
+elas cobrem a maior parte do espectro.
+
+Em conjunto, é a leitura descritiva de H1: parecem mudar a faixa que importa, o
+sentido da associação (para \emph{spoof} ou para \emph{bonafide}) e o tipo de pista
+(nível médio ou variabilidade).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{association_profile_signed_zs_vs_ad}
+  \caption{Associação (Spearman com sinal) por faixa de frequência, em dois painéis:
+  energia média (\(\mu\), acima) e variabilidade ao longo do tempo (\(\sigma\),
+  abaixo). A direção da barra indica o sentido: para cima rumo a \emph{spoof}
+  (\(\rho>0\)) e para baixo rumo a \emph{bonafide} (\(\rho<0\)); a altura, a
+  intensidade. As faixas sombreadas são aquelas em que os dois detectores têm
+  \emph{sinais opostos}, ou seja, onde a associação inverte de sentido entre o
+  \emph{zero-shot} e o adaptado. Registro descritivo (H1).}
+  \label{fig:h1}
+\end{figure}
+
+\subsection*{H2: as faixas que realmente decidem mudam}
+
+Aqui intervimos no áudio: removemos uma faixa de frequência por vez e medimos
+quanto a probabilidade de \emph{spoof} cai (Figura~\ref{fig:h2}). Valores positivos
+indicam faixas que sustentam a decisão de \emph{falso} (removê-las derruba o score
+de \emph{spoof}); valores negativos, faixas que empurram para \emph{real}
+(removê-las aumenta o score de \emph{spoof}). A região sombreada é o intervalo de
+confiança de 95\%. Os dois detectores concentram o efeito nos graves (picos por
+volta de 0{,}2 a 0{,}5~kHz). O adaptado, porém, é mais seletivo e apresenta uma
+faixa média (cerca de 1{,}6~kHz) com efeito \emph{negativo}, ou seja, usa essa faixa
+como indício de áudio real. É a evidência causal de H2.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\textwidth]{occlusion_overlay_zs_vs_ad}
+  \caption{Queda média da probabilidade de \emph{spoof} ao ocluir cada faixa
+  (centro da faixa em Hz), com intervalo de confiança de 95\%. Registro causal
+  (H2).}
+  \label{fig:h2}
+\end{figure}
+
+\subsection*{As duas análises concordam?}
+
+\emph{Seção pendente.} A medida de convergência foi reformulada para um teste
+pareado por clipe, com o efeito causal orientado pelo sentido da associação (assim,
+remover uma pista de \emph{spoof} e remover uma pista de \emph{bonafide} contam
+ambas como efeito positivo quando são coerentes com o H1). A figura e os números
+desta execução estão sendo recalculados com o método novo; entram aqui assim que o
+reprocessamento terminar.
+
+\subsection*{H3: as pistas se ligam aos erros}
+
+Por fim, ligamos as pistas mais relevantes aos erros do detector
+(Figura~\ref{fig:h3}). A figura responde a duas perguntas, uma por painel, sempre
+com uma faixa de frequência por linha. Cada ponto é o \emph{tamanho do efeito}; a
+barrinha horizontal é o intervalo de confiança e a linha tracejada marca o
+``sem diferença''. Ponto cheio significa diferença estatisticamente confiável
+(pós-correção de falsas descobertas); ponto vazio, não.
+
+\emph{Painel da esquerda --- a energia média muda quando um áudio real é rejeitado
+por engano?} Sim, em várias faixas. Nas médias (cerca de 1{,}3 a 3{,}5~kHz) os
+pontos ficam à direita do zero, com efeito moderado (Cohen's $d$ entre cerca de
+0{,}5 e 0{,}7) e significativos: a energia média nessas faixas é maior no áudio real
+aceito do que no rejeitado por engano. Em duas faixas graves (cerca de 0{,}1 a
+0{,}4~kHz) o efeito é moderado e negativo, no sentido oposto. Ou seja, a energia
+média separa razoavelmente o real aceito do real rejeitado.
+
+\emph{Painel da direita --- a variabilidade muda quando um \emph{spoof} passa
+despercebido?} A tendência é positiva (os \emph{spoofs} detectados oscilam um pouco
+mais que os que passam), mas o sinal é fraco: apenas uma faixa (cerca de 2{,}7 a
+3{,}1~kHz) é significativa, e as demais têm intervalo de confiança cruzando o zero.
+
+Leitura de H3: nesta execução, a evidência inferencial mais clara está na diferença
+de \emph{média} em faixas médias (painel esquerdo); a diferença de
+\emph{variabilidade} é apenas sugestiva. Como a amostra por grupo é limitada
+(quadrantes de acerto e erro dentro de 1.320 reais e 1.500 falsos), a leitura se
+apoia no tamanho de efeito, não apenas na significância.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{confirmatory_effects_ad}
+  \caption{Pistas ligadas aos erros (modelo adaptado). Uma faixa de frequência
+  por linha. \emph{Esquerda}: diferença de \emph{média} entre real aceito e real
+  rejeitado por engano (TN vs FP), em Cohen's $d$; a faixa cinza marca ``efeito
+  pequeno''. \emph{Direita}: diferença de \emph{variabilidade} entre \emph{spoof}
+  detectado e \emph{spoof} que passou (TP vs FN), em $\log_2$ da razão de desvios;
+  valores positivos indicam mais variabilidade nos \emph{spoofs} detectados. Ponto
+  cheio: significativo ($q<0{,}05$); vazio: não. Linha tracejada: sem diferença.}
+  \label{fig:h3}
+\end{figure}
+
+\end{document}
