@@ -1,0 +1,321 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parskip}{0.4em}
+
+\title{\textbf{Interpretabilidade de detectores de deepfake de áudio\\
+em português brasileiro: plano de pesquisa e metodologia}}
+\author{Equipe de pesquisa}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Este documento descreve o plano do nosso estudo de interpretabilidade de
+detectores de \emph{deepfake} de áudio aplicados ao português brasileiro. A ideia
+é explicar, de forma simples, o que pretendemos investigar e como pretendemos
+fazer isso, do começo ao fim. Usamos uma convenção de registro para manter a
+linguagem honesta: chamamos de descritivo o que apenas descreve um padrão nos
+dados, de inferencial o que passa por um teste estatístico formal, e de causal
+apenas o que se baseia numa intervenção direta no áudio.
+\end{abstract}
+
+\section{A pergunta}
+
+Detectores de \emph{deepfake} de áudio de ponta costumam ser treinados em inglês.
+A pergunta que orienta este trabalho é dupla e simples: quais pistas acústicas um
+detector usa para decidir se um áudio é real ou falso, e como essas pistas mudam
+quando o modelo passa por uma adaptação leve ao português brasileiro?
+
+Reduzimos isso a duas perguntas-guia:
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}]
+  \item As pistas mudam entre um modelo \emph{zero-shot} e um modelo adaptado?
+  \item Se mudam, o que muda (para onde o foco do modelo se desloca no espectro, e
+        se isso tem relação com os erros que ele comete)?
+\end{enumerate}
+
+Nosso interesse é a interpretabilidade populacional. Não queremos explicar um
+clipe isolado, mas descrever, de forma estatística e verificável, o comportamento
+do detector sobre um conjunto representativo de áudios.
+
+\section{Visão geral do plano}
+
+Vamos trabalhar com dois detectores construídos sobre o mesmo codificador de fala
+congelado, o que isola o efeito da adaptação:
+
+\begin{itemize}
+  \item $D_{\mathrm{zs}}$ (\emph{zero-shot}), com a cabeça de decisão original,
+        sem qualquer ajuste ao português;
+  \item $D_{\mathrm{ad}}$ (adaptado), com uma cabeça leve treinada apenas sobre os
+        \emph{embeddings} em português.
+\end{itemize}
+
+Sobre esse par, aplicaremos duas análises complementares, ambas na mesma partição
+de frequência (8 bandas mel):
+
+\begin{itemize}
+  \item uma análise associativa, que mede quais bandas acompanham o score do
+        detector;
+  \item uma análise causal, que mede quais bandas, ao serem removidas do áudio, de
+        fato alteram o score.
+\end{itemize}
+
+Por fim, mediremos a convergência entre as duas análises e faremos uma etapa
+confirmatória, ligando as pistas mais relevantes à estrutura de erro do detector.
+Todo o processo roda como um pipeline em etapas encadeadas:
+
+\begin{quote}
+\texttt{collect} $\rightarrow$ \texttt{embeddings} $\rightarrow$ \texttt{adapt}
+$\rightarrow$ \texttt{features} $\rightarrow$ \texttt{association} $\rightarrow$
+\texttt{occlusion} $\rightarrow$ \texttt{confirmatory} $\rightarrow$ \texttt{report}.
+\end{quote}
+
+\section{Dados e amostragem}
+
+Usaremos o corpus BRSpeech-DF (\texttt{AKCIT-Deepfake/BRSpeech-DF}), que reúne
+cerca de 459 mil clipes, sendo aproximadamente 77 mil reais (\emph{bonafide}) e
+383 mil falsos (\emph{spoof}). O corpus é grande e bastante desbalanceado (cerca
+de um real para cada cinco falsos).
+
+Como o objetivo é explicabilidade populacional, e não um \emph{ranking} de
+desempenho, montaremos um conjunto de análise equilibrado:
+
+\begin{itemize}
+  \item para treinar a cabeça $D_{\mathrm{ad}}$, um subconjunto balanceado de
+        1.500 clipes por classe;
+  \item para a análise, todo o \emph{bonafide} disponível no teste (1.320 clipes,
+        a classe escassa) somado a 1.500 \emph{spoof}, totalizando 2.820 clipes.
+\end{itemize}
+
+O conjunto de análise nunca é usado no treino da cabeça, evitando vazamento. Esse
+tamanho já oferece poder estatístico para as etapas seguintes, e usar todo o
+\emph{bonafide} escasso mantém os quadrantes de decisão significativos. Escalar
+para o corpus inteiro fica como trabalho futuro.
+
+\section{Os dois detectores}
+
+O codificador é um modelo wav2vec~2.0 / XLS-R congelado (\emph{checkpoint}
+\texttt{nii-yamagishilab/\allowbreak mms-300m-\allowbreak anti-deepfake}), que
+produz \emph{embeddings} de 1024 dimensões por clipe. Sobre ele:
+
+\begin{itemize}
+  \item $D_{\mathrm{zs}}$ usa a cabeça anti-\emph{spoofing} original do
+        \emph{checkpoint};
+  \item $D_{\mathrm{ad}}$ acrescenta uma padronização seguida de uma regressão
+        logística treinada sobre os \emph{embeddings}, devolvendo uma
+        probabilidade de \emph{spoof} calibrada.
+\end{itemize}
+
+Congelar o codificador e treinar apenas a cabeça é uma decisão importante, porque
+isola o efeito da adaptação no uso das representações. Assim, qualquer mudança que
+observarmos refletirá uma re-ponderação de representações que o modelo já possui,
+e não a aprendizagem de \emph{features} novas para o português. Por isso, as
+conclusões valerão para adaptação rasa, sem extrapolação para um \emph{fine-tuning}
+completo.
+
+Antes de qualquer análise de pistas, verificaremos uma pré-condição: a adaptação
+precisa de fato melhorar a detecção. Só compararemos as pistas se o modelo
+adaptado tiver desempenho melhor que o \emph{zero-shot}. Caso contrário, o
+contraste seria reportado como adaptação insuficiente.
+
+\section{Pré-processamento}
+
+Cada clipe será convertido para mono, reamostrado para 16~kHz, recortado em uma
+janela fixa de aproximadamente 4~segundos e normalizado. Um ponto importante do
+plano: as \emph{features} acústicas serão extraídas exatamente do sinal que entra
+no detector, e não do áudio bruto. Dessa forma, a descrição acústica corresponde
+ao que o modelo de fato processa, e a normalização evita atribuir pistas ao nível
+absoluto do sinal.
+
+\section{A descrição acústica: energia log-mel por banda}
+
+Vamos descrever cada áudio pela energia log-mel em 8 bandas de frequência,
+resumindo cada banda pela média e pelo desvio ao longo do tempo, o que dá 16
+valores por clipe. Na prática, calculamos o espectro de potência em janelas
+curtas, somamos a energia dentro de cada banda, aplicamos o logaritmo e tiramos a
+média e o desvio ao longo dos quadros.
+
+A escolha dessa descrição tem um motivo central: ela é localizada em frequência.
+Assim, a análise associativa e a análise causal passam a viver no mesmo eixo de
+frequência e podem ser comparadas banda a banda, algo que descrições cepstrais
+(como MFCC) não permitem de forma direta, por não serem localizadas. As 8 bandas
+(em Hz) que usaremos são:
+
+\begin{center}
+\small
+\begin{tabular}{cccccccc}
+\toprule
+1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 \\
+\midrule
+20--282 & 282--639 & 639--1125 & 1125--1788 & 1788--2693 & 2693--3926 & 3926--5607 & 5607--7900 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Vale a ressalva de que energia de banda não é fonema. Ela indica onde está a
+potência no espectro, não é uma prova fonética.
+
+\section{Como vamos avaliar o desempenho}
+
+A métrica principal de anti-\emph{spoofing} será a EER (\emph{Equal Error Rate}),
+o ponto de operação em que a taxa de rejeitar áudio real se iguala à de deixar
+passar \emph{deepfake}. Ela resume o detector em um único número, independente do
+limiar (quanto menor, melhor), e define o limiar de operação que usaremos no resto
+da análise. Como métricas complementares, acompanharemos o coeficiente de
+Matthews (MCC) e a acurácia.
+
+Fixando o limiar no ponto de EER e cruzando as predições com os rótulos reais,
+formam-se os quatro quadrantes de decisão: \emph{spoof} corretamente detectado,
+\emph{bonafide} corretamente aceito, \emph{bonafide} marcado como \emph{spoof} por
+engano, e \emph{spoof} que passou despercebido. Esses quadrantes serão a base da
+etapa confirmatória.
+
+\section{As hipóteses}
+
+As duas perguntas-guia se desdobram em três hipóteses testáveis, cada uma com um
+registro explícito:
+
+\begin{description}
+  \item[H1, deslocamento associativo (descritivo).] O perfil de associação entre
+        as \emph{features} de banda e o score difere entre os dois detectores.
+        Compararemos os perfis de forma descritiva, sem afirmar significância da
+        diferença.
+  \item[H2, deslocamento causal (causal, com incerteza).] As bandas cuja oclusão
+        reduz a probabilidade de \emph{spoof} diferem entre os detectores. Como é
+        uma intervenção, reportaremos os perfis com incerteza quantificada
+        (intervalos de confiança por \emph{bootstrap}).
+  \item[H3, diferenças ligadas ao erro (inferencial).] Para as \emph{features}
+        mais relevantes, as distribuições diferem entre os quadrantes de decisão.
+        Esta é a única hipótese testada de forma inferencial, com controle de
+        falsas descobertas.
+\end{description}
+
+\section{Análise associativa (H1)}
+
+Para cada detector, calcularemos a correlação de Spearman (de posto, monotônica)
+entre cada \emph{feature} de banda e o score, dentro de cada classe
+(\emph{bonafide} e \emph{spoof} separados), com correção de FDR por detector.
+
+Fazer isso dentro de cada classe é essencial. Como o score já separa as classes,
+juntar tudo criaria correlação espúria para quase qualquer \emph{feature} que
+apenas diferisse entre classes. Dentro da classe, a correlação reflete covariação
+genuína. Escolhemos a correlação de Spearman por ser transparente e independente
+de modelo, sem a necessidade de um modelo substituto. O custo é que a medida é
+univariada, ou seja, não modela interações entre bandas.
+
+\section{Análise causal (H2)}
+
+Aqui vamos intervir no áudio. Removeremos uma banda de frequência por vez, com um
+filtro \emph{band-stop} de fase zero, e mediremos a queda na probabilidade de
+\emph{spoof}. A leitura é direta: se ocluir a banda derruba o score, aquela banda
+contribuía para a decisão de \emph{spoof}; se ocluir a banda aumenta o score, ela
+contribuía para a decisão de \emph{bonafide}.
+
+Faremos isso sobre um subconjunto estratificado por quadrante e quantificaremos a
+incerteza com intervalos de confiança de 95\% por \emph{bootstrap}. Uma banda cujo
+intervalo não inclui o zero indica efeito causal confiável.
+
+Já registramos uma ressalva importante deste método, a ser tratada numa fase
+posterior: o filtro remove o conteúdo da banda, mas também introduz uma pequena
+distorção. Assim, uma queda pode vir da ausência da banda ou do artefato de
+filtragem. Para isolar o efeito do conteúdo, uma etapa futura substituirá a banda
+por ruído com energia equivalente.
+
+\section{Convergência das duas análises}
+
+Como as duas análises vivem na mesma grade de bandas, poderemos medir, para cada
+detector, o quanto elas concordam: a correlação, banda a banda, entre o perfil
+causal (queda de oclusão) e o perfil associativo. Um valor alto indicaria que as
+bandas que o detector usa de fato (causal) são também as mais associadas ao score.
+
+Aqui cabe uma ressalva de honestidade: como há apenas 8 bandas, esse número será
+um resumo descritivo, e não um teste com poder estatístico. Vamos tratá-lo como
+uma indicação, não como prova.
+
+\section{Testes confirmatórios (H3)}
+
+Por fim, aplicaremos testes estatísticos clássicos apenas nas \emph{features} mais
+relevantes (para evitar testar as 16 sem critério), ligados diretamente à
+estrutura de erro:
+
+\begin{itemize}
+  \item um teste de diferença de média (Welch) entre os \emph{bonafide} aceitos e
+        os \emph{bonafide} rejeitados por engano, para entender por que o detector
+        confunde real com falso;
+  \item um teste de diferença de variância (Levene) entre os \emph{spoof} pegos e
+        os \emph{spoof} que passaram, para entender por que ele perde \emph{spoofs}.
+\end{itemize}
+
+Aplicaremos correção de FDR sobre o conjunto de testes de cada detector. Esta é a
+única parte inferencial do estudo, em que caberá a palavra significativo.
+
+\section{O que o estudo vai produzir}
+
+Ao final, esperamos entregar:
+
+\begin{itemize}
+  \item uma comparação de desempenho entre os dois detectores (EER, MCC e
+        acurácia), que também serve de pré-condição para a análise de pistas;
+  \item um perfil associativo por banda para cada detector;
+  \item um perfil causal por banda, com intervalos de confiança;
+  \item uma medida de convergência entre as duas análises;
+  \item um conjunto de testes confirmatórios ligados aos erros do detector.
+\end{itemize}
+
+Juntas, essas saídas devem responder às duas perguntas-guia de forma verificável,
+com a evidência causal (a oclusão) como parte mais forte, por ser a única baseada
+em intervenção.
+
+\section{Ressalvas previstas e trabalho futuro}
+
+\begin{itemize}
+  \item Tratar a distorção do filtro de oclusão, substituindo a banda por ruído
+        com energia equivalente.
+  \item Escalar do subconjunto para o corpus completo e estratificar por gerador
+        de \emph{spoof}.
+  \item Lembrar que os achados valerão para adaptação rasa, sem extrapolar para um
+        \emph{fine-tuning} completo do codificador.
+  \item Lembrar que energia de banda indica onde está a potência, não é prova
+        fonética.
+\end{itemize}
+
+\section{Reprodutibilidade e engenharia}
+
+O estudo roda como um pipeline em etapas resumível. Cada etapa grava seus
+artefatos e um marcador de conclusão com o \emph{hash} da configuração, de modo
+que reexecutar pula o que já está feito. As sementes aleatórias são fixas e o
+ambiente é encapsulado em Docker, com execução automática em GPU. Os parâmetros
+planejados para a rodada estão na Tabela~\ref{tab:config}.
+
+\begin{table}[t]
+  \centering
+  \caption{Parâmetros planejados da rodada.}
+  \label{tab:config}
+  \begin{tabular}{ll}
+    \toprule
+    Parâmetro & Valor \\
+    \midrule
+    Clipes de treino por classe & 1.500 \\
+    Clipes de teste por classe & 1.500 (\emph{bonafide} limitado a 1.320) \\
+    Bandas de frequência & 8 (de 20~Hz a 7900~Hz) \\
+    Clipes por quadrante na oclusão & 150 (cerca de 600 por detector) \\
+    Reamostras do \emph{bootstrap} & 1000 \\
+    \emph{Features} destacadas para H3 & 10 \\
+    Semente aleatória & 42 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\end{document}

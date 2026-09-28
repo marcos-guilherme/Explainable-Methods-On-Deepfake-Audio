@@ -1,0 +1,99 @@
+import numpy as np
+import pandas as pd
+
+from brspeech_xai.bands import BAND_EDGES, N_BANDS
+from brspeech_xai.stats import (band_assoc_signed, band_assoc_strength,
+                                 confirmatory_tests, convergence_bands,
+                                 cross_spine_agreement, paired_intervention_test,
+                                 spearman_intraclass, top_features_by_rho)
+
+
+def test_confirmatory_runs_on_top_features():
+    rng = np.random.default_rng(0)
+    n = 200
+    df = pd.DataFrame({
+        "mfcc2_mean": rng.normal(size=n),
+        "p_spoof_zs": rng.uniform(size=n),
+        "quadrant_zs": rng.choice(["TP", "TN", "FP", "FN"], size=n),
+    })
+    out = confirmatory_tests(df, "zs", "quadrant_zs", ["mfcc2_mean"])
+    assert {"detector", "feature", "test", "statistic", "p_value", "q_value_fdr"}.issubset(out.columns)
+
+
+def test_spearman_intraclass_columns_and_sign():
+    rng = np.random.default_rng(1)
+    n = 300
+    x = rng.normal(size=n)
+    gt = rng.integers(0, 2, size=n)
+    # score monotonicamente crescente com x dentro de cada classe -> rho positivo
+    score = np.clip(0.5 + 0.1 * x + 0.01 * rng.normal(size=n), 0, 1)
+    df = pd.DataFrame({"mfcc2_mean": x, "ground_truth": gt, "p_spoof_zs": score})
+    out = spearman_intraclass(df, "zs", ["mfcc2_mean"])
+    assert {"detector", "feature", "class", "rho", "p_value", "n", "q_value_fdr"}.issubset(out.columns)
+    assert set(out["class"]) == {"bonafide", "spoof"}
+    assert (out["rho"] > 0).all()
+
+
+def test_top_features_by_rho_ranks_by_abs_max():
+    df = pd.DataFrame([
+        {"detector": "zs", "feature": "mfcc1_mean", "class": "spoof", "rho": 0.10},
+        {"detector": "zs", "feature": "mfcc2_mean", "class": "spoof", "rho": -0.80},
+        {"detector": "ad", "feature": "mfcc3_mean", "class": "bonafide", "rho": 0.50},
+    ])
+    assert top_features_by_rho(df, top_n=2) == ["mfcc2_mean", "mfcc3_mean"]
+
+
+def test_convergence_bands_picks_top_and_bottom():
+    # |ρ| cresce com o índice da banda; top deve pegar as maiores, bottom as menores.
+    rows = [{"detector": "zs", "feature": f"band{b + 1}_mean", "class": "spoof",
+             "rho": (b + 1) * 0.1} for b in range(6)]
+    sp = pd.DataFrame(rows)
+    strength = band_assoc_strength(sp, "zs", 6)
+    assert np.argmax(strength) == 5 and np.argmin(strength) == 0
+    top, bottom = convergence_bands(sp, "zs", n_bands=6, k=2)
+    assert top == [5, 4] and bottom == [0, 1]
+
+
+def test_band_assoc_signed_keeps_sign_of_max_abs():
+    # Por banda escolhe o ρ de maior |ρ| e PRESERVA o sinal (mesmo sendo negativo).
+    rows = [
+        {"detector": "ad", "feature": "band1_mean", "class": "spoof", "rho": 0.20},
+        {"detector": "ad", "feature": "band1_std", "class": "spoof", "rho": -0.55},  # maior |ρ|
+        {"detector": "ad", "feature": "band2_mean", "class": "spoof", "rho": 0.30},
+    ]
+    sp = pd.DataFrame(rows)
+    signed = band_assoc_signed(sp, "ad", n_bands=3)
+    assert signed[0] == -0.55            # banda 1: mantém o sinal negativo do maior |ρ|
+    assert signed[1] == 0.30             # banda 2: positivo
+    assert np.isnan(signed[2])           # banda 3: ausente -> NaN
+
+
+def test_paired_intervention_test_detects_positive_gap():
+    rng = np.random.default_rng(0)
+    # top-assoc derruba mais o score que bottom-assoc, pareado por clipe.
+    d_top = rng.normal(0.05, 0.01, size=300)
+    d_bottom = rng.normal(0.01, 0.01, size=300)
+    out = paired_intervention_test(d_top, d_bottom, seed=0, n_boot=300)
+    assert out["n_pairs"] == 300
+    assert out["median_diff"] > 0 and out["ci_low"] > 0   # gap positivo, IC longe de zero
+    assert out["cohen_dz"] > 0 and out["wilcoxon_p"] < 0.05
+
+
+def test_paired_intervention_test_empty_is_nan():
+    out = paired_intervention_test(np.array([]), np.array([]), seed=0, n_boot=10)
+    assert out["n_pairs"] == 0 and np.isnan(out["median_diff"])
+
+
+def test_cross_spine_agreement_aligned():
+    lows, highs = BAND_EDGES[:-1], BAND_EDGES[1:]
+    occ_rows, sp_rows = [], []
+    for det in ("zs", "ad"):
+        for b in range(N_BANDS):
+            occ_rows.append({"detector": det, "band_hz_low": lows[b],
+                             "band_hz_high": highs[b], "mean_p_spoof_drop": (b + 1) * 0.01})
+            sp_rows.append({"detector": det, "feature": f"band{b + 1}_mean",
+                            "class": "spoof", "rho": (b + 1) * 0.05})
+    out = cross_spine_agreement(pd.DataFrame(occ_rows), pd.DataFrame(sp_rows))
+    assert set(out["detector"]) == {"zs", "ad"}
+    assert (out["rho_causal_vs_assoc"] > 0.9).all()   # perfis monotonicamente alinhados
+    assert (out["n_bands"] == N_BANDS).all()

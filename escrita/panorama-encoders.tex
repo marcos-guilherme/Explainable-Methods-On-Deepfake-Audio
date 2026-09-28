@@ -1,0 +1,502 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figures-panorama/}}
+\setlength{\parskip}{0.4em}
+
+\begin{document}
+
+\begin{center}
+  {\large\textbf{Panorama: comparando codificadores de fala}}\\[0.2em]
+  {\small Explicabilidade acústica de detectores de \emph{deepfake} adaptados ao
+  português brasileiro}
+\end{center}
+
+\section{O que foi feito nesta rodada}
+
+\begin{itemize}[nosep]
+  \item \textbf{Feito.} Rodamos o pipeline completo (desempenho, análise
+        associativa, causal e confirmatória) de ponta a ponta.
+  \item \textbf{Melhoramos.} Passamos de um único codificador para quatro,
+        comparados sob a mesma receita; e produzimos figuras que os colocam lado a
+        lado.
+  \item \textbf{Adicionamos.} Uma lente nova de \emph{atenção temporal} (onde, no
+        tempo, cada modelo olha), complementar às análises de frequência.
+  \item \textbf{Aprofundamos.} Uma terceira lente de \emph{relevância} no espectro
+        (DFT-LRP), que olha por dentro do modelo, agora conservativa nos três
+        codificadores hf\_ssl (wav2vec2-base, hubert-base e wavlm-base).
+  \item \textbf{Comparamos por dentro.} Colocamos a saliência dos três modelos no
+        mesmo eixo, resumimos as faixas mais importantes de cada um numa tabela e
+        medimos o quanto eles concordam sobre quais faixas importam.
+  \item \textbf{Validamos.} Testamos a \emph{fidelidade} das faixas apontadas pelo
+        DFT-LRP: removê-las e passar de novo pelo detector, comparando com um sorteio
+        aleatório de faixas.
+\end{itemize}
+
+\section{A ideia, em poucas linhas}
+
+Detectores de \emph{deepfake} de áudio de ponta costumam ser treinados em inglês.
+Queremos entender quais pistas acústicas o detector usa para decidir se um áudio é
+real (\emph{bonafide}) ou falso (\emph{spoof}), e como essas pistas mudam quando o
+modelo é levemente adaptado ao português brasileiro.
+
+Neste panorama damos um passo a mais: repetimos a mesma receita sobre quatro
+codificadores de fala diferentes. Assim conseguimos ver se as respostas dependem
+do codificador escolhido ou se há um padrão comum. A leitura é observacional, o
+objetivo é descrever o comportamento sobre um conjunto representativo de áudios, de
+forma verificável.
+
+\section{O que comparamos}
+
+Cada codificador entra congelado (sem treino no português). Sobre os
+\emph{embeddings} que ele produz, treinamos um \emph{head} leve (regressão
+logística) para o português; esse head é a ``adaptação''. Os quatro codificadores
+comparados:
+
+\begin{itemize}[nosep]
+  \item \textbf{XLS-R} (multilíngue, cerca de 300 milhões de parâmetros, com
+        \emph{fine-tuning} anti-\emph{deepfake});
+  \item \textbf{wav2vec2-base} (cerca de 95 milhões);
+  \item \textbf{hubert-base-ls960};
+  \item \textbf{wavlm-base}.
+\end{itemize}
+
+Todos são avaliados no mesmo conjunto de análise, na mesma grade de 24 faixas de
+frequência (escala mel) e com as mesmas análises: desempenho, uma análise
+\emph{associativa} (quais faixas acompanham a decisão), uma análise \emph{causal}
+(quais faixas, ao serem removidas, de fato mudam a decisão) e uma etapa
+confirmatória ligada aos erros.
+
+\section{As perguntas e as hipóteses}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}]
+  \item Em quais faixas de frequência cada detector adaptado se apoia, e há um padrão
+        em comum entre os codificadores?
+  \item Essas faixas de fato sustentam a decisão (efeito causal e fidelidade) e se
+        relacionam com os erros?
+\end{enumerate}
+
+\begin{itemize}[nosep]
+  \item \textbf{H1 (descritiva).} Cada codificador se apoia num conjunto próprio de
+        faixas de frequência, e num sentido próprio (rumo a \emph{spoof} ou a
+        \emph{bonafide}); observamos se há alguma estrutura em comum.
+  \item \textbf{H2 (causal).} Algumas faixas, ao serem removidas do áudio, de fato
+        mudam a decisão; essas faixas devem sustentar a decisão de forma verificável
+        (fidelidade), não apenas acompanhá-la.
+  \item \textbf{H3 (inferencial).} As pistas mais importantes se comportam de forma
+        diferente quando o detector acerta e quando erra.
+\end{itemize}
+
+\section{Panorama dos achados}
+
+\subsection*{Desempenho: todos adaptam, o XLS-R lidera}
+
+A métrica principal é a EER (\emph{equal error rate}): o ponto em que a taxa de
+deixar passar um \emph{deepfake} se iguala à de rejeitar um áudio real. É um resumo
+do detector em um número só, e \emph{quanto menor, melhor}. A
+Figura~\ref{fig:eer} e a Tabela~\ref{tab:perf} mostram os quatro adaptados.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{lccc}
+    \toprule
+    Codificador & EER adaptado (\%) & MCC & Acurácia \\
+    \midrule
+    XLS-R              & 20{,}9 & 0{,}58 & 0{,}79 \\
+    wav2vec2-base      & 22{,}1 & 0{,}56 & 0{,}78 \\
+    hubert-base-ls960  & 26{,}2 & 0{,}47 & 0{,}74 \\
+    wavlm-base         & 29{,}0 & 0{,}42 & 0{,}71 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Desempenho do detector adaptado por codificador. Só o XLS-R traz também
+  um head original (\emph{zero-shot}), com EER de 25{,}8\%, que a adaptação reduz
+  para 20{,}9\%.}
+  \label{tab:perf}
+\end{table}
+
+Todos os codificadores atingem uma EER entre cerca de 21\% e 29\%. O XLS-R, maior,
+multilíngue e já ajustado para a tarefa, tem a melhor detecção; os três modelos
+\emph{base}, menores, ficam atrás, com o wavlm por último. É um resultado esperado:
+mais capacidade, pré-treino multilíngue e adaptação de fábrica ajudam. Esse
+desempenho é o ponto de partida do estudo, pois só faz sentido investigar as pistas de
+detectores que de fato detectam.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.72\textwidth]{encoder_comparison_eer}
+  \caption{EER do detector adaptado por codificador (quanto menor, melhor).}
+  \label{fig:eer}
+\end{figure}
+
+\subsection*{H1: a ``impressão digital'' associativa muda muito entre codificadores}
+
+Na Figura~\ref{fig:assoc}, cada célula mede a associação entre a energia de uma
+faixa de frequência e a decisão do detector (correlação de Spearman, calculada
+dentro de cada classe para evitar correlação espúria). A cor indica o sentido:
+vermelho quando mais energia naquela faixa acompanha um score mais alto de
+\emph{spoof} (\(\rho>0\)); azul quando mais energia acompanha um score mais baixo,
+na direção de \emph{bonafide} (\(\rho<0\)). O tom indica a intensidade.
+
+A leitura é que a ``impressão digital'' associativa depende bastante do
+codificador. O XLS-R e o wav2vec2-base mostram um padrão estruturado, com inversão
+de sentido ao longo do espectro (graves em vermelho, ou seja associados a
+\emph{spoof}, e faixas médias em azul, associadas a \emph{bonafide}). Já o hubert e o
+wavlm ficam espalhados, com associações fracas e quase todas no mesmo sentido (vermelho
+suave). É o registro descritivo de H1: as faixas que acompanham a decisão, e o
+sentido dessa associação, não são os mesmos entre os modelos.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{encoder_assoc_heatmap}
+  \caption{Perfil associativo (Spearman com sinal) por faixa, um codificador por
+  linha. Vermelho: mais energia acompanha \emph{spoof} (\(\rho>0\)); azul: mais
+  energia acompanha \emph{bonafide} (\(\rho<0\)). Registro descritivo (H1).}
+  \label{fig:assoc}
+\end{figure}
+
+\subsection*{H2: os graves concentram o efeito causal}
+
+Aqui intervimos no áudio: removemos uma faixa de frequência por vez (filtro de fase
+zero) e medimos quanto a probabilidade de \emph{spoof} muda
+(Figura~\ref{fig:occ}). Valores positivos indicam faixas que \emph{sustentam} a
+decisão de falso (removê-las derruba o score de \emph{spoof}); valores negativos
+indicam faixas que funcionavam como indício de \emph{real} (removê-las aumenta o
+score de \emph{spoof}). A região sombreada é o intervalo de confiança de 95\%.
+
+O padrão comum é que as \emph{frequências graves} (abaixo de cerca de 300~Hz)
+concentram o maior efeito, enquanto acima de 1~kHz os efeitos são pequenos e
+parecidos entre os modelos. O sentido nos graves, porém, varia: para o wavlm e o
+hubert as faixas mais graves funcionam como indício de \emph{real} (removê-las
+aumenta o score de \emph{spoof}), e o wav2vec2 tem um mergulho marcante perto de
+200--300~Hz. É a evidência causal de H2, a parte mais forte do estudo, por ser a
+única baseada em intervenção direta.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.72\textwidth]{encoder_occlusion_overlay}
+  \caption{Perfil causal por faixa (uma linha por codificador). Positivo: a faixa
+  sustenta a decisão de \emph{spoof}; negativo: a faixa era indício de
+  \emph{bonafide}. Sombra: intervalo de confiança de 95\%. Registro causal (H2).}
+  \label{fig:occ}
+\end{figure}
+
+\subsection*{As duas lentes apontam para as mesmas faixas?}
+
+Vale checar se a faixa mais \emph{associada} à decisão (H1) é também a que mais a
+\emph{muda} quando removida (H2). A Figura~\ref{fig:conv} resume isso por um único
+número por codificador, com sinal: positivo quando associação e efeito causal
+apontam juntos, próximo de zero ou negativo quando não.
+
+Com cautela: os valores ficam próximos de zero ou negativos nos quatro modelos
+(por exemplo, \(-0{,}20\) no XLS-R e \(-0{,}39\) no wavlm). Ou seja, as duas lentes
+ainda \emph{não} apontam de forma limpa para as mesmas faixas. Uma causa provável é
+um efeito colateral da própria oclusão: ao remover uma faixa, mexemos também na
+energia total do clipe, o que pode confundir o efeito daquela faixa específica.
+Por isso tratamos a análise causal como a evidência mais forte e a associativa como
+descritiva, e deixamos o controle desse efeito colateral como próximo passo.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.72\textwidth]{encoder_convergence_forest}
+  \caption{Convergência entre a análise associativa (H1) e a causal (H2), um ponto
+  por codificador com intervalo de confiança. Positivo indicaria que as faixas mais
+  associadas são também as mais causais; os valores observados ficam perto de zero
+  ou negativos.}
+  \label{fig:conv}
+\end{figure}
+
+\subsection*{Uma lente extra: onde, no tempo, cada modelo olha}
+
+Além do espectro, olhamos o eixo do \emph{tempo}. A Figura~\ref{fig:roll} usa o
+\emph{attention roll-out}, que consolida a atenção interna do codificador ao longo
+das camadas e mostra quais instantes do áudio ele mais atende. Usamos os mesmos
+quatro clipes nos três codificadores (um por coluna), para uma comparação justa.
+
+A leitura é qualitativa. Nos três modelos a atenção acompanha os trechos com voz e
+cai nos silêncios, o que é um bom sinal de sanidade. A grade também deixa ver onde
+os modelos \emph{discordam}: na terceira linha, um áudio real aceito pelo wavlm e
+pelo hubert é marcado como falso pelo wav2vec2 (o P(\emph{spoof}) de cada célula é a
+decisão daquele modelo).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{attention_rollout_compare}
+  \caption{Atenção temporal (\emph{roll-out}) dos codificadores nos mesmos clipes.
+  Linhas: clipes (quadrantes de acerto/erro do detector de referência). Colunas:
+  codificadores atendendo ao \emph{mesmo} áudio. \textbf{Ressalva:} é a atenção
+  temporal do codificador congelado, não a decisão do \emph{head} logístico e não é
+  específica de frequência. Vista complementar e ilustrativa.}
+  \label{fig:roll}
+\end{figure}
+
+\section{Uma lente por dentro do modelo (DFT-LRP)}
+
+As duas lentes anteriores olham o áudio de fora (correlação em H1, remoção de
+faixas em H2). Aqui abrimos o modelo. Usamos a \emph{relevância} (LRP, sigla de
+\emph{Layer-wise Relevance Propagation}): partindo da decisão, distribuímos a
+contribuição de volta por cada camada até a forma de onda, e uma ponte matemática
+(DFT-LRP) leva essa contribuição do tempo para a frequência. A relevância é a
+parcela do \emph{logit} de \emph{spoof} (a nota bruta antes de virar probabilidade)
+que cada frequência carrega, positiva quando empurra para \emph{spoof} e negativa
+quando empurra para \emph{bonafide}.
+
+Esta lente depende das regras internas de atenção do codificador. Nós as
+implementamos de forma \emph{conservativa} (a soma pelas frequências recupera a
+decisão, checado por um teste numérico) para os três codificadores hf\_ssl:
+wav2vec2-base e hubert-base, que compartilham a atenção padrão, e o
+wavlm-base, que usa um tipo de atenção diferente e por isso recebeu uma regra
+dedicada. Todos passam no teste (resíduo da ordem de \(10^{-4}\) ou menor). Uma
+ressalva vale para o wavlm: nele os pesos internos carregam uma parcela muito grande
+da nota, então a relevância atribuída à forma de onda fica com valores inflados. Por
+isso, comparamos os perfis pela forma e pelo sentido, não pelo valor absoluto.
+
+A Figura~\ref{fig:lrp-overlay} sobrepõe o perfil de relevância por faixa dos três
+codificadores hf\_ssl. O XLS-R original usa outra biblioteca (fairseq) e fica fora
+desta lente. A leitura é cautelosa: os intervalos de confiança são
+largos e, pela ressalva acima, a magnitude do wavlm não é diretamente comparável às
+demais. Ainda assim, o padrão ecoa a análise causal (H2): a relevância se concentra
+abaixo de cerca de 1~kHz e fica próxima de zero nos agudos. O wavlm mostra um pico
+positivo forte (rumo a \emph{spoof}) nos graves, perto de 130--500~Hz; o hubert tem
+um pico positivo mais modesto perto de 130--150~Hz; o wav2vec2 tem uma queda (rumo a
+\emph{bonafide}) perto de 1{,}3--1{,}5~kHz. É um indício
+adicional, por dentro do modelo, de que a ação está nos graves e médios-graves.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{encoder_lrp_overlay}
+  \caption{Relevância por faixa (DFT-LRP) do detector adaptado, uma linha por
+  codificador. Positivo: a faixa empurra a decisão para \emph{spoof}; negativo: para
+  \emph{bonafide}. Os três usam o método conservativo (linha cheia). No wavlm, ler
+  pela forma e pelo sentido, não pela magnitude (os vieses internos carregam grande
+  parte do \emph{logit}). Sombra: intervalo de confiança de 95\%.}
+  \label{fig:lrp-overlay}
+\end{figure}
+
+Descendo ao nível de clipe, a Figura~\ref{fig:lrp-sal} mostra \emph{onde}, no
+espectro, o wav2vec2-base mais se apoia. É a relevância em módulo (sem distinguir o
+sentido), somada e normalizada por clipe, então lê-se como a fração da atenção que
+cai em cada frequência (em \%). O
+foco se concentra em torno de 1{,}4~kHz (cerca de 13\% da atenção), com um segundo
+pico nos graves perto de 150~Hz (região da frequência fundamental da voz). Como é
+magnitude, parte desse pico pode vir do ganho da própria primeira etapa do modelo (o
+\emph{front-end} convolucional) nessa banda, então lemos como concentração de atenção,
+não como prova de causa.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.72\textwidth]{dft_lrp_salience}
+  \caption{Saliência em frequência (DFT-LRP) do detector adaptado sobre o
+  wav2vec2-base. Altura: fração da relevância em módulo em cada frequência (\% por
+  bin), média entre clipes; sombra: intervalo de confiança de 95\%.
+  Sem distinguir o sentido, indica onde o modelo olha, não para qual lado. O foco se
+  concentra em torno de 1{,}4~kHz.}
+  \label{fig:lrp-sal}
+\end{figure}
+
+\subsection{Onde cada modelo olha, lado a lado}
+
+A Figura~\ref{fig:sal-overlay} coloca essa mesma saliência dos três codificadores no
+mesmo eixo. Fica claro que o foco em frequência não é o mesmo entre eles. O
+wav2vec2-base tem um pico marcante e isolado perto de 1{,}4~kHz; o hubert-base e o
+wavlm-base concentram a atenção nos graves (pico perto de 220--250~Hz) e caem de
+forma suave depois disso. É a mesma leitura da lente causal e das médias populacionais
+em frequência: cada modelo se apoia numa sub-região diferente do espectro, com os
+graves em comum para hubert e wavlm.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{encoder_lrp_salience_overlay}
+  \caption{Saliência em frequência (DFT-LRP) sobreposta, uma linha por codificador.
+  Altura: fração da relevância em módulo por frequência (\% por bin), média entre
+  clipes. Sem distinguir o sentido: indica onde cada modelo se apoia, não para qual lado.
+  Rótulo: frequência de pico por codificador.}
+  \label{fig:sal-overlay}
+\end{figure}
+
+A Tabela (Figura~\ref{fig:top-bands}) resume o mesmo de forma direta: as cinco faixas
+mais importantes de cada modelo, ordenadas pela relevância em módulo. A faixa
+\emph{Top~1} confirma o contraste: 1{,}43~kHz no wav2vec2, contra 59~Hz no hubert e
+142~Hz no wavlm. Nenhuma faixa é \emph{Top~1} em mais de um modelo.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{encoder_lrp_top_bands}
+  \caption{Faixas mais importantes por codificador (DFT-LRP), ordenadas pela
+  relevância em módulo. A linha \emph{Top~1} está destacada. Leitura descritiva: cada
+  modelo prioriza faixas diferentes.}
+  \label{fig:top-bands}
+\end{figure}
+
+A mesma relevância pode ser vista no plano tempo-frequência de clipes isolados
+(STDFT-LRP). A Figura~\ref{fig:stdft} traz um exemplo predito \emph{spoof} e um
+predito \emph{bonafide}. O mapa central colore cada instante e frequência pela
+relevância (vermelho para \emph{spoof}, azul para \emph{bonafide}); o painel à
+esquerda soma no tempo (relevância por frequência) e o de baixo mostra a forma de
+onda. A relevância acompanha os trechos com voz e a estrutura das harmônicas; no
+exemplo \emph{spoof} há um risco vertical marcante (um som breve e abrupto) puxando
+para \emph{spoof}.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.49\textwidth]{stdft_spoof}
+  \includegraphics[width=0.49\textwidth]{stdft_bonafide}
+  \caption{STDFT-LRP em dois clipes (wav2vec2-base). Esquerda: predito \emph{spoof};
+  direita: predito \emph{bonafide}. Mapa central: relevância por tempo e frequência
+  (vermelho empurra para \emph{spoof}, azul para \emph{bonafide}). Painel lateral:
+  relevância somada no tempo, por frequência. Painel inferior: forma de onda.
+  Ilustrativo, um clipe por lado.}
+  \label{fig:stdft}
+\end{figure}
+
+\subsection{Visão populacional (média sobre muitos clipes)}
+
+Os mapas acima são de clipes isolados. Para uma visão de conjunto, calculamos a
+relevância STDFT-LRP de cada áudio do conjunto de teste (2820 clipes: 1320
+\emph{bonafide} e 1500 \emph{spoof}) e tiramos a média. Isso é possível porque todos
+os clipes têm o mesmo comprimento fixo, então a grade do STFT é idêntica entre eles.
+
+Aqui há um cuidado importante. O eixo do tempo não está alinhado entre enunciados
+(cada áudio fala em instantes diferentes, com silêncios e durações distintos), então
+uma média instante a instante dependeria de como os clipes se arranjam no conjunto, e
+não de uma propriedade do modelo. Por isso \emph{eliminamos o tempo}: para cada
+frequência, tiramos a média da relevância ao longo de todo o clipe. O que resta é
+comparável entre modelos e não depende do arranjo temporal do dataset.
+
+A Figura~\ref{fig:pop-mag} mostra essa magnitude da relevância (sem distinguir o
+sentido) já colapsada no tempo, num recorte de 0 a 1~kHz, faixa onde a atenção se
+concentra. Cada coluna é um codificador, normalizada pelo seu próprio máximo. Os três
+se apoiam nas frequências graves, cada um numa sub-faixa um pouco diferente: o
+wav2vec2 perto de 150~Hz e o hubert e o wavlm um pouco acima (perto de 220--270~Hz).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{stdft_lrp_population_strip_magnitude_1khz}
+  \caption{Importância em frequência populacional (STDFT-LRP), com o tempo eliminado
+  por média, recorte de 0 a 1~kHz. Cada coluna é um codificador; a cor é a magnitude
+  média da relevância por frequência, normalizada pelo máximo de cada modelo. Mais
+  claro: frequência em que o modelo mais se apoia. Sem eixo de tempo, então a leitura
+  não depende do arranjo dos clipes no dataset.}
+  \label{fig:pop-mag}
+\end{figure}
+
+A Figura~\ref{fig:pop-freq} resume a mesma informação em uma dimensão: a média no
+tempo, por frequência, normalizada para somar 100\% no espectro (uma fração de
+atenção, como o mapa de saliência). Os picos são coerentes com a leitura anterior:
+graves para os três e um segundo
+pico perto de 1{,}4~kHz apenas no wav2vec2. Essa
+curva usa um caminho de cálculo diferente da Figura~\ref{fig:lrp-sal} (STFT curto,
+não a transformada do clipe inteiro) e chega ao mesmo padrão, o que serve de
+verificação cruzada.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{stdft_lrp_population_freq_magnitude}
+  \caption{Curva em frequência da atenção populacional (STDFT-LRP): média no tempo
+  da magnitude da relevância, por frequência, uma linha por codificador. Normalizada
+  para somar 100\% no espectro (fração de atenção por bin). Sem distinguir o sentido: indica
+  onde cada modelo se apoia, não para qual lado. Rótulos: frequência de pico por
+  codificador.}
+  \label{fig:pop-freq}
+\end{figure}
+
+\subsection{Quanto os modelos concordam sobre quais faixas importam?}
+
+As figuras acima sugerem que os modelos priorizam faixas diferentes. Para colocar um
+número nisso, a Figura~\ref{fig:lrp-corr} compara os perfis de relevância por faixa
+dois a dois com a correlação de Spearman (correlação entre as ordens das 24 faixas).
+O sentido da leitura: \(\rho\) próximo de \(+1\) indica que os dois modelos ordenam
+as faixas de forma parecida (concordam sobre quais importam mais); próximo de zero
+indica pouca relação; negativo indicaria ordens invertidas.
+
+A concordância observada é, no máximo, fraca a moderada e positiva: hubert e wavlm
+são os mais parecidos (\(\rho = 0{,}35\)), wav2vec2 e hubert vêm depois
+(\(\rho = 0{,}24\)), e wav2vec2 e wavlm são praticamente independentes
+(\(\rho = -0{,}03\)). Ou seja, não há uma faixa universal que todos usem da mesma
+forma. Uma ressalva importante: cada \(\rho\) é calculado sobre apenas 24 faixas, o
+que o torna sugestivo, não conclusivo. A unidade natural de incerteza é o número de
+clipes, então uma versão futura com intervalo de confiança por reamostragem dos
+clipes deixaria essa leitura mais firme.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{encoder_lrp_correlation}
+  \caption{Concordância entre codificadores: correlação de Spearman entre os perfis
+  de relevância por faixa (DFT-LRP), dois a dois. Vermelho forte: ordenam as faixas de
+  forma parecida (\(\rho>0\)); tons claros: pouca relação. Registro descritivo sobre
+  as 24 faixas (sugestivo, ainda sem intervalo de confiança).}
+  \label{fig:lrp-corr}
+\end{figure}
+
+\subsection{As faixas apontadas de fato sustentam a decisão? (fidelidade)}
+
+As lentes anteriores dizem \emph{onde} o modelo se apoia. Falta uma pergunta: essas
+faixas são mesmo as que decidem, ou só acompanham a decisão por acaso? Para checar,
+usamos o teste de \textbf{necessidade} (comprehensiveness): removemos do áudio as faixas
+apontadas pelo DFT-LRP e passamos de novo pelo detector. Se a decisão cai, essas faixas
+são \emph{necessárias}.
+
+Comparamos com um \emph{sorteio aleatório}: remover o mesmo número de faixas escolhidas
+ao acaso. A ideia é direta: se as faixas do DFT-LRP importam mais que faixas quaisquer,
+removê-las deve derrubar a decisão mais do que o sorteio. Repetimos isso para vários
+números de faixas e resumimos num valor médio (chamado AOPC, a área sob essa curva); a
+barra de erro é a incerteza (intervalo de confiança de 95\%, obtido reamostrando os
+clipes).
+
+Como ler a Figura~\ref{fig:faith}: são dois painéis, um por classe (\emph{spoof} e
+\emph{bonafide}). Em cada painel aparecem os três codificadores, e para cada um duas
+barras: a cheia (remover as faixas do DFT-LRP) e a hachurada (remover faixas ao acaso).
+Quanto mais alta a barra, mais a decisão cai. A barra cheia acima da hachurada é o sinal
+de que a explicação é fiel.
+
+O resultado é firme: remover as faixas do DFT-LRP derruba a decisão bem mais do que
+remover faixas ao acaso, nos três modelos e nas duas classes (só o wavlm em \emph{spoof}
+fica no limite). Isso indica que as faixas apontadas pesam de verdade, não são só
+correlação, o que reforça a leitura de H2.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{faithfulness_compare_comprehensiveness}
+  \caption[Necessidade das faixas (comprehensiveness)]{Necessidade das faixas
+  (comprehensiveness): remover as faixas do DFT-LRP contra remover faixas ao acaso, um
+  grupo de barras por codificador, um painel por classe. Amostra de 500 clipes por
+  classe.\\[3pt]
+  \begin{minipage}{0.95\linewidth}
+  \begin{itemize}[nosep,leftmargin=1.5em,topsep=0pt]
+    \item Altura da barra: AOPC (o quanto a decisão cai, em média, ao remover as faixas);
+          barra de erro: intervalo de confiança de 95\%.
+    \item Mais alto = a decisão cai mais, ou seja, as faixas removidas eram mais
+          necessárias.
+    \item Barra cheia (DFT-LRP) acima da hachurada (aleatória) = sinal de fidelidade.
+  \end{itemize}
+  \end{minipage}}
+  \label{fig:faith}
+\end{figure}
+
+\section{Panorama em uma frase}
+
+Dá para adaptar detectores de \emph{deepfake} treinados em inglês ao português com
+um head leve (EER de 21\% a 29\%, XLS-R à frente). As pistas que cada codificador
+associa e usa causalmente diferem bastante, com um ponto em comum: as frequências
+graves concentram o efeito causal. As análises associativa e causal ainda não
+convergem de forma limpa, o que fica como próximo passo (controlar o efeito
+colateral da oclusão). A atenção temporal entra como uma lente complementar, útil
+para inspecionar casos e discordâncias. Por dentro do modelo, uma terceira lente
+(DFT-LRP), agora conservativa nos três codificadores hf\_ssl, volta a apontar os
+graves e médios-graves, coerente com a análise causal; comparados lado a lado, os
+três modelos concordam apenas de forma fraca a moderada sobre quais faixas importam
+(Spearman de \(-0{,}03\) a \(0{,}35\)), sem uma faixa universal. Um teste de fidelidade
+confirma que as faixas apontadas pelo DFT-LRP são necessárias à decisão nos três
+modelos: removê-las derruba a decisão mais que remover faixas aleatórias.
+
+\end{document}
