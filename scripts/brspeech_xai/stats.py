@@ -84,6 +84,28 @@ def band_assoc_strength(spearman: pd.DataFrame, detector_tag: str,
     return np.array([float(m.get(b, np.nan)) for b in range(n_bands)])
 
 
+def band_assoc_signed(spearman: pd.DataFrame, detector_tag: str,
+                      n_bands: int) -> np.ndarray:
+    """ρ COM SINAL (o de maior |ρ|) por banda, para um detector.
+
+    Complementa `band_assoc_strength` (que só devolve |ρ|): aqui preservamos o sentido
+    da associação de cada banda. ρ>0 = mais energia na banda anda junto com mais P(spoof)
+    (pista de spoof); ρ<0 = mais energia anda junto com menos P(spoof) (pista de bonafide).
+    Usado para orientar o efeito causal da oclusão pelo sentido apontado pelo H1.
+
+    Returns:
+        Array (n_bands,) com o ρ (com sinal) de cada banda; NaN se ausente.
+    """
+    sp = spearman[spearman.detector == detector_tag].copy()
+    sp["band"] = [band_index(f)[0] for f in sp["feature"]]
+    sp["abs_rho"] = sp["rho"].abs()
+    out = np.full(n_bands, np.nan)
+    for band, grp in sp.groupby("band"):
+        if 0 <= int(band) < n_bands:
+            out[int(band)] = float(grp.loc[grp["abs_rho"].idxmax(), "rho"])
+    return out
+
+
 def convergence_bands(spearman: pd.DataFrame, detector_tag: str, n_bands: int,
                       k: int) -> tuple[list[int], list[int]]:
     """Bandas top-k e bottom-k por força de associação |ρ| (H1), para um detector.

@@ -15,10 +15,11 @@ from .data import SPOOF_LABEL, build_balanced_split
 from .features import mel_band_features
 from .logging_utils import progress
 from .metrics import compute_eer, quadrant
-from .occlusion import (bootstrap_ci, grouped_occlusion_drop, mel_band_edges,
-                        occlusion_drop, stratified_idx, to_16k_mono)
-from .stats import (confirmatory_tests, convergence_bands, cross_spine_agreement,
-                    paired_intervention_test, spearman_intraclass, top_features_by_rho)
+from .occlusion import (bootstrap_ci, mel_band_edges, occlusion_drop,
+                        per_band_occlusion_drop, stratified_idx, to_16k_mono)
+from .stats import (band_assoc_signed, confirmatory_tests, convergence_bands,
+                    cross_spine_agreement, paired_intervention_test,
+                    spearman_intraclass, top_features_by_rho)
 
 POOL_SPLIT = "pool"  # nome lógico do split de análise no modo cross-fit
 
@@ -226,14 +227,21 @@ def stage_association(ctx: RunContext) -> None:
 
 
 def _convergence_intervention(cfg, master, audios, srs, edges, targets):
-    """Teste de convergência H1->H2 por intervenção (ver plot_convergence_intervention).
+    """Teste de convergência H1->H2 por intervenção, ORIENTADO pelo sinal (ver plot).
 
-    Rankeia |ρ| associativo numa metade dos clipes e oclui, na outra metade, os grupos
-    de bandas mais e menos associadas, comparando as quedas de P(spoof) pareadas por
-    clipe. Metades disjuntas evitam selecionar e testar nos mesmos dados.
+    Rankeia |ρ| associativo (H1) numa metade dos clipes e, na outra metade, oclui banda a
+    banda as mais e as menos associadas. O efeito causal de cada banda é orientado pelo
+    sinal da sua associação (`drop x sinal(ρ)`): assim, tanto remover uma pista de spoof
+    (derruba P(spoof)) quanto remover uma pista de bonafide (sobe P(spoof)) contam como
+    efeito POSITIVO quando são coerentes com o H1. Isso evita o cancelamento que ocorre
+    ao ocluir em grupo bandas de sinais opostos. Metades disjuntas evitam circularidade.
+
+    O valor por clipe é a média (sobre as bandas do grupo) do efeito orientado. Uma
+    diferença mediana positiva (top - bottom) indica que as bandas mais associadas pelo
+    H1 têm efeito causal maior e no sentido previsto: as duas análises convergem.
 
     Returns:
-        (pairs, table): `pairs` = {tag: (drop_top, drop_bottom)} por clipe;
+        (pairs, table): `pairs` = {tag: (oriented_top, oriented_bottom)} por clipe;
         `table` = DataFrame com um teste pareado por detector.
     """
     k = cfg.occlusion.convergence_k or max(1, cfg.bands.n_bands // 3)
@@ -244,19 +252,22 @@ def _convergence_intervention(cfg, master, audios, srs, edges, targets):
     for tag, quad_col, fn in targets:
         sp = spearman_intraclass(rank_master, tag, bands.BAND_COLS)
         top, bottom = convergence_bands(sp, tag, cfg.bands.n_bands, k)
+        signs = np.sign(np.nan_to_num(band_assoc_signed(sp, tag, cfg.bands.n_bands)))
         idx = stratified_idx(test_master, quad_col, cfg.occlusion.per_quadrant, seed=cfg.seed)
         sub_audios = [to_16k_mono(audios[i], srs[i]) for i in idx]
         sub_srs = [16000] * len(sub_audios)
-        d_top = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, top,
-                                       desc=f"convergência {tag} top-{k}")
-        d_bottom = grouped_occlusion_drop(fn, sub_audios, sub_srs, edges, bottom,
-                                          desc=f"convergência {tag} bottom-{k}")
-        stat = paired_intervention_test(d_top, d_bottom, seed=cfg.seed,
+        sel = top + bottom  # oclui só as bandas dos dois grupos (uma por vez)
+        drops = per_band_occlusion_drop(fn, sub_audios, sub_srs, edges, sel,
+                                        desc=f"convergência {tag} (top/bottom-{k})")
+        oriented = drops * signs[sel]                 # orienta cada banda pelo sentido de H1
+        o_top = oriented[:, :len(top)].mean(axis=1)   # efeito médio nas mais associadas
+        o_bottom = oriented[:, len(top):].mean(axis=1)  # efeito médio nas menos associadas
+        stat = paired_intervention_test(o_top, o_bottom, seed=cfg.seed,
                                         n_boot=cfg.occlusion.n_boot)
         rows.append({"detector": tag, "k_bands": k,
                      "top_bands": ";".join(map(str, top)),
                      "bottom_bands": ";".join(map(str, bottom)), **stat})
-        pairs[tag] = (d_top, d_bottom)
+        pairs[tag] = (o_top, o_bottom)
     return pairs, pd.DataFrame(rows)
 
 

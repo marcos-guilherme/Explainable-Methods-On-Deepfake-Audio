@@ -2,10 +2,10 @@ import numpy as np
 import pandas as pd
 
 from brspeech_xai.bands import BAND_EDGES, N_BANDS
-from brspeech_xai.stats import (band_assoc_strength, confirmatory_tests,
-                                 convergence_bands, cross_spine_agreement,
-                                 paired_intervention_test, spearman_intraclass,
-                                 top_features_by_rho)
+from brspeech_xai.stats import (band_assoc_signed, band_assoc_strength,
+                                 confirmatory_tests, convergence_bands,
+                                 cross_spine_agreement, paired_intervention_test,
+                                 spearman_intraclass, top_features_by_rho)
 
 
 def test_confirmatory_runs_on_top_features():
@@ -52,6 +52,20 @@ def test_convergence_bands_picks_top_and_bottom():
     assert np.argmax(strength) == 5 and np.argmin(strength) == 0
     top, bottom = convergence_bands(sp, "zs", n_bands=6, k=2)
     assert top == [5, 4] and bottom == [0, 1]
+
+
+def test_band_assoc_signed_keeps_sign_of_max_abs():
+    # Por banda escolhe o ρ de maior |ρ| e PRESERVA o sinal (mesmo sendo negativo).
+    rows = [
+        {"detector": "ad", "feature": "band1_mean", "class": "spoof", "rho": 0.20},
+        {"detector": "ad", "feature": "band1_std", "class": "spoof", "rho": -0.55},  # maior |ρ|
+        {"detector": "ad", "feature": "band2_mean", "class": "spoof", "rho": 0.30},
+    ]
+    sp = pd.DataFrame(rows)
+    signed = band_assoc_signed(sp, "ad", n_bands=3)
+    assert signed[0] == -0.55            # banda 1: mantém o sinal negativo do maior |ρ|
+    assert signed[1] == 0.30             # banda 2: positivo
+    assert np.isnan(signed[2])           # banda 3: ausente -> NaN
 
 
 def test_paired_intervention_test_detects_positive_gap():

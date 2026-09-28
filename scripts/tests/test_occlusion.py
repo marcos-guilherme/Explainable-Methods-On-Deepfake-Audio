@@ -1,7 +1,8 @@
 import numpy as np
 
 from brspeech_xai.occlusion import (bootstrap_ci, grouped_occlusion_drop,
-                                     mel_band_edges, bandstop, occlusion_drop)
+                                     mel_band_edges, bandstop, occlusion_drop,
+                                     per_band_occlusion_drop)
 
 
 def test_mel_band_edges_monotonic():
@@ -45,6 +46,23 @@ def test_grouped_occlusion_drop_per_clip_vector():
     # grupo vazio => nenhuma oclusão => queda zero
     d0 = grouped_occlusion_drop(p_fn, audios, srs, edges, [])
     assert np.allclose(d0, 0.0)
+
+
+def test_per_band_occlusion_drop_matrix_and_selection():
+    edges = mel_band_edges(n_bands=6, f_min=20.0, f_max=7900.0)
+    sr = 16000
+    audios = [np.random.default_rng(k).standard_normal(sr).astype(np.float32) for k in range(4)]
+    srs = [sr] * len(audios)
+    p_fn = lambda a, s: float(np.mean(a ** 2))
+    sel = [1, 3, 5]
+    drops = per_band_occlusion_drop(p_fn, audios, srs, edges, sel)
+    assert drops.shape == (len(audios), len(sel))   # (n_clips, bandas selecionadas)
+    assert np.all(drops >= -1e-6)                    # remover energia reduz o "score"
+    # coluna j corresponde à banda sel[j]: bate com a oclusão individual daquela banda.
+    full = occlusion_drop(p_fn, audios, srs, edges)
+    assert np.allclose(drops, full[:, sel], atol=1e-6)
+    # seleção vazia => matriz (n_clips, 0)
+    assert per_band_occlusion_drop(p_fn, audios, srs, edges, []).shape == (len(audios), 0)
 
 
 def test_grouped_occlusion_more_bands_drops_more():

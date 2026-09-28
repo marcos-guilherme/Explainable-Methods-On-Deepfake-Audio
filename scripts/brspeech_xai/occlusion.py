@@ -66,6 +66,35 @@ def grouped_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices,
     return base - np.array(occ)
 
 
+def per_band_occlusion_drop(p_spoof_fn, audios, srs, band_edges, band_indices,
+                            desc="oclusão por banda") -> np.ndarray:
+    """Queda de P(spoof) por clipe ao ocluir CADA banda de `band_indices` isoladamente.
+
+    Diferente de `grouped_occlusion_drop` (todas as bandas de uma vez), aqui removemos
+    uma banda por vez. Isso preserva o efeito causal individual de cada banda, para que
+    o teste de convergência (Caminho 1) possa orientar cada banda pelo sinal da sua
+    associação (H1) sem que efeitos de sinais opostos se cancelem dentro de um grupo.
+
+    Args:
+        band_indices: índices 0-based das bandas a ocluir (referem-se a `band_edges`).
+
+    Returns:
+        Matriz (n_clips, len(band_indices)) de quedas `base - ocluído`, na ordem de
+        `band_indices`. Lista vazia => matriz (n_clips, 0).
+    """
+    band_indices = list(band_indices)
+    base = np.array([p_spoof_fn(a, sr) for a, sr in zip(audios, srs)])
+    if not band_indices:
+        return np.empty((len(base), 0))
+    cols = []
+    for bi in progress(band_indices, desc=desc, unit="band"):
+        lo, hi = band_edges[bi], band_edges[bi + 1]
+        occ = np.array([p_spoof_fn(bandstop(a.astype(np.float32), lo, hi, sr), sr)
+                        for a, sr in zip(audios, srs)])
+        cols.append(base - occ)
+    return np.column_stack(cols)
+
+
 def bootstrap_ci(values: np.ndarray, n_boot: int = 1000, alpha: float = 0.05,
                  seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     """IC percentil por bootstrap da MÉDIA, por coluna de uma matriz (n_obs, n_cols).

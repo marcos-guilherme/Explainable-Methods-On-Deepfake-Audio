@@ -649,17 +649,21 @@ def plot_spine_convergence(edges, occ: pd.DataFrame, spearman: pd.DataFrame,
 
 def plot_convergence_intervention(pairs: dict, conv: pd.DataFrame,
                                   figures_dir: str | Path):
-    """Convergência H1→H2 por intervenção causal (teste pareado por clipe).
+    """Convergência H1→H2 por intervenção causal orientada (teste pareado por clipe).
 
-    Um painel por detector. Cada painel mostra a distribuição, por clipe, da queda de
-    P(spoof) ao ocluir as bandas MAIS associadas (escolhidas pelo H1) versus as MENOS
-    associadas. As bandas são escolhidas numa partição de clipes independente da usada
-    aqui, para evitar circularidade. A diferença mediana (mais − menos), o IC 95% e o
-    p de Wilcoxon aparecem no título: uma diferença positiva indica que as bandas
-    apontadas pelo H1 também causam mais queda, ou seja, as duas espinhas convergem.
+    Um painel por detector. Cada painel mostra a distribuição, por clipe, do efeito
+    causal ORIENTADO ao ocluir as bandas MAIS associadas (escolhidas pelo H1) versus as
+    MENOS associadas. Orientado = a queda de P(spoof) é multiplicada pelo sinal da
+    associação da banda, então remover uma pista de spoof (P(spoof) cai) e remover uma
+    pista de bonafide (P(spoof) sobe) contam ambas como efeito POSITIVO quando são
+    coerentes com o H1. As bandas são escolhidas numa partição de clipes independente da
+    usada aqui, para evitar circularidade. A diferença mediana (mais − menos), o IC 95% e
+    o p de Wilcoxon aparecem no título: uma diferença positiva indica que as bandas
+    apontadas pelo H1 têm efeito causal maior e no sentido previsto (as duas análises
+    convergem).
 
     Args:
-        pairs: {tag: (drop_top, drop_bottom)} com as quedas por clipe.
+        pairs: {tag: (oriented_top, oriented_bottom)} com o efeito orientado por clipe.
         conv: tabela de `paired_intervention_test` por detector.
     """
     tags = [t for t in ("zs", "ad") if t in pairs]
@@ -680,7 +684,8 @@ def plot_convergence_intervention(pairs: dict, conv: pd.DataFrame,
         ax.set_xticks([0, 1])
         ax.set_xticklabels(["mais\nassociadas (H1)", "menos\nassociadas (H1)"],
                            fontsize=8)
-        ax.set_ylabel(r"$\Delta P(\mathrm{spoof})$ por clipe")
+        ax.set_ylabel("efeito causal orientado por clipe\n(positivo = coerente com H1)",
+                      fontsize=8)
         row = conv[conv.detector == tag]
         if len(row):
             r = row.iloc[0]
