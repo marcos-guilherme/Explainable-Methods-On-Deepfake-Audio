@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from ..logging_utils import progress
-from ..preprocessing import resample_to_16k, to_mono
+from ..preprocessing import fix_length, resample_to_16k, to_mono
 
 
 class HFSSLEmbedder:
@@ -24,7 +24,8 @@ class HFSSLEmbedder:
     has_zero_shot = False
 
     def __init__(self, checkpoint: str, layer: int = -1, pooling: str = "mean",
-                 device: str = "cpu") -> None:
+                 device: str = "cpu", num_samples: int = 64600,
+                 attn_implementation: str | None = None) -> None:
         from transformers import AutoFeatureExtractor, AutoModel, AutoProcessor
         if pooling != "mean":
             raise ValueError(f"pooling não suportado: {pooling!r} (use 'mean')")
@@ -33,16 +34,31 @@ class HFSSLEmbedder:
         self.layer = int(layer)
         self.pooling = pooling
         self.device = device
-        try:  # nem todo checkpoint SSL expõe um processor completo; cai no feature extractor
+        # attn_implementation: None mantém o default do transformers (sdpa, mais rápido) para
+        # a extração de embeddings do pipeline. O rollout de atenção precisa de 'eager', pois
+        # sdpa devolve None em output_attentions.
+        self.attn_implementation = attn_implementation
+        # Mesmo comprimento fixo do XLS-R (~4.04s a 16 kHz): limita a memória do feature
+        # extractor convolucional (clipes longos estouravam a GPU) e mantém a comparação
+        # entre encoders justa (mesma duração de entrada por clipe).
+        self.num_samples = int(num_samples)
+        # Backbones SSL crus (hubert/wav2vec2/wavlm base) não trazem tokenizer, então o
+        # AutoProcessor tenta montar um Wav2Vec2Processor e estoura (ValueError/OSError ou
+        # TypeError por vocab_file=None). Só precisamos do feature extractor para extrair
+        # embeddings, então em qualquer falha caímos nele.
+        try:
             self._processor = AutoProcessor.from_pretrained(checkpoint)
-        except (ValueError, OSError):
+        except Exception:  # noqa: BLE001
             self._processor = AutoFeatureExtractor.from_pretrained(checkpoint)
-        self._model = AutoModel.from_pretrained(checkpoint).to(device).eval()
+        model_kwargs = {} if attn_implementation is None else {
+            "attn_implementation": attn_implementation}
+        self._model = AutoModel.from_pretrained(checkpoint, **model_kwargs).to(device).eval()
         self.dim = int(getattr(self._model.config, "hidden_size", 0))
 
     def _to_16k_mono(self, audio: np.ndarray, sr: int) -> np.ndarray:
         wav = to_mono(torch.as_tensor(audio, dtype=torch.float32))
-        return resample_to_16k(wav, sr).numpy()
+        wav = resample_to_16k(wav, sr)
+        return fix_length(wav, self.num_samples).numpy()
 
     def _masked_mean(self, hidden: torch.Tensor,
                      attention_mask: torch.Tensor | None) -> torch.Tensor:
@@ -66,8 +82,12 @@ class HFSSLEmbedder:
                            batch_size: int = 8) -> np.ndarray:
         """Embedding por clipe: média dos frames da camada ``self.layer`` (H-dim)."""
         embs: list[np.ndarray] = []
-        for i in progress(range(0, len(audios), batch_size),
-                          desc=f"embeddings {self.checkpoint.split('/')[-1]}", unit="batch"):
+        # Batch único (ex.: scoring de 1 clipe na oclusão) não mostra barra, senão o log
+        # vira uma enxurrada de "1/1".
+        single_batch = len(audios) <= batch_size
+        for i in progress(range(0, len(audios), batch_size), unit="batch",
+                          desc=f"embeddings {self.checkpoint.split('/')[-1]}",
+                          disable=single_batch):
             wavs = [self._to_16k_mono(a, sr) for a, sr in zip(audios[i:i + batch_size],
                                                               srs[i:i + batch_size])]
             inputs = self._processor(wavs, sampling_rate=16000, return_tensors="pt",
