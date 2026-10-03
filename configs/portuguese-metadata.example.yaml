@@ -1,0 +1,4 @@
+# Portable template for Portuguese metadata extraction.
+jmds_root: "E:/path/to/JMDS_open_v2_public/JMDS_open_v2_public"
+coraa_root: "E:/path/to/future_sources/coraa-v1.1"
+output_root: "E:/path/to/portuguese_preparation"

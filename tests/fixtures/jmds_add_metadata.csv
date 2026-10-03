@@ -1,0 +1,5 @@
+spk_id,utt_id,gender,codec,attack_id,label,native,language,dataset
+unk,T_0000123456,unk,-,unk,generated,yes,zho,ADD
+unk,T_0000654321,unk,-,unk,generated,yes,zho,ADD
+unk,T_0000111111,unk,-,unk,pristine,yes,zho,AISHELL3
+T_0001,T_0000000001,F,-,A01,generated,yes,por,MLAAD
