@@ -1,0 +1,4 @@
+file_path,task,variety,dataset,accent,speech_genre,speech_style,up_votes,down_votes,votes_for_hesitation,votes_for_filled_pause,votes_for_noise_or_low_voice,votes_for_second_voice,votes_for_no_identified_problem,text
+train/wav/speaker1/file1.wav,annotation,standard,CORAA,neutro,conversational,impersonation,1,0,0,0,0,0,0,Olá mundo como vai
+train/wav/speaker2/file2.wav,transcription,standard,CORAA,caipira,reading,neutral,,,,,,,,Este e um texto de transcricao
+train/wav/speaker3/file3.wav,annotation_and_transcription,standard,CORAA,mineiro,interview,spontaneous,2,1,0,1,0,0,1,Texto anotado e transcrito

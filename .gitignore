@@ -237,3 +237,14 @@ results/
 # Binários gerados (figuras e paper): não versionar, gerar localmente
 *.pdf
 *.png
+
+# Local machine paths and credentials-like configuration.
+configs/english.yaml
+configs/portuguese-metadata.yaml
+configs/mandarin-metadata.yaml
+
+# Local Portuguese derived metadata outputs.
+**/portuguese_preparation/
+
+# Local Mandarin derived metadata outputs.
+**/mandarin_preparation/

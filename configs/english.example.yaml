@@ -1,0 +1,8 @@
+jmds_root: 'E:\JMDS_open_v2_public\JMDS_open_v2_public'
+asvspoof_protocol_root: 'E:\JMDS_open_v2_public\asvspoof5_protocols'
+data_root: 'E:\JMDS_open_v2_public\english_preparation'
+zenodo_record_id: 14498691
+supported_splits:
+  - train
+  - dev
+sample_rate: 16000

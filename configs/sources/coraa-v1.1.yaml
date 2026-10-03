@@ -1,0 +1,121 @@
+# CORAA v1.1, distribution linked by the official README, pinned to one
+# Hugging Face revision. Original files only; never extracted or modified in
+# place by the acquisition step.
+schema_version: 1
+dataset:
+  id: coraa-v1.1
+  name: CORAA
+  version: v1.1
+  revision: 719c91226a79f5f9a8984145f15f29626eabc29a
+  official_page: https://github.com/nilc-nlp/CORAA
+  distribution_page: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1
+  license:
+    id: CC-BY-NC-ND-4.0
+    url: https://creativecommons.org/licenses/by-nc-nd/4.0/
+    source: https://github.com/nilc-nlp/CORAA/blob/main/LICENSE
+  usage_policy:
+    preserve_originals: true
+    commercial_use_permitted: false
+    adapted_material_sharing_permitted: false
+    statement: >-
+      CC BY-NC-ND 4.0: noncommercial use only. Originals are preserved
+      byte-identical. Adapted material may be produced and reproduced for
+      this research but must not be shared; no publication or redistribution
+      of derived audio, features or subsets.
+artifacts:
+  - name: dev.zip
+    remote_path: dev.zip
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/dev.zip?download=true
+    size: 1269183231
+    checksum:
+      algorithm: sha256
+      value: 5945180bbac98943e3e047e99a53075c6ff4ef8ef2e32d261c3bffd34b89c720
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: test.zip
+    remote_path: test.zip
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/test.zip?download=true
+    size: 2421277906
+    checksum:
+      algorithm: sha256
+      value: 4dd6cb9e658c83e45496058dbae8f08ade55eafe1ae617094000f6ef042f7238
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: train.part1.rar
+    remote_path: train_dividido/train.part1.rar
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/train_dividido/train.part1.rar?download=true
+    size: 10737418240
+    checksum:
+      algorithm: sha256
+      value: 50d234f590a1027ff9c0314de3159671062f630a3546eb943529a114c97af1a2
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: train.part2.rar
+    remote_path: train_dividido/train.part2.rar
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/train_dividido/train.part2.rar?download=true
+    size: 10737418240
+    checksum:
+      algorithm: sha256
+      value: 748a41dadf6362060950a2ea1e4964985323e7e2e75d7027e1328159d387aaef
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: train.part3.rar
+    remote_path: train_dividido/train.part3.rar
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/train_dividido/train.part3.rar?download=true
+    size: 10737418240
+    checksum:
+      algorithm: sha256
+      value: 11f9dbb379fbbe835158ea23617e9123ef8a47ad5aaf3baef9ebc831aaa7415e
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: train.part4.rar
+    remote_path: train_dividido/train.part4.rar
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/train_dividido/train.part4.rar?download=true
+    size: 10737418240
+    checksum:
+      algorithm: sha256
+      value: cc7b05626a4eef79a6c58dba821091a70207e3d6f10aa43154db048c76162bb5
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: train.part5.rar
+    remote_path: train_dividido/train.part5.rar
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/train_dividido/train.part5.rar?download=true
+    size: 10078493674
+    checksum:
+      algorithm: sha256
+      value: 90e967848bfef587d0d6378fe9f5f0b6ff772a1c3f44b275df75224ceaa9bbf8
+      source: Hugging Face LFS SHA-256 for this path at the pinned revision
+      note: null
+  - name: metadata_train_final.csv
+    remote_path: metadata_train_final.csv
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/metadata_train_final.csv?download=true
+    size: 76480333
+    checksum:
+      algorithm: sha256
+      value: null
+      source: null
+      note: >-
+        No official checksum located for this file at the pinned revision; the
+        receipt records the observed SHA-256 only.
+  - name: metadata_dev_final.csv
+    remote_path: metadata_dev_final.csv
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/metadata_dev_final.csv?download=true
+    size: 1434289
+    checksum:
+      algorithm: sha256
+      value: null
+      source: null
+      note: >-
+        No official checksum located for this file at the pinned revision; the
+        receipt records the observed SHA-256 only.
+  - name: metadata_test_final.csv
+    remote_path: metadata_test_final.csv
+    url: https://huggingface.co/datasets/gabrielrstan/CORAA-v1.1/resolve/719c91226a79f5f9a8984145f15f29626eabc29a/metadata_test_final.csv?download=true
+    size: 2635505
+    checksum:
+      algorithm: sha256
+      value: null
+      source: null
+      note: >-
+        No official checksum located for this file at the pinned revision; the
+        receipt records the observed SHA-256 only.
