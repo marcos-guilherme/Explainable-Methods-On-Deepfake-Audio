@@ -364,6 +364,17 @@ def test_task11_factorial_smoke_exercises_real_dag_contracts_and_aggregator(
         "runs": [],
         "scope": "three diagonals at layer 12 only",
     }
+    table_records = aggregate_manifest["tables"]
+    assert tuple(record["name"] for record in table_records) == (
+        suite_aggregation.TABLE_NAMES
+    )
+    for record in table_records:
+        table = pd.read_csv(aggregate_generation / record["name"])
+        contract = suite_aggregation._table_scientific_metadata(record["name"])
+        assert record["columns"] == table.columns.tolist()
+        assert record["rows"] == len(table) > 0
+        assert record["uncertainty"]["statistic"] == contract["statistic"]
+        assert record["uncertainty"]["unit"] == contract["unit"]
     assert len(
         pd.read_csv(aggregate_generation / "layerwise_performance.csv")
     ) == 81

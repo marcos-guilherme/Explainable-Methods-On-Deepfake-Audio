@@ -84,6 +84,34 @@ Wav2Vec2 Base — com probes por camada e AttnLRP → DFT-LRP/STDFT-LRP. A audit
 clássica H1/H2/H3 é opcional, limitada às diagonais da camada 12 e desligada por
 padrão.
 
+Para validar a pipeline com menor custo, faça primeiro um `--dry-run` parcial
+com inglês e português:
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --profiles hubert_base \
+  --output /mnt/results/layerwise-suite-eng-por-pilot \
+  --xai-per-class 2 \
+  --dry-run
+```
+
+Depois de revisar o `execution_plan.json`, execute o piloto no mesmo output:
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --profiles hubert_base \
+  --output /mnt/results/layerwise-suite-eng-por-pilot \
+  --xai-per-class 2
+```
+
+Esse piloto `eng+por` valida a pipeline, mas não substitui o experimento final,
+que continua trilíngue. A execução final deve usar outro diretório de output,
+como `/mnt/results/layerwise-suite`, sem reutilizar o output parcial.
+
 Execute na VM Linux com Python 3.11, as dependências do projeto, PyTorch e
 Transformers compatíveis com a CUDA instalada. Monte no contêiner/VM:
 

@@ -32,6 +32,20 @@ CLAIMS = {
     "signed_relevance": "directional relevance; never used as a probability distribution",
     "absolute_normalized": "non-negative per-sample band mass normalized to sum to one",
 }
+
+
+def _languages_from_inputs(inputs: Mapping[str, object]) -> tuple[str, ...]:
+    unknown = set(inputs) - set(LANGUAGES)
+    if unknown:
+        raise ValueError(f"unsupported language input(s): {sorted(unknown)}")
+    selected_languages = tuple(
+        language for language in LANGUAGES if language in inputs
+    )
+    if not selected_languages:
+        raise ValueError("aggregate suite requires at least one language")
+    return selected_languages
+
+
 _TABLE_SCIENTIFIC_CONTRACTS: Mapping[str, Mapping[str, object]] = {
     "layerwise_performance.csv": {
         "statistic": "per_cell_roc_auc_and_accuracy",
@@ -760,7 +774,9 @@ def run_classical_audit(
     enabled: bool,
     output_dir: Path,
     adapter: Callable[..., Mapping[str, Path]] | None,
+    inputs: Mapping[str, object],
 ) -> list[dict[str, object]]:
+    selected_languages = _languages_from_inputs(inputs)
     if type(enabled) is not bool:
         raise TypeError("enabled must be a strict boolean")
     if not enabled:
@@ -768,7 +784,7 @@ def run_classical_audit(
     if not callable(adapter):
         raise ValueError("classical audit requires a production adapter")
     records = []
-    for language in LANGUAGES:
+    for language in selected_languages:
         cell_dir = Path(output_dir) / "classical_audit" / f"{language}_to_{language}"
         artifacts = adapter(
             source=language,
@@ -830,12 +846,12 @@ def _validated_marker(root: Path, stage_id: str, expected_names: set[str]) -> di
 def _load_authoritative_cohorts(
     root: str | Path,
     *,
-    targets: Sequence[str] = LANGUAGES,
+    inputs: Mapping[str, object],
 ) -> dict[str, pd.DataFrame]:
     root = Path(root)
     paths = LayerwiseSuitePaths(root)
     cohorts: dict[str, pd.DataFrame] = {}
-    for target in targets:
+    for target in _languages_from_inputs(inputs):
         _validated_marker(
             root,
             f"suite:cohort:{target}",
@@ -979,16 +995,18 @@ def _validate_cell_against_authoritative_cohort(
 def _read_inputs(
     root: Path,
     profiles: Sequence[str],
+    inputs: Mapping[str, object],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     paths = LayerwiseSuitePaths(root)
-    authoritative_cohorts = _load_authoritative_cohorts(root)
+    selected_languages = _languages_from_inputs(inputs)
+    authoritative_cohorts = _load_authoritative_cohorts(root, inputs=inputs)
     performance_rows, emergence_frames, sample_frames, transition_frames = [], [], [], []
     expected_cells = {
         (profile, layer, source, target)
         for profile in profiles
         for layer in LAYERS
-        for source in LANGUAGES
-        for target in LANGUAGES
+        for source in selected_languages
+        for target in selected_languages
     }
     for profile, layer, source, target in sorted(expected_cells):
         _validated_marker(
@@ -1045,8 +1063,8 @@ def _read_inputs(
         )
         sample_frames.append(samples)
     for profile in profiles:
-        for source in LANGUAGES:
-            for target in LANGUAGES:
+        for source in selected_languages:
+            for target in selected_languages:
                 _validated_marker(
                     root,
                     f"{profile}:emergence:{source}:{target}",
@@ -1102,8 +1120,8 @@ def _read_inputs(
     expected_emergence = {
         (profile, source, target)
         for profile in profiles
-        for source in LANGUAGES
-        for target in LANGUAGES
+        for source in selected_languages
+        for target in selected_languages
     }
     if (
         emergence.duplicated(emergence_identity).any()
@@ -1202,6 +1220,8 @@ def _table_manifest_record(
     name: str,
     frame: pd.DataFrame,
     path: Path,
+    *,
+    selected_languages: Sequence[str] = LANGUAGES,
 ) -> dict[str, object]:
     metadata = _table_scientific_metadata(name)
     method = metadata["method"]
@@ -1213,6 +1233,21 @@ def _table_manifest_record(
             "sha256": _sha256(path),
             "size_bytes": path.stat().st_size,
             "status": "not_applicable_less_than_two_profiles",
+            "uncertainty": metadata,
+        }
+    if (
+        name == "spectral_divergence_by_layer.csv"
+        and frame.empty
+        and len(selected_languages) < 2
+    ):
+        metadata["confidence"] = None
+        return {
+            "name": name,
+            "columns": list(frame.columns),
+            "rows": 0,
+            "sha256": _sha256(path),
+            "size_bytes": path.stat().st_size,
+            "status": "not_applicable_less_than_two_languages",
             "uncertainty": metadata,
         }
     if method != "none":
@@ -1287,12 +1322,15 @@ def aggregate_suite(
     profiles = tuple(profiles)
     if not profiles or len(set(profiles)) != len(profiles):
         raise ValueError("profiles must be non-empty and unique")
-    performance, emergence, samples, reorganization = _read_inputs(root, profiles)
+    selected_languages = _languages_from_inputs(inputs)
+    performance, emergence, samples, reorganization = _read_inputs(
+        root, profiles, inputs
+    )
     from .bands import mel_band_edges
     from .config import load_config
 
     edges: dict[str, np.ndarray] = {}
-    for language in LANGUAGES:
+    for language in selected_languages:
         item = inputs[language]
         cfg = load_config(Path(getattr(item, "config_path")))
         edges[language] = mel_band_edges(
@@ -1346,11 +1384,19 @@ def aggregate_suite(
             enabled=classical_audit,
             output_dir=directory,
             adapter=classical_audit_adapter,
+            inputs=inputs,
         )
         table_records = []
         for name in TABLE_NAMES:
             path = directory / name
-            table_records.append(_table_manifest_record(name, tables[name], path))
+            table_records.append(
+                _table_manifest_record(
+                    name,
+                    tables[name],
+                    path,
+                    selected_languages=selected_languages,
+                )
+            )
         (directory / "aggregate_manifest.json").write_text(
             json.dumps(
                 {
@@ -1363,7 +1409,14 @@ def aggregate_suite(
                     "figures": figures,
                     "classical_audit": {
                         "enabled": classical_audit,
-                        "scope": "three diagonals at layer 12 only",
+                        "scope": (
+                            "three diagonals at layer 12 only"
+                            if selected_languages == LANGUAGES
+                            else (
+                                f"{len(selected_languages)} selected diagonals "
+                                "at layer 12 only"
+                            )
+                        ),
                         "runs": audit,
                     },
                 },

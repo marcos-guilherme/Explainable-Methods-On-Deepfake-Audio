@@ -180,11 +180,14 @@ def build_production_factories(*, num_samples: int = 64600) -> SuiteFactories:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Prepare or run the resumable trilingual layer-wise XAI suite."
+        description=(
+            "Prepare or run the resumable multilingual layer-wise XAI suite "
+            "for a selected language subset."
+        )
     )
-    parser.add_argument("--eng-config", type=Path, required=True)
-    parser.add_argument("--por-config", type=Path, required=True)
-    parser.add_argument("--zho-config", type=Path, required=True)
+    parser.add_argument("--eng-config", type=Path)
+    parser.add_argument("--por-config", type=Path)
+    parser.add_argument("--zho-config", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--profiles",
@@ -201,6 +204,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--classical-audit", action="store_true")
     return parser
+
+
+def _selected_languages(
+    config_paths: Mapping[str, Path | str | None],
+) -> tuple[str, ...]:
+    unknown = set(config_paths) - set(LANGUAGE_ORDER)
+    if unknown:
+        raise ValueError(f"unsupported language config(s): {sorted(unknown)}")
+    selected = tuple(
+        language
+        for language in LANGUAGE_ORDER
+        if config_paths.get(language) is not None
+    )
+    if not selected:
+        raise ValueError("at least one language config is required")
+    return selected
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -346,11 +365,27 @@ def _validate_manifest(
 
 def _validate_inputs(
     config_paths: Mapping[str, str | Path],
+    selected_languages: tuple[str, ...],
 ) -> dict[str, ValidatedInput]:
-    if set(config_paths) != set(LANGUAGE_ORDER):
-        raise ValueError(f"config languages must be exactly {list(LANGUAGE_ORDER)}")
+    if (
+        not selected_languages
+        or tuple(
+            language
+            for language in LANGUAGE_ORDER
+            if language in selected_languages
+        )
+        != selected_languages
+    ):
+        raise ValueError(
+            f"selected languages must be a canonical non-empty subset of "
+            f"{list(LANGUAGE_ORDER)}"
+        )
+    if set(config_paths) != set(selected_languages):
+        raise ValueError(
+            f"config languages must be exactly {list(selected_languages)}"
+        )
     validated: dict[str, ValidatedInput] = {}
-    for language in LANGUAGE_ORDER:
+    for language in selected_languages:
         from .config import load_config
 
         config_path = _canonical_existing_file(
@@ -403,6 +438,7 @@ def _validate_inputs(
 
 def _validate_waveform_compatibility(
     inputs: Mapping[str, ValidatedInput],
+    selected_languages: tuple[str, ...],
 ) -> None:
     parameters = {
         "audio.sample_rate": {
@@ -416,12 +452,13 @@ def _validate_waveform_compatibility(
     for name, values in parameters.items():
         if len(set(values.values())) != 1:
             rendered = ", ".join(
-                f"{language}={values[language]}" for language in LANGUAGE_ORDER
+                f"{language}={values[language]}" for language in selected_languages
             )
             mismatches.append(f"{name} ({rendered})")
     if mismatches:
+        language_scope = ", ".join(selected_languages)
         raise ValueError(
-            "waveform configuration mismatch across ENG/POR/ZHO: "
+            f"waveform configuration mismatch across {language_scope}: "
             + "; ".join(mismatches)
         )
 
@@ -464,13 +501,14 @@ def _build_plan(
     *,
     suite_config: LayerwiseXaiConfig,
     inputs: Mapping[str, ValidatedInput],
+    selected_languages: tuple[str, ...],
     seed: int,
     device: str,
 ) -> dict[str, object]:
     profiles = len(suite_config.profiles)
     layers = len(LAYER_ORDER)
-    sources = len(LANGUAGE_ORDER)
-    targets = len(LANGUAGE_ORDER)
+    sources = len(selected_languages)
+    targets = len(selected_languages)
     cells = profiles * layers * sources * targets
     cohort_size = 2 * suite_config.xai_per_class
     stdft_size = 2 * suite_config.stdft_examples_per_class
@@ -491,7 +529,7 @@ def _build_plan(
                 "role": "source_and_target",
                 "roles": list(ROLE_ORDER),
             }
-            for language in LANGUAGE_ORDER
+            for language in selected_languages
         },
         "counts": {
             "profiles": profiles,
@@ -552,7 +590,7 @@ def _build_plan(
             "validate configs and manifests by content",
             "publish fixed target cohorts before scores",
             "load and freeze one encoder",
-            "extract/cache nine language-role combinations",
+            "extract/cache three roles per selected language",
             "fit probes and score layer-wise matrix",
             "summarize emergence",
             "run layer-wise XAI",
@@ -661,6 +699,7 @@ def _build_stage_graph(
     output: Path,
     suite_config: LayerwiseXaiConfig,
     inputs: Mapping[str, ValidatedInput],
+    selected_languages: tuple[str, ...],
     seed: int,
     device: str,
     config_hash: str,
@@ -683,7 +722,7 @@ def _build_stage_graph(
             target=target,
             relevant_languages=(target,),
         )
-        for target in LANGUAGE_ORDER
+        for target in selected_languages
     )
     cohort_map = {request.target: request for request in cohorts}
     core_by_profile: dict[str, tuple[StageRequest, ...]] = {}
@@ -692,7 +731,7 @@ def _build_stage_graph(
         spec = get_encoder_spec(profile)
         embeddings: dict[tuple[str, str], StageRequest] = {}
         ordered_core: list[StageRequest] = []
-        for language in LANGUAGE_ORDER:
+        for language in selected_languages:
             for role in ROLE_ORDER:
                 request = _make_request(
                     output=output,
@@ -715,7 +754,7 @@ def _build_stage_graph(
         probes: dict[tuple[int, str], StageRequest] = {}
         cells: dict[tuple[int, str, str], StageRequest] = {}
         for layer in LAYER_ORDER:
-            for source in LANGUAGE_ORDER:
+            for source in selected_languages:
                 probe = _make_request(
                     output=output,
                     suite_config=suite_config,
@@ -737,7 +776,7 @@ def _build_stage_graph(
                 )
                 probes[(layer, source)] = probe
                 ordered_core.append(probe)
-                for target in LANGUAGE_ORDER:
+                for target in selected_languages:
                     cell = _make_request(
                         output=output,
                         suite_config=suite_config,
@@ -759,8 +798,8 @@ def _build_stage_graph(
                     ordered_core.append(cell)
 
         emergence: dict[tuple[str, str], StageRequest] = {}
-        for source in LANGUAGE_ORDER:
-            for target in LANGUAGE_ORDER:
+        for source in selected_languages:
+            for target in selected_languages:
                 request = _make_request(
                     output=output,
                     suite_config=suite_config,
@@ -784,8 +823,8 @@ def _build_stage_graph(
 
         xai: dict[tuple[int, str, str], StageRequest] = {}
         for layer in LAYER_ORDER:
-            for source in LANGUAGE_ORDER:
-                for target in LANGUAGE_ORDER:
+            for source in selected_languages:
+                for target in selected_languages:
                     request = _make_request(
                         output=output,
                         suite_config=suite_config,
@@ -811,8 +850,8 @@ def _build_stage_graph(
 
         traces: dict[tuple[str, str], StageRequest] = {}
         final_layer = LAYER_ORDER[-1]
-        for source in LANGUAGE_ORDER:
-            for target in LANGUAGE_ORDER:
+        for source in selected_languages:
+            for target in selected_languages:
                 request = _make_request(
                     output=output,
                     suite_config=suite_config,
@@ -846,7 +885,7 @@ def _build_stage_graph(
             kind="profile_aggregate",
             profile=profile,
             checkpoint=spec.checkpoint,
-            relevant_languages=LANGUAGE_ORDER,
+            relevant_languages=selected_languages,
             upstream=(
                 *emergence.values(),
                 *xai.values(),
@@ -864,7 +903,7 @@ def _build_stage_graph(
         config_hash=config_hash,
         stage_id="suite:aggregate",
         kind="suite_aggregate",
-        relevant_languages=LANGUAGE_ORDER,
+        relevant_languages=selected_languages,
         upstream=tuple(profile_aggregates),
     )
     return (
@@ -1027,9 +1066,9 @@ def _default_cleanup(runner: SuiteRunner, encoder: object | None) -> None:
 
 def run_encoder_suite(
     *,
-    eng_config: str | Path,
-    por_config: str | Path,
-    zho_config: str | Path,
+    eng_config: str | Path | None = None,
+    por_config: str | Path | None = None,
+    zho_config: str | Path | None = None,
     output: str | Path,
     suite_config: LayerwiseXaiConfig | None = None,
     seed: int = 42,
@@ -1068,18 +1107,22 @@ def run_encoder_suite(
             raise TypeError("dry_run and force must be strict booleans")
 
         current_stage = "validate_inputs"
+        config_paths = {
+            "eng": eng_config,
+            "por": por_config,
+            "zho": zho_config,
+        }
+        selected_languages = _selected_languages(config_paths)
         inputs = _validate_inputs(
-            {
-                "eng": eng_config,
-                "por": por_config,
-                "zho": zho_config,
-            }
+            {language: config_paths[language] for language in selected_languages},
+            selected_languages,
         )
-        _validate_waveform_compatibility(inputs)
+        _validate_waveform_compatibility(inputs, selected_languages)
         current_stage = "build_execution_plan"
         plan = _build_plan(
             suite_config=suite_config,
             inputs=inputs,
+            selected_languages=selected_languages,
             seed=seed,
             device=device,
         )
@@ -1108,6 +1151,7 @@ def run_encoder_suite(
                 output=output_root,
                 suite_config=suite_config,
                 inputs=inputs,
+                selected_languages=selected_languages,
                 seed=seed,
                 device=device,
                 config_hash=config_hash,
@@ -1116,7 +1160,7 @@ def run_encoder_suite(
         if factories is None:
             current_stage = "build_production_factories"
             factories = build_production_factories(
-                num_samples=inputs[LANGUAGE_ORDER[0]].audio_num_samples
+                num_samples=inputs[selected_languages[0]].audio_num_samples
             )
         if not isinstance(factories, SuiteFactories):
             raise TypeError("factories must be a SuiteFactories instance")

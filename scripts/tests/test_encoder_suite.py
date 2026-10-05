@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args, get_type_hints
 
 import pytest
 import yaml
@@ -24,7 +25,11 @@ from brspeech_xai.encoder_suite import (
     run_encoder_suite,
 )
 from brspeech_xai.encoder_suite_runtime import ProductionStageAdapter
-from brspeech_xai.layerwise_paths import publish_generation, resolve_active_generation
+from brspeech_xai.layerwise_paths import (
+    LayerwiseSuitePaths,
+    publish_generation,
+    resolve_active_generation,
+)
 
 
 def _write_language_input(
@@ -150,6 +155,7 @@ def _run(
     tmp_path: Path,
     *,
     profiles=("hubert_base",),
+    languages=LANGUAGE_ORDER,
     por_revision="v1",
     dry_run=False,
     force=False,
@@ -161,12 +167,12 @@ def _run(
             language,
             por_revision if language == "por" else "v1",
         )
-        for language in LANGUAGE_ORDER
+        for language in languages
     }
     return run_encoder_suite(
-        eng_config=inputs["eng"],
-        por_config=inputs["por"],
-        zho_config=inputs["zho"],
+        eng_config=inputs.get("eng"),
+        por_config=inputs.get("por"),
+        zho_config=inputs.get("zho"),
         output=tmp_path / "suite",
         suite_config=LayerwiseXaiConfig(
             profiles=profiles,
@@ -202,15 +208,53 @@ def test_layerwise_config_validates_all_fields():
             replace(config, **kwargs)
 
 
-def test_parser_requires_three_configs_and_output_without_heavy_imports():
+def test_selected_languages_requires_at_least_one_config():
+    with pytest.raises(ValueError, match="at least one language config"):
+        encoder_suite._selected_languages({"eng": None, "por": None, "zho": None})
+
+
+def test_public_api_requires_at_least_one_config(tmp_path):
+    with pytest.raises(ValueError, match="at least one language config"):
+        run_encoder_suite(output=tmp_path / "suite", dry_run=True)
+    assert not (tmp_path / "suite" / "execution_plan.json").exists()
+
+
+def test_selected_languages_rejects_unknown_language(tmp_path):
+    with pytest.raises(ValueError, match="unsupported language config"):
+        encoder_suite._selected_languages({"fra": tmp_path / "fra.yaml"})
+
+
+def test_selected_languages_accepts_one_config(tmp_path):
+    eng = tmp_path / "eng.yaml"
+    assert encoder_suite._selected_languages(
+        {"eng": eng, "por": None, "zho": None}
+    ) == ("eng",)
+
+
+def test_selected_languages_preserves_canonical_order(tmp_path):
+    por = tmp_path / "por.yaml"
+    zho = tmp_path / "zho.yaml"
+    assert encoder_suite._selected_languages(
+        {"zho": zho, "por": por, "eng": None}
+    ) == ("por", "zho")
+
+
+def test_selected_languages_preserves_trilingual_behavior(tmp_path):
+    configs = {
+        language: tmp_path / f"{language}.yaml" for language in reversed(LANGUAGE_ORDER)
+    }
+    assert encoder_suite._selected_languages(configs) == LANGUAGE_ORDER
+
+
+def test_selected_languages_annotation_accepts_string_paths():
+    annotation = get_type_hints(encoder_suite._selected_languages)["config_paths"]
+    value_type = get_args(annotation)[1]
+    assert set(get_args(value_type)) == {Path, str, type(None)}
+
+
+def test_parser_makes_language_configs_optional_without_heavy_imports():
     args = build_parser().parse_args(
         [
-            "--eng-config",
-            "eng.yaml",
-            "--por-config",
-            "por.yaml",
-            "--zho-config",
-            "zho.yaml",
             "--output",
             "suite",
             "--profiles",
@@ -220,6 +264,9 @@ def test_parser_requires_three_configs_and_output_without_heavy_imports():
             "--dry-run",
         ]
     )
+    assert args.eng_config is None
+    assert args.por_config is None
+    assert args.zho_config is None
     assert args.xai_per_class == 8
     assert args.dry_run is True
 
@@ -250,9 +297,97 @@ def test_dry_run_writes_complete_plan_without_calling_factories(tmp_path):
     assert plan["embedding_bytes"]["value"] is None
     assert plan["embedding_bytes"]["reason"]
     assert set(plan["inputs"]) == set(LANGUAGE_ORDER)
+    assert plan["schema_version"] == 1
+    assert plan["languages"] == {
+        language: {
+            "role": "source_and_target",
+            "roles": list(ROLE_ORDER),
+        }
+        for language in LANGUAGE_ORDER
+    }
     assert all(Path(item["config_path"]).is_absolute() for item in plan["inputs"].values())
     assert all(len(item["manifest_sha256"]) == 64 for item in plan["inputs"].values())
     assert tracker["encoder_calls"] == tracker["runner_calls"] == 0
+
+
+def _assert_partial_dry_run_counts(
+    tmp_path, *, languages, cells_per_layer, probes, cells
+):
+    result = _run(tmp_path, languages=languages, dry_run=True)
+    plan = json.loads((tmp_path / "suite" / "execution_plan.json").read_text())
+
+    assert result["status"] == "dry-run"
+    assert plan["schema_version"] == 1
+    assert plan["languages"] == {
+        language: {
+            "role": "source_and_target",
+            "roles": list(ROLE_ORDER),
+        }
+        for language in languages
+    }
+    assert plan["counts"]["cells_per_layer"] == cells_per_layer
+    assert plan["counts"]["probes"] == probes
+    assert plan["counts"]["cells"] == cells
+
+
+def test_single_language_dry_run_builds_only_one_by_one_matrix(tmp_path):
+    _assert_partial_dry_run_counts(
+        tmp_path,
+        languages=("por",),
+        cells_per_layer=1,
+        probes=12,
+        cells=12,
+    )
+
+
+def test_two_language_dry_run_builds_two_by_two_matrix(tmp_path):
+    _assert_partial_dry_run_counts(
+        tmp_path,
+        languages=("eng", "por"),
+        cells_per_layer=4,
+        probes=24,
+        cells=48,
+    )
+
+
+@pytest.mark.parametrize("languages", [("por",), ("eng", "por")])
+def test_single_language_and_two_language_graphs_exclude_unselected_languages(
+    tmp_path, languages
+):
+    configs = {
+        language: _write_language_input(tmp_path, language)
+        for language in languages
+    }
+    inputs = encoder_suite._validate_inputs(configs, languages)
+    suite_config = LayerwiseXaiConfig(profiles=("hubert_base",))
+    cohorts, core, profile_aggregates, suite_aggregates = (
+        encoder_suite._build_stage_graph(
+            output=tmp_path / "suite",
+            suite_config=suite_config,
+            inputs=inputs,
+            selected_languages=languages,
+            seed=42,
+            device="cpu",
+            config_hash=encoder_suite._suite_config_hash(
+                suite_config, seed=42, device="cpu"
+            ),
+        )
+    )
+    requests = (
+        *cohorts,
+        *core["hubert_base"],
+        *profile_aggregates,
+        *suite_aggregates,
+    )
+    selected = set(languages)
+
+    for request in requests:
+        assert request.language is None or request.language in selected
+        assert request.source is None or request.source in selected
+        assert request.target is None or request.target in selected
+        assert set(request.relevant_manifest_hashes) <= selected
+    for request in (*profile_aggregates, *suite_aggregates):
+        assert set(request.relevant_manifest_hashes) == selected
 
 
 def test_dry_run_rejects_cross_language_waveform_mismatch_before_plan(tmp_path):
@@ -308,6 +443,115 @@ def test_dry_run_rejects_cross_language_waveform_mismatch_before_plan(tmp_path):
     assert (equal_root / "suite" / "execution_plan.json").is_file()
 
 
+@pytest.mark.parametrize(
+    ("field", "eng_value", "por_value"),
+    [
+        ("sample_rate", 16000, 22050),
+        ("num_samples", 64600, 32000),
+    ],
+)
+def test_two_language_waveform_mismatch_names_only_selected_languages(
+    tmp_path, field, eng_value, por_value
+):
+    configs = {
+        language: _write_language_input(tmp_path, language)
+        for language in ("eng", "por")
+    }
+    for language, value in (("eng", eng_value), ("por", por_value)):
+        raw = yaml.safe_load(configs[language].read_text(encoding="utf-8"))
+        raw["audio"] = {field: value}
+        configs[language].write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError) as raised:
+        run_encoder_suite(
+            eng_config=configs["eng"],
+            por_config=configs["por"],
+            output=tmp_path / "suite",
+            suite_config=LayerwiseXaiConfig(profiles=("hubert_base",)),
+            dry_run=True,
+        )
+
+    message = str(raised.value)
+    assert f"waveform configuration mismatch across eng, por" in message
+    assert f"audio.{field} (eng={eng_value}, por={por_value})" in message
+    assert "zho" not in message.lower()
+    assert not (tmp_path / "suite" / "execution_plan.json").exists()
+
+
+def test_por_only_run_builds_factory_with_por_num_samples(tmp_path, monkeypatch):
+    por_config = _write_language_input(tmp_path, "por")
+    raw = yaml.safe_load(por_config.read_text(encoding="utf-8"))
+    raw["audio"] = {"sample_rate": 16000, "num_samples": 32123}
+    por_config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    factories, _tracker = _factories()
+    observed = []
+
+    def fake_build_production_factories(*, num_samples):
+        observed.append(num_samples)
+        return factories
+
+    monkeypatch.setattr(
+        encoder_suite,
+        "build_production_factories",
+        fake_build_production_factories,
+    )
+
+    run_encoder_suite(
+        por_config=por_config,
+        output=tmp_path / "suite",
+        suite_config=LayerwiseXaiConfig(
+            profiles=("hubert_base",),
+            xai_per_class=1,
+            stdft_examples_per_class=1,
+            bootstrap_samples=5,
+        ),
+        device="cpu",
+    )
+
+    assert observed == [32123]
+
+
+def test_trilingual_suite_aggregate_fingerprint_is_stable():
+    inputs = {
+        language: encoder_suite.ValidatedInput(
+            language=language,
+            config_path=Path(f"{language}.yaml"),
+            config_sha256=character * 64,
+            manifest_path=Path(f"{language}.csv"),
+            manifest_sha256=str(index) * 64,
+            role_counts={role: 2 for role in ROLE_ORDER},
+            audio_sample_rate=16000,
+            audio_num_samples=64600,
+        )
+        for index, (language, character) in enumerate(
+            zip(LANGUAGE_ORDER, ("a", "b", "c")), start=1
+        )
+    }
+    suite_config = LayerwiseXaiConfig(
+        profiles=("hubert_base",),
+        xai_per_class=2,
+        stdft_examples_per_class=1,
+        bootstrap_samples=5,
+    )
+    _cohorts, _core, _profile_aggregates, suite_aggregates = (
+        encoder_suite._build_stage_graph(
+            output=Path("suite"),
+            suite_config=suite_config,
+            inputs=inputs,
+            selected_languages=LANGUAGE_ORDER,
+            seed=42,
+            device="cpu",
+            config_hash=encoder_suite._suite_config_hash(
+                suite_config, seed=42, device="cpu"
+            ),
+        )
+    )
+
+    assert suite_aggregates[0].fingerprint == (
+        "b6043074fda399f5087d0eb8456f925db81f60ea84fdd82982d6344b4ee90dbe"
+    )
+
+
 def test_resume_force_and_single_encoder_lifetime(tmp_path):
     factories, tracker = _factories()
     _run(tmp_path, factories=factories)
@@ -327,6 +571,28 @@ def test_resume_force_and_single_encoder_lifetime(tmp_path):
     assert sum(":embedding:" in stage for stage in tracker["stages"]) == 9
     assert tracker["encoder_calls"] == 2
     assert tracker["max_alive"] == 1
+
+
+def test_partial_resume_after_language_set_transition_invalidates_only_aggregates(
+    tmp_path,
+):
+    factories, tracker = _factories()
+    _run(tmp_path, factories=factories)
+    tracker["stages"].clear()
+
+    _run(tmp_path, languages=("eng", "por"), factories=factories)
+    transition_stages = tuple(tracker["stages"])
+
+    assert transition_stages == (
+        "hubert_base:profile_aggregate",
+        "suite:aggregate",
+    )
+    assert not any("zho" in stage for stage in transition_stages)
+
+    tracker["stages"].clear()
+    _run(tmp_path, languages=("eng", "por"), factories=factories)
+
+    assert tracker["stages"] == []
 
 
 def test_por_manifest_change_invalidates_only_por_dependency_cone(tmp_path):
@@ -627,7 +893,7 @@ def test_production_adapter_reaches_explicit_calibration_extraction(
         language: _write_language_input(tmp_path, language)
         for language in LANGUAGE_ORDER
     }
-    validated = encoder_suite._validate_inputs(configs)
+    validated = encoder_suite._validate_inputs(configs, LANGUAGE_ORDER)
     suite_config = LayerwiseXaiConfig(
         profiles=("hubert_base",),
         xai_per_class=1,
@@ -639,6 +905,7 @@ def test_production_adapter_reaches_explicit_calibration_extraction(
             output=tmp_path / "suite",
             suite_config=suite_config,
             inputs=validated,
+            selected_languages=LANGUAGE_ORDER,
             seed=42,
             device="cpu",
             config_hash=encoder_suite._suite_config_hash(
@@ -747,7 +1014,7 @@ def test_trace_adapter_uses_canonical_rate_and_target_config_fingerprint(
         )
         for language in LANGUAGE_ORDER
     }
-    validated = encoder_suite._validate_inputs(configs)
+    validated = encoder_suite._validate_inputs(configs, LANGUAGE_ORDER)
     suite_config = LayerwiseXaiConfig(
         profiles=("hubert_base",),
         xai_per_class=1,
@@ -759,6 +1026,7 @@ def test_trace_adapter_uses_canonical_rate_and_target_config_fingerprint(
             output=tmp_path / "suite",
             suite_config=suite_config,
             inputs=validated,
+            selected_languages=LANGUAGE_ORDER,
             seed=42,
             device="cpu",
             config_hash=encoder_suite._suite_config_hash(
@@ -1183,7 +1451,7 @@ def test_authoritative_suite_cohort_rejects_consistent_cell_omission(tmp_path):
         encoding="utf-8",
     )
     authority = _load_authoritative_cohorts(
-        tmp_path, targets=("por",)
+        tmp_path, inputs={"por": object()}
     )["por"]
     predictions = pd.DataFrame(
         {
@@ -1279,9 +1547,384 @@ def test_emergence_publication_matches_manifest_scientific_contract(tmp_path):
     assert record["uncertainty"]["unit"] == published["unit"].iat[0]
 
 
+def _partial_aggregation_frames(languages):
+    performance = pd.DataFrame(
+        [
+            {
+                "profile": "hubert_base",
+                "layer": layer,
+                "source": source,
+                "target": target,
+                "n": 2,
+                "auc": 0.75,
+                "accuracy": 0.5,
+                "diagonal": source == target,
+                "external_validation": source != target,
+                "corpus_shift": source != target,
+            }
+            for layer in range(1, 13)
+            for source in languages
+            for target in languages
+        ]
+    )
+    emergence = pd.DataFrame(
+        [
+            {
+                "profile": "hubert_base",
+                "source": source,
+                "target": target,
+                "bootstrap_confidence": 0.95,
+            }
+            for source in languages
+            for target in languages
+        ]
+    )
+    samples = pd.DataFrame(
+        [
+            {
+                "profile": "hubert_base",
+                "source": source,
+                "target": target,
+                "layer": layer,
+                "sample_id": f"{target}-{label}",
+                "y_true": label,
+                "prediction": label,
+                "band_signed": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                "band_abs_normalized": [0.125] * 8,
+            }
+            for layer in range(1, 13)
+            for source in languages
+            for target in languages
+            for label in (0, 1)
+        ]
+    )
+    reorganization = pd.DataFrame(
+        [
+            {
+                "profile": "hubert_base",
+                "source": source,
+                "target": target,
+                "previous_layer": 1,
+                "current_layer": 2,
+                "conditioning": "all",
+                "class_value": "all",
+                "ci_method": "normal_95_sem",
+                "ci_confidence": 0.95,
+                "statistic": "transition_metric_mean",
+                "unit": "metric_specific",
+            }
+            for source in languages
+            for target in languages
+        ]
+    )
+    return performance, emergence, samples, reorganization
+
+
+def _write_stage_marker(root, stage_id, artifacts):
+    marker = root / ".state" / f"{stage_id.replace(':', '__')}.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "contract_version": "encoder-suite-v2",
+                "stage_id": stage_id,
+                "fingerprint": f"fingerprint-{stage_id}",
+                "artifacts": [
+                    {
+                        "name": name,
+                        "path": str(path.resolve()),
+                        "sha256": encoder_suite._sha256_file(path),
+                    }
+                    for name, path in artifacts.items()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return marker
+
+
+def _write_aggregation_matrix(root, languages):
+    paths = LayerwiseSuitePaths(root)
+    profile = "hubert_base"
+    cohorts = {}
+    for target in languages:
+        cohort = pd.DataFrame(
+            {
+                "sample_id": [f"{target}-0", f"{target}-1"],
+                "label": [0, 1],
+                "processed_path": [f"{target}-0.wav", f"{target}-1.wav"],
+            }
+        )
+        cohort_path = paths.suite_cohort(target)
+        cohort_path.parent.mkdir(parents=True, exist_ok=True)
+        cohort.to_parquet(cohort_path, index=False)
+        metadata_path = paths.suite_cohort_metadata(target)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "target": target,
+                    "sample_ids": cohort["sample_id"].tolist(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write_stage_marker(
+            root,
+            f"suite:cohort:{target}",
+            {"cohort": cohort_path, "metadata": metadata_path},
+        )
+        cohorts[target] = cohort
+
+    cell_markers = {}
+    for layer in range(1, 13):
+        for source in languages:
+            for target in languages:
+                cohort = cohorts[target]
+                cell_dir = paths.cell(profile, layer, source, target)
+                cell_dir.mkdir(parents=True, exist_ok=True)
+                scores_path = cell_dir / "scores.npy"
+                np.save(scores_path, np.asarray([0.1, 0.9], dtype=np.float64))
+                predictions_path = cell_dir / "predictions.parquet"
+                predictions = cohort.rename(columns={"label": "y_true"}).assign(
+                    score=[0.1, 0.9],
+                    prediction=[0, 1],
+                )
+                predictions.to_parquet(predictions_path, index=False)
+                metrics_path = cell_dir / "metrics.json"
+                metrics_path.write_text(
+                    json.dumps(
+                        {
+                            "threshold_free": {"roc_auc": 1.0},
+                            "fixed_threshold": {"accuracy": 1.0},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                stage_id = f"{profile}:cell:{layer:02d}:{source}:{target}"
+                cell_markers[(profile, layer, source, target)] = _write_stage_marker(
+                    root,
+                    stage_id,
+                    {
+                        "scores": scores_path,
+                        "predictions": predictions_path,
+                        "metrics": metrics_path,
+                    },
+                )
+
+                samples = predictions.assign(
+                    profile=profile,
+                    layer=layer,
+                    source=source,
+                    target=target,
+                    band_signed=[[1.0, 2.0]] * len(predictions),
+                    band_abs_normalized=[[0.5, 0.5]] * len(predictions),
+                )
+                xai_destination = paths.layer_xai(profile, layer, source, target)
+
+                def write_xai(directory, frame=samples):
+                    frame.to_parquet(
+                        directory / "sample_relevance.parquet", index=False
+                    )
+
+                publish_generation(xai_destination, write_xai, role="layer_xai")
+                _write_stage_marker(
+                    root,
+                    f"{profile}:xai:{layer:02d}:{source}:{target}",
+                    {"active_pointer": xai_destination / "active.json"},
+                )
+
+    for source in languages:
+        for target in languages:
+            emergence_path = (
+                root
+                / ".stage-artifacts"
+                / f"{profile}__emergence__{source}__{target}"
+                / "emergence.csv"
+            )
+            emergence_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                [
+                    {
+                        "profile": profile,
+                        "source": source,
+                        "target": target,
+                        "bootstrap_confidence": 0.95,
+                    }
+                ]
+            ).to_csv(emergence_path, index=False)
+            _write_stage_marker(
+                root,
+                f"{profile}:emergence:{source}:{target}",
+                {"summary": emergence_path},
+            )
+
+            transitions = pd.DataFrame(
+                [
+                    {
+                        "profile": profile,
+                        "source": source,
+                        "target": target,
+                        "sample_id": sample_id,
+                        "previous_layer": layer,
+                        "current_layer": layer + 1,
+                        "similarity": 0.9,
+                        "normalized_l1_change": 0.1,
+                        "absolute_mass": 1.0,
+                        "temporal_entropy": 0.5,
+                    }
+                    for sample_id in cohorts[target]["sample_id"]
+                    for layer in range(1, 12)
+                ]
+            )
+            trace_destination = paths.final_trace_cell(profile, source, target)
+
+            def write_trace(directory, frame=transitions):
+                frame.to_csv(
+                    directory / "layer_transition_metrics.csv", index=False
+                )
+
+            publish_generation(trace_destination, write_trace, role="final_trace")
+            _write_stage_marker(
+                root,
+                f"{profile}:trace:{source}:{target}",
+                {"active_pointer": trace_destination / "active.json"},
+            )
+    return cell_markers
+
+
+def test_languages_from_inputs_rejects_unknown_keys():
+    from brspeech_xai.suite_aggregation import _languages_from_inputs
+
+    with pytest.raises(ValueError, match="unsupported language"):
+        _languages_from_inputs({"eng": object(), "fra": object()})
+
+
+@pytest.mark.parametrize("languages", [("por",), ("eng", "por")])
+def test_read_inputs_enumerates_real_selected_cell_matrix(tmp_path, languages):
+    from brspeech_xai.suite_aggregation import _read_inputs
+
+    _write_aggregation_matrix(tmp_path, languages)
+    performance, emergence, samples, reorganization = _read_inputs(
+        tmp_path,
+        ("hubert_base",),
+        {language: object() for language in languages},
+    )
+    expected_cells = {
+        ("hubert_base", layer, source, target)
+        for layer in range(1, 13)
+        for source in languages
+        for target in languages
+    }
+
+    assert set(
+        performance[["profile", "layer", "source", "target"]].itertuples(
+            index=False, name=None
+        )
+    ) == expected_cells
+    assert set(
+        samples[["profile", "layer", "source", "target"]].itertuples(
+            index=False, name=None
+        )
+    ) == expected_cells
+    assert len(performance) == 12 * len(languages) ** 2
+    assert len(emergence) == len(languages) ** 2
+    assert set(reorganization["source"]) == set(languages)
+    assert set(reorganization["target"]) == set(languages)
+
+
+@pytest.mark.parametrize(
+    ("languages", "expected_cells"),
+    [(("por",), 12), (("eng", "por"), 48)],
+)
+def test_aggregate_suite_uses_only_declared_languages(
+    tmp_path, monkeypatch, languages, expected_cells
+):
+    import brspeech_xai.suite_aggregation as aggregation
+
+    configs = {
+        language: _write_language_input(tmp_path, language)
+        for language in languages
+    }
+    inputs = encoder_suite._validate_inputs(configs, languages)
+    observed = {}
+
+    def fake_read_inputs(root, profiles, declared_inputs):
+        observed["languages"] = tuple(declared_inputs)
+        return _partial_aggregation_frames(languages)
+
+    audit_calls = []
+
+    def audit_spy(**kwargs):
+        audit_calls.append((kwargs["source"], kwargs["target"], kwargs["layer"]))
+        output = kwargs["output_dir"] / "audit.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{}", encoding="utf-8")
+        return {"audit": output}
+
+    monkeypatch.setattr(aggregation, "_read_inputs", fake_read_inputs)
+    active = aggregation.aggregate_suite(
+        root=tmp_path / "suite",
+        profiles=("hubert_base",),
+        config_hash="config",
+        upstream_fingerprints=("upstream",),
+        inputs=inputs,
+        classical_audit=True,
+        classical_audit_adapter=audit_spy,
+        plotter=lambda _tables, _directory: [],
+    )
+    generation = resolve_active_generation(
+        active.parent, expected_role="suite_aggregates"
+    )
+    manifest = json.loads(
+        (generation / "aggregate_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert observed["languages"] == languages
+    assert len(pd.read_csv(generation / "layerwise_performance.csv")) == expected_cells
+    assert audit_calls == [(language, language, 12) for language in languages]
+    spectral = pd.read_csv(generation / "spectral_divergence_by_layer.csv")
+    spectral_record = next(
+        record
+        for record in manifest["tables"]
+        if record["name"] == "spectral_divergence_by_layer.csv"
+    )
+    if len(languages) == 1:
+        assert spectral.empty
+        assert (
+            spectral_record["status"]
+            == "not_applicable_less_than_two_languages"
+        )
+    else:
+        assert not spectral.empty
+        assert "status" not in spectral_record
+
+
+def test_read_inputs_fails_closed_when_selected_language_cell_is_missing(
+    tmp_path,
+):
+    from brspeech_xai.suite_aggregation import _read_inputs
+
+    languages = ("por", "zho")
+    cell_markers = _write_aggregation_matrix(tmp_path, languages)
+    missing_cell = ("hubert_base", 7, "por", "zho")
+    cell_markers[missing_cell].unlink()
+    assert len([path for path in cell_markers.values() if path.exists()]) == 47
+
+    with pytest.raises(ValueError, match="invalid upstream marker"):
+        _read_inputs(
+            tmp_path,
+            ("hubert_base",),
+            {language: object() for language in languages},
+        )
+
+
 def test_classical_audit_off_calls_zero_and_on_calls_three_diagonal_layer12(tmp_path):
     from brspeech_xai.suite_aggregation import run_classical_audit
 
+    inputs = {language: object() for language in LANGUAGE_ORDER}
     calls = []
 
     def spy(**kwargs):
@@ -1295,6 +1938,7 @@ def test_classical_audit_off_calls_zero_and_on_calls_three_diagonal_layer12(tmp_
         enabled=False,
         output_dir=tmp_path,
         adapter=spy,
+        inputs=inputs,
     ) == []
     assert calls == []
 
@@ -1302,6 +1946,7 @@ def test_classical_audit_off_calls_zero_and_on_calls_three_diagonal_layer12(tmp_
         enabled=True,
         output_dir=tmp_path,
         adapter=spy,
+        inputs=inputs,
     )
     assert len(records) == len(calls) == 3
     assert {(call["source"], call["target"], call["layer"]) for call in calls} == {
@@ -1322,11 +1967,12 @@ def test_production_suite_aggregate_stage_calls_real_aggregator(tmp_path, monkey
         language: _write_language_input(tmp_path, language)
         for language in LANGUAGE_ORDER
     }
-    inputs = encoder_suite._validate_inputs(configs)
+    inputs = encoder_suite._validate_inputs(configs, LANGUAGE_ORDER)
     _cohorts, _core, _profile, suite = encoder_suite._build_stage_graph(
         output=tmp_path / "suite",
         suite_config=suite_config,
         inputs=inputs,
+        selected_languages=LANGUAGE_ORDER,
         seed=42,
         device="cpu",
         config_hash=encoder_suite._suite_config_hash(
