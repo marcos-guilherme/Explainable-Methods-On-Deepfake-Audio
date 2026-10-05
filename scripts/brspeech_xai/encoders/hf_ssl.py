@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..layerwise import validate_layer_embeddings
 from ..logging_utils import progress
 from ..preprocessing import fix_length, resample_to_16k, to_mono
 
@@ -54,23 +55,55 @@ class HFSSLEmbedder:
             "attn_implementation": attn_implementation}
         self._model = AutoModel.from_pretrained(checkpoint, **model_kwargs).to(device).eval()
         self.dim = int(getattr(self._model.config, "hidden_size", 0))
+        self.n_transformer_layers = int(
+            getattr(self._model.config, "num_hidden_layers", 0)
+        )
 
-    def _to_16k_mono(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def preprocess_waveform(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Canonical waveform used by embeddings, XAI and final trace."""
         wav = to_mono(torch.as_tensor(audio, dtype=torch.float32))
         wav = resample_to_16k(wav, sr)
-        return fix_length(wav, self.num_samples).numpy()
+        wav = fix_length(wav, self.num_samples)
+        return wav.numpy()
+
+    def _to_16k_mono(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Backward-compatible alias for the canonical preprocessing routine."""
+        return self.preprocess_waveform(audio, sr)
 
     def _masked_mean(self, hidden: torch.Tensor,
                      attention_mask: torch.Tensor | None) -> torch.Tensor:
         """Média sobre os frames válidos (ignora padding), por clipe."""
         if attention_mask is None:
             return hidden.mean(dim=1)
-        try:  # comprimento de frames por clipe a partir do mask de entrada (samples)
-            feat_lens = self._model._get_feat_extract_output_lengths(
-                attention_mask.sum(-1)).to(torch.long)
-        except Exception:
-            return hidden.mean(dim=1)
+        if attention_mask.ndim != 2 or attention_mask.shape[0] != hidden.shape[0]:
+            raise ValueError(
+                "attention mask must have shape (batch, input_samples)"
+            )
+        length_converter = getattr(
+            self._model, "_get_feat_extract_output_lengths", None
+        )
+        if not callable(length_converter):
+            raise RuntimeError(
+                "model cannot derive feature lengths from the attention mask"
+            )
+        try:
+            feat_lens = length_converter(attention_mask.sum(-1))
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to derive feature lengths from the attention mask"
+            ) from exc
+        feat_lens = torch.as_tensor(
+            feat_lens, device=hidden.device, dtype=torch.long
+        )
         t = hidden.shape[1]
+        if feat_lens.shape != (hidden.shape[0],):
+            raise ValueError(
+                "model returned invalid feature lengths for masked pooling"
+            )
+        if torch.any(feat_lens <= 0) or torch.any(feat_lens > t):
+            raise ValueError(
+                "model returned feature lengths outside the hidden-state range"
+            )
         idx = torch.arange(t, device=hidden.device)[None, :]
         mask = (idx < feat_lens[:, None]).unsqueeze(-1).to(hidden.dtype)  # (B, T, 1)
         summed = (hidden * mask).sum(dim=1)
@@ -78,10 +111,24 @@ class HFSSLEmbedder:
         return summed / count
 
     @torch.inference_mode()
-    def extract_embeddings(self, audios: list[np.ndarray], srs: list[int],
-                           batch_size: int = 8) -> np.ndarray:
-        """Embedding por clipe: média dos frames da camada ``self.layer`` (H-dim)."""
-        embs: list[np.ndarray] = []
+    def extract_all_layer_embeddings(
+        self,
+        audios: list[np.ndarray],
+        srs: list[int],
+        batch_size: int = 8,
+    ) -> np.ndarray:
+        """Extrai e agrupa todos os hidden states em ``[N, L + 1, H]``."""
+        if len(audios) != len(srs):
+            raise ValueError("audios and srs must have the same length")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if not audios:
+            return np.empty(
+                (0, self.n_transformer_layers + 1, self.dim),
+                dtype=np.float32,
+            )
+
+        batches: list[np.ndarray] = []
         # Batch único (ex.: scoring de 1 clipe na oclusão) não mostra barra, senão o log
         # vira uma enxurrada de "1/1".
         single_batch = len(audios) <= batch_size
@@ -94,11 +141,64 @@ class HFSSLEmbedder:
                                      padding=True, return_attention_mask=True)
             input_values = inputs["input_values"].to(self.device)
             attention_mask = inputs.get("attention_mask")
-            if attention_mask is not None:
+            if attention_mask is None:
+                sample_lengths = torch.tensor(
+                    [len(wav) for wav in wavs],
+                    device=input_values.device,
+                    dtype=torch.long,
+                )
+                sample_positions = torch.arange(
+                    input_values.shape[1], device=input_values.device
+                )
+                attention_mask = (
+                    sample_positions[None, :] < sample_lengths[:, None]
+                ).to(torch.long)
+            else:
                 attention_mask = attention_mask.to(self.device)
             out = self._model(input_values, attention_mask=attention_mask,
                               output_hidden_states=True)
-            hidden = out.hidden_states[self.layer]            # (B, T', H)
-            pooled = self._masked_mean(hidden, attention_mask)
-            embs.append(pooled.cpu().numpy().astype(np.float32))
-        return np.concatenate(embs, axis=0)
+            hidden_states = out.hidden_states
+            expected_states = self.n_transformer_layers + 1
+            if hidden_states is None or len(hidden_states) != expected_states:
+                actual = 0 if hidden_states is None else len(hidden_states)
+                raise ValueError(
+                    f"invalid number of hidden layers: expected "
+                    f"{expected_states}, got {actual}"
+                )
+            pooled_layers = [
+                self._masked_mean(hidden, attention_mask)
+                for hidden in hidden_states
+            ]
+            batch_layers = torch.stack(pooled_layers, dim=1)
+            batch_array = batch_layers.cpu().numpy().astype(np.float32)
+            validate_layer_embeddings(
+                batch_array,
+                expected_samples=len(wavs),
+                expected_layers=self.n_transformer_layers,
+            )
+            if batch_array.shape[2] != self.dim:
+                raise ValueError(
+                    f"inconsistent embedding dimension: expected {self.dim}, "
+                    f"got {batch_array.shape[2]}"
+                )
+            batches.append(batch_array)
+
+        embeddings = np.concatenate(batches, axis=0)
+        validate_layer_embeddings(
+            embeddings,
+            expected_samples=len(audios),
+            expected_layers=self.n_transformer_layers,
+        )
+        return embeddings
+
+    def extract_embeddings(self, audios: list[np.ndarray], srs: list[int],
+                           batch_size: int = 8) -> np.ndarray:
+        """Embedding por clipe da camada ``self.layer``, com semântica Python."""
+        all_layers = self.extract_all_layer_embeddings(audios, srs, batch_size)
+        layer_count = self.n_transformer_layers + 1
+        resolved_layer = self.layer if self.layer >= 0 else layer_count + self.layer
+        if resolved_layer < 0 or resolved_layer >= layer_count:
+            raise IndexError(
+                f"layer index {self.layer} out of range for {layer_count} hidden states"
+            )
+        return all_layers[:, resolved_layer, :]

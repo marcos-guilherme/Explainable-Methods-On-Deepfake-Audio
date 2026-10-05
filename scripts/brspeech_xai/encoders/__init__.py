@@ -35,6 +35,20 @@ class AudioEmbedder(Protocol):
                            batch_size: int = 8) -> np.ndarray: ...
 
 
+@runtime_checkable
+class LayerwiseAudioEmbedder(AudioEmbedder, Protocol):
+    """Encoder capaz de extrair todos os hidden states em um único forward."""
+
+    n_transformer_layers: int
+
+    def extract_all_layer_embeddings(
+        self,
+        audios: list[np.ndarray],
+        srs: list[int],
+        batch_size: int = 8,
+    ) -> np.ndarray: ...
+
+
 def _build_xlsr_fairseq(model_cfg, device: str) -> AudioEmbedder:
     from .xlsr_fairseq import XlsrFairseqEmbedder
     return XlsrFairseqEmbedder(checkpoint=model_cfg.checkpoint,
