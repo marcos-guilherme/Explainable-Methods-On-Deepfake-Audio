@@ -444,6 +444,71 @@ def test_numerical_failures_are_closed(tmp_path, overrides, message):
         _run_fixture(tmp_path, cell_overrides=overrides)
 
 
+def test_small_recomputed_score_drift_is_audited(tmp_path):
+    persisted_score = float(1.0 / (1.0 + np.exp(-0.4)))
+    recomputed_score = persisted_score + 1.1e-6
+    recomputed_logit = float(
+        np.log(recomputed_score / (1.0 - recomputed_score))
+    )
+
+    summary, paths, *_ = _run_fixture(
+        tmp_path,
+        cell_overrides={
+            "relevance_fn": lambda model, processor, wav, device: (
+                np.ones(4),
+                np.full(4, 0.1),
+                recomputed_logit,
+            )
+        },
+    )
+
+    row = summary.iloc[0]
+    generation = resolve_active_xai_generation(
+        paths.layer_xai(
+            row["profile"], int(row["layer"]), row["source"], row["target"]
+        )
+    )
+    samples = pd.read_parquet(generation / "sample_relevance.parquet")
+    validation = json.loads(
+        (generation / "attnlrp_conservation.json").read_text(encoding="utf-8")
+    )
+    assert samples["recomputed_score"].iloc[0] == pytest.approx(recomputed_score)
+    assert samples["score_recompute_absolute_error"].iloc[0] == pytest.approx(
+        1.1e-6
+    )
+    assert validation["max_score_recompute_absolute_error"] == pytest.approx(
+        1.1e-6
+    )
+
+
+def test_recomputed_score_drift_remains_bounded(tmp_path):
+    with pytest.raises(ValueError, match="logit/score divergence"):
+        _run_fixture(
+            tmp_path,
+            cell_overrides={
+                "relevance_fn": lambda model, processor, wav, device: (
+                    np.ones(4),
+                    np.full(4, 0.1),
+                    0.5,
+                )
+            },
+        )
+
+
+def test_recomputed_score_cannot_change_fixed_threshold_prediction(tmp_path):
+    with pytest.raises(ValueError, match="recomputed prediction/threshold divergence"):
+        _run_fixture(
+            tmp_path,
+            cell_overrides={
+                "relevance_fn": lambda model, processor, wav, device: (
+                    np.ones(4),
+                    np.full(4, 0.1),
+                    -0.001,
+                )
+            },
+        )
+
+
 def test_stdft_conservation_fails_closed_on_tampered_relevance_map(tmp_path):
     def tampered_stdft(x_time, r_time, sample_rate):
         return (
