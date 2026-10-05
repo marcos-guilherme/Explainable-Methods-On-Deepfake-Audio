@@ -1,0 +1,34 @@
+run_name: xai-eng-local
+seed: 42
+device: auto
+output_dir: results
+data:
+  dataset_kind: local_manifest
+  # Substitua pelo CSV publicado pela preparação XAI (inglês).
+  manifest_path: /path/to/manifests/eng/xai_samples.csv
+  train_split: train
+  calibration_split: calibration
+  eval_split: test
+  # Quotas canônicas XAI por role/classe (calibration=602).
+  n_train_per_class: 1806
+  n_calibration_per_class: 602
+  n_test_per_class: 603
+adapt:
+  cross_fit: false
+  cv_folds: 5
+  head: logistic
+audio:
+  sample_rate: 16000
+  num_samples: 64600
+model:
+  checkpoint: nii-yamagishilab/mms-300m-anti-deepfake
+  spoof_index: 0
+bands:
+  n_bands: 24
+  f_min: 20.0
+  f_max: 7900.0
+occlusion:
+  per_quadrant: 150
+  n_boot: 1000
+association:
+  top_n: 10

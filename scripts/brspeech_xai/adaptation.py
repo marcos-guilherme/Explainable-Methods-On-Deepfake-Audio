@@ -11,6 +11,8 @@ from typing import Callable
 
 import numpy as np
 
+from .data import SPOOF_LABEL
+
 
 def _make_logistic(seed: int):
     """Regressão logística: P(spoof) calibrado, baseline do estudo."""
@@ -48,18 +50,98 @@ def build_head(head: str = "logistic", seed: int = 42):
     return make_pipeline(StandardScaler(), make_clf(seed))
 
 
+def _validate_fit_inputs(emb_train: np.ndarray, y_train: np.ndarray) -> None:
+    emb = np.asarray(emb_train)
+    y = np.asarray(y_train)
+    if emb.ndim != 2:
+        raise ValueError(f"emb_train deve ser 2D, obteve shape {emb.shape}")
+    if y.ndim != 1:
+        raise ValueError(f"y_train deve ser 1D, obteve shape {y.shape}")
+    if emb.shape[0] != y.shape[0]:
+        raise ValueError(
+            f"emb_train e y_train devem ter o mesmo nº de linhas: "
+            f"{emb.shape[0]} vs {y.shape[0]}"
+        )
+    if emb.shape[0] == 0:
+        raise ValueError("emb_train não pode ser vazio")
+    if not np.all(np.isfinite(emb)):
+        raise ValueError("emb_train deve conter apenas valores finitos")
+    if not np.all(np.isfinite(y)):
+        raise ValueError("y_train deve conter apenas valores finitos")
+    classes = set(np.unique(y).tolist())
+    if not classes.issubset({0, 1}):
+        raise ValueError("y_train deve conter rótulos binários (0=bonafide, 1=spoof)")
+    if classes != {0, 1}:
+        raise ValueError("y_train deve conter as duas classes binárias")
+
+
+def _validate_score_inputs(head, emb: np.ndarray) -> None:
+    emb = np.asarray(emb)
+    if emb.ndim != 2:
+        raise ValueError(f"emb deve ser 2D, obteve shape {emb.shape}")
+    if emb.shape[0] == 0:
+        raise ValueError("emb não pode ser vazio")
+    if not np.all(np.isfinite(emb)):
+        raise ValueError("emb deve conter apenas valores finitos")
+    if not hasattr(head, "predict_proba"):
+        raise ValueError("head deve expor predict_proba após fit")
+
+
+def spoof_column_index(head, spoof_label: int = SPOOF_LABEL) -> int:
+    """Índice da coluna P(spoof) em ``predict_proba``, via ``head.classes_``."""
+    classes = list(getattr(head, "classes_", []))
+    if not classes:
+        raise ValueError("head não treinado ou sem classes_")
+    if spoof_label not in classes:
+        raise ValueError(
+            f"spoof_label={spoof_label} ausente em classes_={classes}"
+        )
+    return classes.index(spoof_label)
+
+
+def fit_head(
+    emb_train: np.ndarray,
+    y_train: np.ndarray,
+    *,
+    head: str = "logistic",
+    seed: int = 42,
+):
+    """Ajusta o head somente em ``(emb_train, y_train)``; não pontua nem calibra."""
+    _validate_fit_inputs(emb_train, y_train)
+    model = build_head(head, seed)
+    model.fit(np.asarray(emb_train), np.asarray(y_train))
+    return model
+
+
+def score_head(head, emb: np.ndarray, *, spoof_label: int = SPOOF_LABEL) -> np.ndarray:
+    """Pontua embeddings com head já ajustado; não refaz fit."""
+    _validate_score_inputs(head, emb)
+    col = spoof_column_index(head, spoof_label)
+    probabilities = np.asarray(head.predict_proba(np.asarray(emb)), dtype=np.float64)
+    n_classes = len(getattr(head, "classes_", []))
+    if probabilities.ndim != 2 or probabilities.shape != (len(emb), n_classes):
+        raise ValueError(
+            "predict_proba retornou shape inválido: "
+            f"{probabilities.shape}, esperado {(len(emb), n_classes)}"
+        )
+    if not np.all(np.isfinite(probabilities)):
+        raise ValueError("predict_proba retornou probabilidades não finitas")
+    if np.any((probabilities < 0.0) | (probabilities > 1.0)):
+        raise ValueError("predict_proba retornou valores fora de [0, 1]")
+    return probabilities[:, col]
+
+
 def make_p_spoof_ad(head, embedder):
     """Fábrica do detector adaptado (D_ad): head treinada + encoder para pontuar áudio bruto.
 
     Returns:
         ``(p_spoof_ad, p_spoof_ad_from_audio)``:
-          - ``p_spoof_ad(emb) -> np.ndarray``: P(spoof) para embeddings (N, D). Classe
-            positiva = spoof (coluna 1).
+          - ``p_spoof_ad(emb) -> np.ndarray``: P(spoof) para embeddings (N, D).
           - ``p_spoof_ad_from_audio(audio, sr) -> float``: P(spoof) de um único áudio bruto
             (usado pela oclusão de D_ad), re-extraindo o embedding pelo encoder.
     """
     def p_spoof_ad(emb: np.ndarray) -> np.ndarray:
-        return head.predict_proba(emb)[:, 1]
+        return score_head(head, emb)
 
     def p_spoof_ad_from_audio(audio: np.ndarray, sr: int) -> float:
         emb = embedder.extract_embeddings([audio], [sr])
@@ -70,7 +152,7 @@ def make_p_spoof_ad(head, embedder):
 
 def crossfit_oof_scores(emb: np.ndarray, y: np.ndarray,
                         make: Callable[[], object], n_splits: int = 5,
-                        seed: int = 42, spoof_label: int = 1) -> np.ndarray:
+                        seed: int = 42, spoof_label: int = SPOOF_LABEL) -> np.ndarray:
     """P(spoof) out-of-fold para cada amostra via StratifiedKFold.
 
     Em cada fold, um head NOVO (via ``make()``) treina nos K−1 folds e pontua o
@@ -80,12 +162,20 @@ def crossfit_oof_scores(emb: np.ndarray, y: np.ndarray,
 
     emb = np.asarray(emb)
     y = np.asarray(y)
+    _validate_fit_inputs(emb, y)
+    if not isinstance(n_splits, (int, np.integer)) or n_splits < 2:
+        raise ValueError("n_splits deve ser inteiro >= 2")
+    minority_count = int(np.min(np.unique(y, return_counts=True)[1]))
+    if n_splits > minority_count:
+        raise ValueError(
+            f"n_splits={n_splits} excede amostras da classe minoritária={minority_count}"
+        )
     oof = np.full(len(y), np.nan, dtype=np.float64)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     for tr, va in skf.split(emb, y):
         head = make()
         head.fit(emb[tr], y[tr])
-        classes = list(head.classes_)
-        col = classes.index(spoof_label) if spoof_label in classes else -1
-        oof[va] = head.predict_proba(emb[va])[:, col]
+        oof[va] = score_head(head, emb[va], spoof_label=spoof_label)
+    if not np.all(np.isfinite(oof)):
+        raise ValueError("cross-fit não produziu scores finitos para todas as amostras")
     return oof
