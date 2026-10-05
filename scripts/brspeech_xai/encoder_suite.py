@@ -1048,10 +1048,13 @@ def _execute_stage(
 
 
 def _freeze_encoder(encoder: object) -> None:
-    eval_fn = getattr(encoder, "eval", None)
-    freeze_fn = getattr(encoder, "requires_grad_", None)
+    model = getattr(encoder, "_model", encoder)
+    eval_fn = getattr(model, "eval", None)
+    freeze_fn = getattr(model, "requires_grad_", None)
     if not callable(eval_fn) or not callable(freeze_fn):
-        raise ValueError("encoder must expose eval() and requires_grad_(False)")
+        raise ValueError(
+            "encoder model must expose eval() and requires_grad_(False)"
+        )
     eval_fn()
     freeze_fn(False)
 

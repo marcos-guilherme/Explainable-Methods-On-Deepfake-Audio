@@ -95,6 +95,16 @@ class _Encoder:
         return self
 
 
+def test_freeze_encoder_supports_production_wrapper() -> None:
+    tracker = {"alive": 0, "max_alive": 0, "frozen": 0}
+    model = _Encoder(tracker)
+    wrapper = SimpleNamespace(_model=model)
+
+    encoder_suite._freeze_encoder(wrapper)
+
+    assert tracker["frozen"] == 1
+
+
 class _Runner:
     def __init__(self, tracker: dict[str, object], fail_kind: str | None = None) -> None:
         self.tracker = tracker
