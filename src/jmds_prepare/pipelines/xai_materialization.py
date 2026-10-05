@@ -115,6 +115,7 @@ def standard_archive_spec(
 class ArchiveMemberRecord:
     member_name: str
     member_size: int
+    volume_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -551,10 +552,39 @@ def _extract_archive_batch(
     archive_runner: SubprocessRunner,
     unrar_executable: str,
 ) -> dict[str, Path]:
+    members_by_ref: dict[str, ArchiveMemberRecord] = {}
+    for ref in refs:
+        members_by_ref[ref] = inventory.resolve_ref(ref)
+
+    if spec.kind == "rar":
+        members_by_volume: dict[Path, list[ArchiveMemberRecord]] = {}
+        for member in members_by_ref.values():
+            if member.volume_path is None:
+                raise ArchiveResolutionError(
+                    f"RAR member is missing its volume path: {member.member_name}"
+                )
+            members_by_volume.setdefault(member.volume_path, []).append(member)
+
+        extracted_by_ref: dict[str, Path] = {}
+        for volume_path, members in members_by_volume.items():
+            member_names = list(
+                dict.fromkeys(member.member_name for member in members)
+            )
+            extracted_members = _extract_rar_members(
+                volume_path,
+                member_names=member_names,
+                destination_dir=staging_root,
+                archive_runner=archive_runner,
+                executable=unrar_executable,
+            )
+            for ref, member in members_by_ref.items():
+                if member.volume_path == volume_path:
+                    extracted_by_ref[ref] = extracted_members[member.member_name]
+        return extracted_by_ref
+
     member_names: list[str] = []
     ref_by_member: dict[str, str] = {}
-    for ref in refs:
-        member = inventory.resolve_ref(ref)
+    for ref, member in members_by_ref.items():
         member_names.append(member.member_name)
         ref_by_member[member.member_name] = ref
 
@@ -570,14 +600,6 @@ def _extract_archive_batch(
             spec.archive_path,
             unique_members,
             staging_root,
-        )
-    elif spec.kind == "rar":
-        extracted_members = _extract_rar_members(
-            spec,
-            member_names=unique_members,
-            destination_dir=staging_root,
-            archive_runner=archive_runner,
-            executable=unrar_executable,
         )
     else:
         raise ValueError(f"Unsupported archive kind: {spec.kind}")
@@ -779,7 +801,7 @@ def _extract_zip_members_batch(
 
 
 def _extract_rar_members(
-    spec: ArchiveSpec,
+    volume_path: Path,
     *,
     member_names: Sequence[str],
     destination_dir: Path,
@@ -788,7 +810,10 @@ def _extract_rar_members(
 ) -> dict[str, Path]:
     destination_dir.mkdir(parents=True, exist_ok=True)
     destinations = {
-        member_name: _staging_member_path(destination_dir, member_name)
+        member_name: _staging_member_path(
+            destination_dir,
+            _normalize_rar_member_path(member_name),
+        )
         for member_name in member_names
     }
     missing = [
@@ -821,14 +846,14 @@ def _extract_rar_members(
                 "-o-",
                 "-p-",
                 "-idq",
-                str(spec.archive_path),
+                str(volume_path),
                 f"@{list_path}",
                 _unrar_destination_path(destination_dir),
             ],
         )
         if completed.returncode != 0:
             raise MaterializationError(
-                f"Selective RAR extraction failed for {spec.archive_path}: "
+                f"Selective RAR extraction failed for {volume_path}: "
                 f"{completed.stderr or completed.stdout}"
             )
     finally:
@@ -849,29 +874,45 @@ def _inventory_rar(
     runner: SubprocessRunner,
     executable: str,
 ) -> ArchiveInventory:
-    completed = _run_unrar(
-        runner,
-        [executable, "lb", "-p-", str(spec.archive_path)],
-    )
-    if completed.returncode != 0:
-        raise PreflightError(
-            f"Archive listing failed for {spec.archive_path.name}: "
-            f"{completed.stderr or completed.stdout}"
-        )
-    members_by_name: dict[str, list[str]] = {}
+    members_by_ref: dict[str, list[tuple[str, Path]]] = {}
     unsafe: list[str] = []
-    for line in completed.stdout.splitlines():
-        member_name = line.strip()
-        if not member_name:
-            continue
-        if _is_unsafe_member_path(member_name):
-            unsafe.append(member_name)
-            continue
-        members_by_name.setdefault(member_name, []).append(member_name)
-    return _finalize_inventory(
-        members_by_name,
-        unsafe,
-        size_getter=lambda _: 0,
+    for volume_path in spec.volume_paths:
+        completed = _run_unrar(
+            runner,
+            [executable, "lb", "-p-", str(volume_path)],
+        )
+        if completed.returncode != 0:
+            raise PreflightError(
+                f"Archive listing failed for {volume_path.name}: "
+                f"{completed.stderr or completed.stdout}"
+            )
+        for line in completed.stdout.splitlines():
+            member_name = line.strip()
+            if not member_name:
+                continue
+            normalized_ref = _normalize_rar_member_path(member_name)
+            if _is_unsafe_member_path(normalized_ref):
+                unsafe.append(member_name)
+                continue
+            members_by_ref.setdefault(normalized_ref, []).append(
+                (member_name, volume_path)
+            )
+    duplicate_refs = tuple(
+        sorted(ref for ref, members in members_by_ref.items() if len(members) > 1)
+    )
+    records = {
+        ref: ArchiveMemberRecord(
+            member_name=members[0][0],
+            member_size=0,
+            volume_path=members[0][1],
+        )
+        for ref, members in members_by_ref.items()
+        if len(members) == 1
+    }
+    return ArchiveInventory(
+        members_by_ref=records,
+        duplicate_refs=duplicate_refs,
+        rejected_unsafe_members=tuple(unsafe),
     )
 
 
@@ -904,6 +945,10 @@ def _unrar_destination_path(destination_dir: Path) -> str:
     if os.name == "nt" and not text.endswith("\\"):
         return f"{text}\\"
     return text
+
+
+def _normalize_rar_member_path(member_name: str) -> str:
+    return member_name.replace("\\", "/")
 
 
 def _staging_member_path(staging_root: Path, member_name: str) -> Path:

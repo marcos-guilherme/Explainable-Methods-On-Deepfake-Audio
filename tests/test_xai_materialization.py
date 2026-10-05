@@ -164,17 +164,20 @@ class _FakeRunner:
         self,
         *,
         list_output: str = "",
+        list_outputs: dict[str, str] | None = None,
         returncode: int = 0,
         extract_bytes: bytes = b"",
         member_bytes: dict[str, bytes] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self._list_output = list_output
+        self._list_outputs = list_outputs
         self._returncode = returncode
         self._extract_bytes = extract_bytes
         self._member_bytes = member_bytes or {}
         self.extracted_paths: list[Path] = []
         self.listed_members: list[str] = []
+        self.listed_members_by_archive: dict[Path, list[str]] = {}
 
     def __call__(
         self,
@@ -203,18 +206,31 @@ class _FakeRunner:
     ):
         self.calls.append(list(args))
         if len(args) >= 2 and args[1] == "lb":
-            return self._result(check=check, args=args)
+            archive_path = Path(args[-1])
+            if self._list_outputs is None:
+                stdout = (
+                    self._list_output
+                    if archive_path.name.lower().endswith(".part1.rar")
+                    else ""
+                )
+            else:
+                stdout = self._list_outputs.get(archive_path.name, "")
+            return self._result(check=check, args=args, stdout=stdout)
         if len(args) >= 2 and args[1] == "x":
             destination_dir = Path(str(args[-1]).rstrip("\\/"))
+            archive_path = Path(args[args.index("-idq") + 1])
             list_arg = next(arg for arg in args if arg.startswith("@"))
             list_path = Path(list_arg[1:])
-            self.listed_members = [
+            listed_members = [
                 line.strip()
                 for line in list_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            for member_name in self.listed_members:
-                destination = destination_dir / member_name
+            self.listed_members.extend(listed_members)
+            self.listed_members_by_archive[archive_path] = listed_members
+            for member_name in listed_members:
+                normalized_member_name = member_name.replace("\\", "/")
+                destination = destination_dir.joinpath(*normalized_member_name.split("/"))
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 payload = self._member_bytes.get(member_name, self._extract_bytes)
                 destination.write_bytes(payload)
@@ -228,14 +244,15 @@ class _FakeRunner:
         *,
         check: bool = False,
         args: list[str] | None = None,
+        stdout: str | None = None,
     ):
         class _Result:
-            def __init__(self, runner: _FakeRunner) -> None:
+            def __init__(self, runner: _FakeRunner, stdout: str | None) -> None:
                 self.returncode = runner._returncode
-                self.stdout = runner._list_output
+                self.stdout = runner._list_output if stdout is None else stdout
                 self.stderr = ""
 
-        result = _Result(self)
+        result = _Result(self, stdout)
         if check and result.returncode != 0:
             raise RuntimeError(f"command failed: {args}")
         return result
@@ -534,9 +551,12 @@ def test_rar_batch_extracts_two_members_with_one_list_and_one_extract(
     assert len(samples) == 2
     list_calls = [call for call in runner.calls if len(call) >= 2 and call[1] == "lb"]
     extract_calls = [call for call in runner.calls if len(call) >= 2 and call[1] == "x"]
-    assert len(list_calls) == 1
+    assert len(list_calls) == 5
     assert len(extract_calls) == 1
-    assert list_calls[0] == ["UnRAR", "lb", "-p-", str(volumes[0])]
+    assert list_calls == [
+        ["UnRAR", "lb", "-p-", str(volume)]
+        for volume in volumes
+    ]
     assert extract_calls[0][0] == "UnRAR"
     assert extract_calls[0][1] == "x"
     assert "-o-" in extract_calls[0]
@@ -554,6 +574,173 @@ def test_rar_batch_extracts_two_members_with_one_list_and_one_extract(
         path.relative_to(staging_root).as_posix() for path in runner.extracted_paths
     ) == ["train/clips/001.wav", "train/clips/002.wav"]
     assert not list(layout.staging_dir.glob("run-*"))
+
+
+def test_rar_lists_all_volumes_once_and_extracts_only_required_volumes(
+    tmp_path: Path,
+):
+    volumes = _write_coraa_train_volumes(tmp_path / "train_dividido")
+    first_wav = tmp_path / "first.wav"
+    second_wav = tmp_path / "second.wav"
+    ignored_wav = tmp_path / "ignored.wav"
+    _write_wav(first_wav, sample_rate=8_000, value=0.15)
+    _write_wav(second_wav, sample_rate=8_000, value=0.20)
+    _write_wav(ignored_wav, sample_rate=8_000, value=0.25)
+    first_raw = r"train\CORAL\part1.wav"
+    second_raw = r"train\CORAL\part2.wav"
+    ignored_raw = r"train\CORAL\ignored.wav"
+    runner = _FakeRunner(
+        list_outputs={
+            volumes[0].name: f"{first_raw}\n",
+            volumes[1].name: f"{second_raw}\n",
+            volumes[2].name: f"{ignored_raw}\n",
+        },
+        member_bytes={
+            first_raw: first_wav.read_bytes(),
+            second_raw: second_wav.read_bytes(),
+            ignored_raw: ignored_wav.read_bytes(),
+        },
+    )
+    spec = ArchiveSpec("CORAA", "train", "rar", volumes)
+    layout = XaiLayout(tmp_path / "out")
+
+    def archive_candidate(candidate_id: str, original_ref: str, rank: int):
+        return _selected(
+            SelectionCandidate(
+                candidate_id=candidate_id,
+                language="por",
+                label=0,
+                corpus="CORAA",
+                native_split="train",
+                original_ref=original_ref,
+                local_source_path=None,
+                speaker_id=None,
+                group_id=None,
+                attack_id=None,
+                metadata_source="fixture",
+                materialization_mode="extract_archive",
+            ),
+            rank=rank,
+        )
+
+    selected = [
+        archive_candidate("part1", "train/CORAL/part1.wav", 0),
+        archive_candidate("part2", "train/CORAL/part2.wav", 1),
+    ]
+
+    samples = materialize_selected(
+        selected,
+        layout,
+        {("CORAA", "train"): spec},
+        archive_runner=runner,
+    )
+
+    list_calls = [call for call in runner.calls if call[1] == "lb"]
+    extract_calls = [call for call in runner.calls if call[1] == "x"]
+    assert [Path(call[-1]) for call in list_calls] == list(volumes)
+    assert [Path(call[call.index("-idq") + 1]) for call in extract_calls] == [
+        volumes[0],
+        volumes[1],
+    ]
+    assert runner.listed_members_by_archive == {
+        volumes[0]: [first_raw],
+        volumes[1]: [second_raw],
+    }
+    assert {sample.original_ref: sample.sha256_source for sample in samples} == {
+        "train/CORAL/part1.wav": sha256_file(first_wav),
+        "train/CORAL/part2.wav": sha256_file(second_wav),
+    }
+    assert all(Path(sample.processed_path).is_file() for sample in samples)
+    assert not list(layout.staging_dir.glob("run-*"))
+
+
+def test_rar_backslash_listing_resolves_posix_ref_and_extracts_raw_member(
+    tmp_path: Path,
+):
+    volumes = _write_coraa_train_volumes(tmp_path / "train_dividido")
+    source_wav = tmp_path / "source.wav"
+    _write_wav(source_wav, sample_rate=8_000, value=0.15)
+    raw_member_name = r"train\CORAL\1037_CO_bfamdl10.wav"
+    normalized_ref = "train/CORAL/1037_CO_bfamdl10.wav"
+    runner = _FakeRunner(
+        list_output=f"{raw_member_name}\n",
+        member_bytes={raw_member_name: source_wav.read_bytes()},
+    )
+    spec = ArchiveSpec("CORAA", "train", "rar", volumes)
+    layout = XaiLayout(tmp_path / "out")
+    selected = [
+        _selected(
+            SelectionCandidate(
+                candidate_id="1037_CO_bfamdl10",
+                language="por",
+                label=0,
+                corpus="CORAA",
+                native_split="train",
+                original_ref=normalized_ref,
+                local_source_path=None,
+                speaker_id=None,
+                group_id=None,
+                attack_id=None,
+                metadata_source="fixture",
+                materialization_mode="extract_archive",
+            )
+        )
+    ]
+
+    samples = materialize_selected(
+        selected,
+        layout,
+        {("CORAA", "train"): spec},
+        archive_runner=runner,
+    )
+
+    assert runner.listed_members == [raw_member_name]
+    extract_call = next(call for call in runner.calls if call[1] == "x")
+    staging_root = Path(str(extract_call[-1]).rstrip("\\/"))
+    assert [
+        path.relative_to(staging_root).as_posix() for path in runner.extracted_paths
+    ] == [normalized_ref]
+    assert len(samples) == 1
+    assert Path(samples[0].processed_path).is_file()
+
+
+@pytest.mark.parametrize(
+    "unsafe_member",
+    [
+        r"..\escape.wav",
+        r"C:\escape.wav",
+        r"\absolute\escape.wav",
+    ],
+)
+def test_rar_inventory_rejects_unsafe_backslash_members_after_normalization(
+    tmp_path: Path,
+    unsafe_member: str,
+):
+    volumes = _write_coraa_train_volumes(tmp_path / "train_dividido")
+    runner = _FakeRunner(list_outputs={volumes[1].name: f"{unsafe_member}\n"})
+    spec = ArchiveSpec("CORAA", "train", "rar", volumes)
+
+    inventory = inventory_archive_spec(spec, archive_runner=runner)
+
+    assert unsafe_member in inventory.rejected_unsafe_members
+    assert not inventory.members_by_ref
+
+
+def test_rar_inventory_detects_duplicates_after_path_normalization(tmp_path: Path):
+    volumes = _write_coraa_train_volumes(tmp_path / "train_dividido")
+    runner = _FakeRunner(
+        list_outputs={
+            volumes[0].name: "train/CORAL/sample.wav\n",
+            volumes[1].name: "train\\CORAL\\sample.wav\n",
+        }
+    )
+    spec = ArchiveSpec("CORAA", "train", "rar", volumes)
+
+    inventory = inventory_archive_spec(spec, archive_runner=runner)
+
+    assert inventory.duplicate_refs == ("train/CORAL/sample.wav",)
+    with pytest.raises(ArchiveResolutionError, match="Duplicate archive member"):
+        inventory.resolve_ref("train/CORAL/sample.wav")
 
 
 def test_rar_missing_sibling_volume_fails_before_runner(tmp_path: Path):
