@@ -69,3 +69,60 @@ def test_config_hash_is_stable_and_sensitive(tmp_path):
     c = load_config(cfg_file, overrides=["seed=2"])
     assert a.config_hash() == b.config_hash()
     assert a.config_hash() != c.config_hash()
+
+
+def test_legacy_yaml_loads_without_new_fields(tmp_path):
+    yaml_text = """
+run_name: default
+seed: 42
+device: cpu
+data:
+  dataset_id: AKCIT-Deepfake/BRSpeech-DF
+  loader: auto
+  train_split: train
+  eval_split: test
+  n_train_per_class: 1500
+  n_test_per_class: 1500
+"""
+    cfg_file = tmp_path / "legacy.yaml"
+    cfg_file.write_text(yaml_text)
+    cfg = load_config(cfg_file)
+    assert cfg.data.dataset_kind == "hf_brspeech"
+    assert cfg.data.manifest_path == ""
+    assert cfg.data.dataset_id == "AKCIT-Deepfake/BRSpeech-DF"
+    assert cfg.data.loader == "auto"
+    assert cfg.data.calibration_split == ""
+    assert cfg.data.n_calibration_per_class == 0
+
+
+def test_local_manifest_yaml_loads(tmp_path):
+    yaml_text = """
+run_name: eng-local
+seed: 42
+device: cpu
+data:
+  dataset_kind: local_manifest
+  manifest_path: /path/to/manifests/eng/xai_samples.csv
+  train_split: train
+  eval_split: test
+  n_train_per_class: 500
+  n_test_per_class: 500
+"""
+    cfg_file = tmp_path / "local.yaml"
+    cfg_file.write_text(yaml_text)
+    cfg = load_config(cfg_file)
+    assert cfg.data.dataset_kind == "local_manifest"
+    assert cfg.data.manifest_path == "/path/to/manifests/eng/xai_samples.csv"
+    assert cfg.data.n_train_per_class == 500
+
+
+def test_config_hash_includes_dataset_kind_and_manifest(tmp_path):
+    base = tmp_path / "base.yaml"
+    base.write_text("run_name: r\nseed: 1\ndevice: cpu\n")
+    local = tmp_path / "local.yaml"
+    local.write_text(
+        "run_name: r\nseed: 1\ndevice: cpu\n"
+        "data:\n  dataset_kind: local_manifest\n"
+        "  manifest_path: /tmp/xai_samples.csv\n"
+    )
+    assert load_config(base).config_hash() != load_config(local).config_hash()

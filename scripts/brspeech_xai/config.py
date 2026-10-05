@@ -3,20 +3,78 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .xai_registry import get_encoder_spec
+
+
+@dataclass(frozen=True)
+class LayerwiseXaiConfig:
+    """Validated budgets and profiles for the layer-wise encoder suite."""
+
+    profiles: tuple[str, ...] = (
+        "hubert_base",
+        "wavlm_base_plus",
+        "wav2vec2_base",
+    )
+    xai_per_class: int = 25
+    stdft_examples_per_class: int = 2
+    bootstrap_samples: int = 1000
+    conservation_tolerance: float = 1e-3
+    classical_audit: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.profiles, tuple)
+            or not self.profiles
+            or any(not isinstance(profile, str) or not profile for profile in self.profiles)
+        ):
+            raise ValueError("profiles must be a non-empty tuple of profile identifiers")
+        if len(set(self.profiles)) != len(self.profiles):
+            raise ValueError("profiles must be unique")
+        for profile in self.profiles:
+            get_encoder_spec(profile)
+        for name in ("xai_per_class", "bootstrap_samples"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.stdft_examples_per_class, bool)
+            or not isinstance(self.stdft_examples_per_class, int)
+            or self.stdft_examples_per_class <= 0
+            or self.stdft_examples_per_class > self.xai_per_class
+        ):
+            raise ValueError(
+                "stdft_examples_per_class must be positive and no greater than "
+                "xai_per_class"
+            )
+        if (
+            isinstance(self.conservation_tolerance, bool)
+            or not isinstance(self.conservation_tolerance, (int, float))
+            or not math.isfinite(float(self.conservation_tolerance))
+            or self.conservation_tolerance <= 0
+        ):
+            raise ValueError("conservation_tolerance must be finite and positive")
+        if type(self.classical_audit) is not bool:
+            raise TypeError("classical_audit must be a strict boolean")
+
 
 @dataclass
 class DataConfig:
     dataset_id: str = "AKCIT-Deepfake/BRSpeech-DF"
+    dataset_kind: str = "hf_brspeech"  # hf_brspeech | local_manifest
+    manifest_path: str = ""          # CSV canônico xai_samples (local_manifest)
     loader: str = "auto"            # auto | stream | download
     train_split: str = "train"
     eval_split: str = "test"
+    calibration_split: str = ""       # role/split-fonte explícito; vazio = calibração in-sample no train
     n_train_per_class: int = 1500
+    n_calibration_per_class: int = 0  # 0 = sem coleta explícita de calibration
     n_test_per_class: int = 1500
     # Cross-fit: pool único de análise (usado quando adapt.cross_fit=True).
     analysis_split: str = "train"   # split-fonte do pool (train tem reais de sobra)

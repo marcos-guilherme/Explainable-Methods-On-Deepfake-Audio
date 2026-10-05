@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
+import shutil
 from pathlib import Path
 
 import matplotlib
@@ -59,6 +61,59 @@ import yaml  # noqa: E402
 
 ANALYSIS_DETECTOR = "ad"  # comparação sempre no detector adaptado (ver docstring)
 AGGREGATE_DIR = "_aggregate"
+
+
+def _active_suite_aggregates(root: Path) -> Path | None:
+    """Resolve the validated Task 10 generation when the new suite is present."""
+    destination = root / "aggregates"
+    if not (destination / "active.json").is_file():
+        return None
+    try:
+        from brspeech_xai.layerwise_paths import resolve_active_generation
+
+        generation = resolve_active_generation(
+            destination, expected_role="suite_aggregates"
+        )
+        manifest = json.loads(
+            (generation / "aggregate_manifest.json").read_text(encoding="utf-8")
+        )
+        if (
+            manifest.get("schema_version") != 1
+            or not all((generation / name).is_file() for name in (
+                "layerwise_performance.csv",
+                "emergence_layers.csv",
+                "language_shift_by_layer.csv",
+                "encoder_relevance_agreement.csv",
+                "spectral_divergence_by_layer.csv",
+                "final_decision_reorganization.csv",
+            ))
+        ):
+            raise ValueError("incomplete aggregate generation")
+        return generation
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid Task 10 aggregate at {destination}") from exc
+
+
+def consume_suite_aggregates(root: Path, out_dir: Path) -> None:
+    """Prefer the Task 10 aggregate while preserving the legacy CLI path."""
+    generation = _active_suite_aggregates(root)
+    if generation is None:
+        raise ValueError(f"no active Task 10 aggregate under {root}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for source in generation.iterdir():
+        if source.is_file() and source.suffix.lower() in {".csv", ".json", ".png", ".pdf"}:
+            shutil.copy2(source, out_dir / source.name)
+    rows = _read_csv(generation / "layerwise_performance.csv")
+    final_diagonal = [
+        row for row in rows
+        if int(row["layer"]) == 12 and row["source"] == row["target"]
+    ]
+    grouped: dict[str, list[float]] = {}
+    for row in final_diagonal:
+        grouped.setdefault(row["profile"], []).append(float(row["auc"]))
+    print("Task 10 aggregate (mean diagonal layer-12 ROC-AUC):")
+    for profile in sorted(grouped):
+        print(f"  {profile:<22}{np.mean(grouped[profile]):.4f}")
 
 
 def _read_csv(path: Path) -> list[dict]:
@@ -681,6 +736,7 @@ def main(argv=None) -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--run-dirs", nargs="+", help="diretórios de run (um por encoder)")
     src.add_argument("--results-root", help="varre results/ e pega a run mais recente por encoder")
+    src.add_argument("--suite-root", help="raiz da nova suíte layer-wise (Task 10)")
     ap.add_argument("--out", default=None,
                     help="pasta de saída (default: <results-root>/_aggregate ou results/_aggregate)")
     ap.add_argument("--exclude", nargs="*", default=["mms-300m"],
@@ -690,6 +746,23 @@ def main(argv=None) -> int:
                     help="labels a excluir só das figuras peer (EER/H1/H2/convergência/"
                          "concordância), mantidos nas figuras DFT-LRP. Default: vazio.")
     args = ap.parse_args(argv)
+    preferred_root = Path(args.suite_root or args.results_root) if (
+        args.suite_root or args.results_root
+    ) else None
+    active_suite = (
+        _active_suite_aggregates(preferred_root)
+        if preferred_root is not None
+        else None
+    )
+    if active_suite is not None:
+        default_out = preferred_root / AGGREGATE_DIR
+        out_dir = Path(args.out) if args.out else default_out
+        consume_suite_aggregates(preferred_root, out_dir)
+        print(f"\nsalvo em: {out_dir}")
+        return 0
+    if args.suite_root:
+        print("nenhum manifesto agregado Task 10 válido encontrado.")
+        return 1
     if args.results_root:
         run_dirs = discover_runs(args.results_root)
         default_out = Path(args.results_root) / AGGREGATE_DIR
