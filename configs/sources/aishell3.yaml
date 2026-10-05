@@ -1,0 +1,37 @@
+# AISHELL-3 (OpenSLR resource SLR93). Original archive only; never extracted
+# or modified in place by the acquisition step.
+schema_version: 1
+dataset:
+  id: aishell3
+  name: AISHELL-3
+  version: SLR93
+  # OpenSLR publishes a single unversioned archive; no revision identifier.
+  revision: null
+  official_page: https://openslr.org/93/
+  distribution_page: https://www.openslr.org/resources/93/
+  license:
+    id: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+    source: https://openslr.org/93/
+  usage_policy:
+    preserve_originals: true
+    commercial_use_permitted: true
+    adapted_material_sharing_permitted: true
+    statement: >-
+      Apache-2.0 as declared on the official OpenSLR page. Keep the original
+      archive byte-identical; any redistribution must carry the licence and
+      attribution notices.
+artifacts:
+  - name: data_aishell3.tgz
+    remote_path: data_aishell3.tgz
+    url: https://www.openslr.org/resources/93/data_aishell3.tgz
+    # Official Content-Length (server advertises Accept-Ranges: bytes).
+    size: 19057141777
+    checksum:
+      algorithm: sha256
+      value: null
+      source: null
+      note: >-
+        No official checksum is published by OpenSLR for this archive. The
+        receipt records the SHA-256 observed after the exact-size check; it is
+        an observation, not an official checksum.

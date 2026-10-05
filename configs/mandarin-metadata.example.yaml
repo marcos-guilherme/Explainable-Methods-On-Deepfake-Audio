@@ -1,0 +1,4 @@
+# Portable template for Mandarin metadata extraction.
+jmds_root: "E:/path/to/JMDS_open_v2_public/JMDS_open_v2_public"
+aishell_archive: "E:/path/to/sources/aishell3/data_aishell3.tgz"
+output_root: "E:/path/to/mandarin_preparation"

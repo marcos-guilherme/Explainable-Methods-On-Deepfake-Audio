@@ -1,0 +1,5 @@
+spk_id,utt_id,gender,codec,attack_id,label,native,language,dataset
+T_0001,T_0000000001,F,-,A01,generated,yes,por,MLAAD
+T_0002,T_0000000002,M,-,A02,generated,yes,por,MLAAD
+T_0003,T_0000000003,F,-,-,pristine,yes,por,CORAA
+T_0004,T_0000000004,M,-,A01,generated,yes,eng,ASVspoof2024
