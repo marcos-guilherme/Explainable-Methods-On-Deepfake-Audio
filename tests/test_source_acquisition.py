@@ -961,4 +961,3 @@ def test_acquisition_layer_does_not_load_audio_profiles_or_english_cli():
     assert json.loads(completed.stdout) == []
     assert paths.existing_ancestor.__module__ == "jmds_prepare.core.paths"
     assert estimates.existing_ancestor(Path(__file__)) == Path(__file__).resolve()
-

@@ -245,4 +245,3 @@ def test_rejects_wav_speaker_folder_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match="speaker folder"):
         read_aishell3_metadata(archive, profile=MANDARIN_PROFILE)
-

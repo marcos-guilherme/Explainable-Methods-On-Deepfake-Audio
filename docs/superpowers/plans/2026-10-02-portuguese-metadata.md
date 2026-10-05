@@ -629,4 +629,3 @@ all six artifacts and no temporary files left behind.
 
 Run `git status --short` and review only; do not stage, commit, delete the two
 known English partial archives or publish any CORAA-derived artifact.
-

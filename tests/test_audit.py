@@ -431,4 +431,3 @@ def test_audit_accepts_only_processed_canonical_manifest(tmp_path):
 
     with pytest.raises(ValueError, match="processed canonical schema"):
         audit_manifest(frame, tmp_path / "audit")
-
