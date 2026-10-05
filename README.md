@@ -300,3 +300,143 @@ Real-data execution is opt-in: copy `configs/mandarin-metadata.example.yaml`,
 set `jmds_root`, `aishell_archive`, and `output_root` to paths outside the
 English `data_root`, then run the command above. Local configs and derived
 outputs are gitignored.
+
+## XAI dataset preparation (English, Portuguese, Mandarin)
+
+Standalone CLI (not wired into `jmds-prepare`):
+
+```powershell
+python -m jmds_prepare.xai_dataset eng `
+  --output-root E:\xai_out\english `
+  --seed 42 `
+  --english-manifest E:\english_preparation\manifests\english_processed.csv
+
+python -m jmds_prepare.xai_dataset por `
+  --output-root E:\xai_out\portuguese `
+  --seed 42 `
+  --pristine-manifest E:\portuguese_preparation\manifests\coraa_metadata.csv `
+  --generated-manifest E:\portuguese_preparation\manifests\jmds_mlaad_generated_metadata.csv `
+  --coraa-train-rar-part1 E:\sources\coraa\train.part1.rar `
+  --coraa-dev-zip E:\sources\coraa\dev.zip `
+  --coraa-test-zip E:\sources\coraa\test.zip
+
+python -m jmds_prepare.xai_dataset zho `
+  --output-root E:\xai_out\mandarin `
+  --seed 42 `
+  --pristine-manifest E:\mandarin_preparation\manifests\aishell3_metadata.csv `
+  --generated-manifest E:\mandarin_preparation\manifests\jmds_add_generated_metadata.csv `
+  --aishell-archive E:\sources\aishell3\data_aishell3.tgz
+```
+
+Each run publishes four content-idempotent artifacts under `output_root`:
+`manifests/<language>/xai_samples.csv` and three JSON reports under
+`reports/<language>/`. English reuses existing processed WAVs; Portuguese and
+Mandarin materialize only the selected subset into `data/<language>/`.
+
+Documented limitations in `provenance.json`:
+
+- **English**: paired selection by speaker (`paired_by_speaker`), but
+  `paired_utterances=false`.
+- **Portuguese/Mandarin**: `paired_samples=false`, class–corpus confound and
+  external validation under corpus shift.
+- **CORAA**: local-only, no redistribution (`CC-BY-NC-ND-4.0`).
+
+After editing the three local YAML templates so that `manifest_path` points to
+the published manifests, run the source→target matrix:
+
+```powershell
+$env:PYTHONPATH = "scripts"
+python -m brspeech_xai.matrix `
+  --eng-config scripts/configs/xai-eng-local.yaml `
+  --por-config scripts/configs/xai-por-local.yaml `
+  --zho-config scripts/configs/xai-zho-local.yaml `
+  --output E:\xai_out\matrix-run `
+  --with-xai
+```
+
+The command extracts each language/role embedding once, fits exactly one head
+per source language, calibrates its threshold only on that source's
+`calibration` role, and evaluates all nine source→target cells. Outputs are
+separated into `embeddings/`, `models/`, `cells/`, `matrix/`, `xai/` and
+`shift/`. Full H1/H2/H3 analysis runs only under `xai/<language>/`; the six
+off-diagonal cells under `shift/` use H1 association over the complete target
+test set and a reduced H2 occlusion budget, with no confirmatory H3. They are
+explicitly labelled as external validation under corpus shift, not evidence of
+universal deepfake explanations. Use `--reduced-per-quadrant N` to change the
+off-diagonal H2 budget, `--xai-plots` to render figures, and `--force` to
+rebuild embedding caches.
+
+See [docs/data-framework.md](docs/data-framework.md) for architecture details.
+
+## Layer-wise trilingual encoder XAI
+
+The VM suite studies where the detector decision emerges by layer and how it
+changes across English, Portuguese and Mandarin. It evaluates all 12
+Transformer blocks of HuBERT Base, WavLM Base+ and Wav2Vec2 Base. The primary
+explanation path is AttnLRP → DFT-LRP/STDFT-LRP; the existing H1/H2/H3 analysis
+is an optional layer-12 diagonal audit and is disabled by default.
+
+The Linux VM needs Python 3.11, project dependencies, a CUDA-compatible
+PyTorch/Transformers environment, and mounts for the repository/configs,
+manifest files, every WAV referenced by `processed_path`, and the persistent
+output directory. All three configs must declare a separate `calibration`
+split and a positive per-class calibration quota; in-sample calibration is
+forbidden.
+
+Run the mandatory preflight first:
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles hubert_base wavlm_base_plus wav2vec2_base \
+  --output /mnt/results/layerwise-suite \
+  --xai-per-class 25 \
+  --dry-run
+```
+
+Inspect `execution_plan.json` for config/manifest hashes, disk-space formula,
+108 probes, 324 cells and separate backprop estimates. Then run a one-profile
+pilot by removing `--dry-run`, changing the output directory, and using:
+
+```bash
+--profiles hubert_base --xai-per-class 2
+```
+
+Verify AttnLRP/DFT/STDFT conservation, immutable-generation integrity, fixed
+cohort IDs and all aggregate tables before the complete run. In the
+one-profile pilot, `encoder_relevance_agreement.csv` is intentionally empty
+with status `not_applicable_less_than_two_profiles`, and its plot is skipped;
+the other five tables remain required. The complete command is:
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles hubert_base wavlm_base_plus wav2vec2_base \
+  --output /mnt/results/layerwise-suite \
+  --xai-per-class 25
+```
+
+Runs resume automatically from valid stage markers. Check `run_status.json`;
+use `--force` only to recompute the complete DAG. Outputs include embeddings,
+layer probes, 3×3 source→target cells, XAI/trace generations and suite
+aggregates. Add `--classical-audit` only when the extra H1/H2/H3 cost is
+intended.
+
+Off-diagonal results are external validation under corpus shift, not causal
+language effects. Emergence intervals use stratified percentile bootstrap;
+encoder-agreement and reorganization summaries use normal 95% intervals of
+the mean. Spectral language shift compares each off-diagonal target's mean
+absolute-normalized band distribution with the same source/profile/layer/class
+diagonal, reporting Jensen-Shannon and cosine distances without an estimated
+confidence interval. Embeddings, XAI and final trace use the same configured
+mono/resample/fixed-length waveform routine; STDFT artifacts carry their own
+time↔time-frequency conservation certificate.
+
+The deterministic local smoke does not demonstrate real checkpoint, CUDA or
+audio compatibility. No local real-HuggingFace/GPU success is claimed; the VM
+pilot remains the next validation step. Operational details are in
+[scripts/README.md](scripts/README.md#suíte-layer-wise-trilíngue-na-vm).
