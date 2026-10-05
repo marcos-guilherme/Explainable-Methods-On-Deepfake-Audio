@@ -219,11 +219,29 @@ def _optional_text(value: str) -> str | None:
     return text or None
 
 
+def _find_bundle_root(manifest_dir: Path) -> Path:
+    for candidate in (manifest_dir, *manifest_dir.parents):
+        if (candidate / "bundle_receipt.json").is_file():
+            return candidate
+    raise ValueError(
+        f"bundle_receipt.json não encontrado no diretório do manifesto ou ancestrais: "
+        f"{manifest_dir}"
+    )
+
+
 def _resolve_processed_path(raw_path: str, manifest_dir: Path) -> Path:
     path = Path(raw_path)
     if path.is_absolute():
         return path
-    return (manifest_dir / path).resolve()
+    bundle_root = _find_bundle_root(manifest_dir).resolve()
+    resolved = (bundle_root / path).resolve()
+    try:
+        resolved.relative_to(bundle_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"processed_path relativo escapa do bundle root: {raw_path}"
+        ) from exc
+    return resolved
 
 
 def _sha256_file(path: Path) -> str:
@@ -480,8 +498,9 @@ def build_balanced_split(
     valida semanticamente todas as linhas, filtra ``role == split``. Com ``n_per_class``
     None ou 0, usa todas as amostras balanceadas disponíveis (``min(count_por_classe)``),
     seleção determinística por ``selection_rank``/``sample_id`` antes do shuffle final
-    por ``seed``. Paths ``processed_path`` absolutos ou relativos (ex. ``../../data/``)
-    são resolvidos contra o diretório do manifest; integridade é garantida por SHA-256.
+    por ``seed``. Paths ``processed_path`` absolutos permanecem suportados; relativos
+    exigem ``bundle_receipt.json`` em um ancestral do manifest e são resolvidos contra
+    essa raiz sem permitir escape. Integridade é garantida por SHA-256.
     """
     try:
         fn = _LOADERS[dataset_kind]

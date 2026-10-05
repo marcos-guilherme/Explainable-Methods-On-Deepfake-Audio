@@ -84,15 +84,20 @@ def _write_manifest(
     *,
     audio_dir: Path | None = None,
     compute_hashes: bool = True,
+    bundle_root: Path | None = None,
+    create_receipt: bool = True,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest_dir = path.parent
+    bundle_root = bundle_root or manifest_dir
+    if create_receipt:
+        (bundle_root / "bundle_receipt.json").write_text("{}", encoding="utf-8")
     prepared: list[dict[str, str]] = []
     for row in rows:
         item = dict(row)
         rel = item["processed_path"]
         wav_path = (
-            (manifest_dir / rel).resolve()
+            (bundle_root / rel).resolve()
             if not Path(rel).is_absolute()
             else Path(rel)
         )
@@ -250,20 +255,21 @@ def test_local_manifest_selection_is_deterministic_by_rank(tmp_path):
     assert [p["sample_id"] for p in prov_a] == [p["sample_id"] for p in prov_b]
 
 
-def test_local_manifest_resolves_relative_paths(tmp_path):
-    manifest = tmp_path / "manifests" / "xai_samples.csv"
-    rel = "audio/clip.wav"
+def test_local_manifest_resolves_relative_paths_from_bundle_root(tmp_path):
+    root = tmp_path / "bundle"
+    manifest = root / "manifests" / "eng" / "xai_samples.csv"
+    rel = "data/eng/train/bonafide/clip.wav"
     rows = [
         _valid_row(sample_id="eng-train-bonafide-00001", processed_path=rel),
         _valid_row(
             sample_id="eng-train-spoof-00001",
             label="1",
-            processed_path="audio/spoof.wav",
+            processed_path="data/eng/train/spoof/clip.wav",
             attack_id="A001",
             selection_rank="1",
         ),
     ]
-    _write_manifest(manifest, rows, audio_dir=tmp_path / "manifests" / "audio")
+    _write_manifest(manifest, rows, audio_dir=tmp_path / "audio", bundle_root=root)
 
     audios, srs, _, prov = build_balanced_split(
         "", "train", 1, dataset_kind="local_manifest",
@@ -271,30 +277,104 @@ def test_local_manifest_resolves_relative_paths(tmp_path):
     )
     assert len(audios) == 2
     assert all(sr == 16000 for sr in srs)
-    assert Path(prov[0]["processed_path"]).is_absolute() or prov[0]["processed_path"].startswith("audio")
+    assert {Path(item["processed_path"]).resolve() for item in prov} == {
+        (root / row["processed_path"]).resolve() for row in rows
+    }
 
 
-def test_local_manifest_preserves_absolute_processed_path(tmp_path):
-    wav = tmp_path / "abs_clip.wav"
-    _write_wav(wav)
-    digest = _sha256_file(wav)
-    manifest = tmp_path / "xai_samples.csv"
+def test_local_manifest_rejects_relative_paths_without_bundle_receipt(tmp_path):
+    manifest = tmp_path / "manifests" / "xai_samples.csv"
+    rows = _balanced_train_rows(n_per_class=1)
+    _write_manifest(
+        manifest,
+        rows,
+        audio_dir=tmp_path / "audio",
+        create_receipt=False,
+    )
+
+    with pytest.raises(ValueError, match="bundle_receipt.json"):
+        build_balanced_split(
+            "", "train", 1, dataset_kind="local_manifest",
+            manifest_path=str(manifest), seed=3,
+        )
+
+
+def test_local_manifest_rejects_relative_path_traversal(tmp_path):
+    root = tmp_path / "bundle"
+    manifest = root / "manifests" / "eng" / "xai_samples.csv"
+    outside = tmp_path / "outside"
+    bonafide = outside / "bonafide.wav"
+    spoof = outside / "spoof.wav"
+    _write_wav(bonafide)
+    _write_wav(spoof)
     rows = [
         _valid_row(
             sample_id="eng-train-bonafide-00001",
-            processed_path=str(wav.resolve()),
-            sha256_processed=digest,
+            processed_path="../outside/bonafide.wav",
+            sha256_processed=_sha256_file(bonafide),
         ),
         _valid_row(
             sample_id="eng-train-spoof-00001",
             label="1",
-            processed_path=str(wav.resolve()),
-            sha256_processed=digest,
+            processed_path="../outside/spoof.wav",
+            sha256_processed=_sha256_file(spoof),
             attack_id="A001",
             selection_rank="1",
         ),
     ]
-    _write_manifest(manifest, rows, compute_hashes=False)
+    _write_manifest(manifest, rows, compute_hashes=False, bundle_root=root)
+
+    with pytest.raises(ValueError, match="bundle root"):
+        build_balanced_split(
+            "", "train", 1, dataset_kind="local_manifest",
+            manifest_path=str(manifest), seed=3,
+        )
+
+
+def test_local_manifest_preserves_absolute_processed_path(tmp_path):
+    bonafide = tmp_path / "abs_bonafide.wav"
+    spoof = tmp_path / "abs_spoof.wav"
+    _write_wav(bonafide)
+    _write_wav(spoof)
+    manifest = tmp_path / "xai_samples.csv"
+    rows = [
+        _valid_row(
+            sample_id="eng-train-bonafide-00001",
+            processed_path=str(bonafide.resolve()),
+            sha256_processed=_sha256_file(bonafide),
+        ),
+        _valid_row(
+            sample_id="eng-train-spoof-00001",
+            label="1",
+            processed_path=str(spoof.resolve()),
+            sha256_processed=_sha256_file(spoof),
+            attack_id="A001",
+            selection_rank="1",
+        ),
+    ]
+    _write_manifest(
+        manifest,
+        rows,
+        compute_hashes=False,
+        create_receipt=False,
+    )
+
+    _, _, _, provenance = build_balanced_split(
+        "", "train", 1, dataset_kind="local_manifest",
+        manifest_path=str(manifest), seed=1,
+    )
+
+    assert {Path(item["processed_path"]) for item in provenance} == {
+        bonafide.resolve(),
+        spoof.resolve(),
+    }
+
+
+def test_local_manifest_rejects_duplicate_processed_path(tmp_path):
+    manifest = tmp_path / "xai_samples.csv"
+    rows = _balanced_train_rows(n_per_class=1)
+    rows[1]["processed_path"] = rows[0]["processed_path"]
+    _write_manifest(manifest, rows, audio_dir=tmp_path / "audio")
 
     with pytest.raises(ValueError, match="processed_path duplicado"):
         build_balanced_split(
@@ -446,8 +526,8 @@ def test_local_manifest_rejects_uppercase_hash_on_unselected_row(tmp_path):
         )
 
 
-def test_local_manifest_resolves_relative_path_outside_manifest_dir(tmp_path):
-    # Layout publicado: manifests/eng/ e data/ sob a mesma raiz (../../data é legítimo).
+def test_local_manifest_resolves_bundle_root_relative_path_outside_manifest_dir(tmp_path):
+    # Layout publicado: manifests/eng/ e data/ sob a mesma raiz.
     root = tmp_path / "published"
     data_dir = root / "data"
     manifest = root / "manifests" / "eng" / "xai_samples.csv"
@@ -458,19 +538,19 @@ def test_local_manifest_resolves_relative_path_outside_manifest_dir(tmp_path):
     rows = [
         _valid_row(
             sample_id="eng-train-bonafide-00001",
-            processed_path="../../data/bonafide.wav",
+            processed_path="data/bonafide.wav",
             sha256_processed=_sha256_file(bonafide),
         ),
         _valid_row(
             sample_id="eng-train-spoof-00001",
             label="1",
-            processed_path="../../data/spoof.wav",
+            processed_path="data/spoof.wav",
             sha256_processed=_sha256_file(spoof),
             attack_id="A001",
             selection_rank="1",
         ),
     ]
-    _write_manifest(manifest, rows, compute_hashes=False)
+    _write_manifest(manifest, rows, compute_hashes=False, bundle_root=root)
     _, _, _, prov = build_balanced_split(
         "", "train", 1, dataset_kind="local_manifest",
         manifest_path=str(manifest), seed=3,
