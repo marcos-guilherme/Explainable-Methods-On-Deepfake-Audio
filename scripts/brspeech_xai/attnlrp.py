@@ -34,6 +34,7 @@ rachtibat/LRP-eXplains-Transformers (licença Clear BSD), dos autores do AttnLRP
 from __future__ import annotations
 
 import types
+from typing import Callable, Collection, Mapping
 
 import torch
 from torch.autograd import Function
@@ -283,6 +284,37 @@ def _in_feature_extractor(name: str) -> bool:
 # e, por isso, aceitam o mesmo forward CP-LRP. O WavLM tem forward próprio (viés de posição
 # relativa com gating), tratado por ``_attention_forward_cp_wavlm``.
 _STANDARD_ATTENTION_CLASSES = {"Wav2Vec2Attention", "HubertAttention"}
+_PATCH_CATEGORIES = ("layer_norm", "group_norm", "gelu", "attention")
+
+
+def _attnlrp_module_category(module: torch.nn.Module) -> str | None:
+    if isinstance(module, torch.nn.LayerNorm):
+        return "layer_norm"
+    if isinstance(module, torch.nn.GroupNorm):
+        return "group_norm"
+    if type(module).__name__ == "GELUActivation":
+        return "gelu"
+    if (
+        type(module).__name__ in _STANDARD_ATTENTION_CLASSES
+        or type(module).__name__ == "WavLMAttention"
+    ):
+        return "attention"
+    return None
+
+
+def _attnlrp_modules(model: torch.nn.Module):
+    for name, module in model.named_modules():
+        category = _attnlrp_module_category(module)
+        if category is not None:
+            yield name, module, category
+
+
+def attnlrp_patch_coverage(model: torch.nn.Module) -> dict[str, int]:
+    """Conta exatamente os módulos que ``patch_ssl_encoder_for_attnlrp`` descobre."""
+    counts = dict.fromkeys(_PATCH_CATEGORIES, 0)
+    for _, _, category in _attnlrp_modules(model):
+        counts[category] += 1
+    return counts
 
 
 def patch_ssl_encoder_for_attnlrp(model: torch.nn.Module,
@@ -324,28 +356,119 @@ def patch_ssl_encoder_for_attnlrp(model: torch.nn.Module,
             return norm_stabilizer
         return 0.0
 
-    counts = {"layer_norm": 0, "group_norm": 0, "gelu": 0, "attention": 0}
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.LayerNorm):
+    counts = dict.fromkeys(_PATCH_CATEGORIES, 0)
+    for name, module, category in _attnlrp_modules(model):
+        if category == "layer_norm":
             module._lrp_norm_stab = _kappa_for(name)
             module.forward = types.MethodType(_identity_layer_norm_forward, module)
             counts["layer_norm"] += 1
-        elif isinstance(module, torch.nn.GroupNorm):
+        elif category == "group_norm":
             module._lrp_norm_stab = _kappa_for(name)
             module.forward = types.MethodType(_identity_group_norm_forward, module)
             counts["group_norm"] += 1
-        elif type(module).__name__ == "GELUActivation":
+        elif category == "gelu":
             original_forward = module.forward
             module.forward = types.MethodType(
                 lambda self, x, _fn=original_forward: identity_rule(_fn, x), module)
             counts["gelu"] += 1
-        elif type(module).__name__ in _STANDARD_ATTENTION_CLASSES:
-            module.forward = types.MethodType(attn_forward, module)
-            counts["attention"] += 1
-        elif type(module).__name__ == "WavLMAttention":
-            module.forward = types.MethodType(_attention_forward_cp_wavlm, module)
+        elif category == "attention":
+            module.forward = types.MethodType(
+                _attention_forward_cp_wavlm
+                if type(module).__name__ == "WavLMAttention"
+                else attn_forward,
+                module,
+            )
             counts["attention"] += 1
     return counts
+
+
+def ensure_ssl_encoder_attnlrp(
+    encoder: torch.nn.Module,
+    *,
+    attention_rule: str,
+    capabilities: Collection[str],
+    patch_fn: Callable | None = patch_ssl_encoder_for_attnlrp,
+) -> Mapping[str, object]:
+    """Aplica ou valida um patch AttnLRP autenticado pelo contrato compartilhado."""
+    rules = {
+        "cp_lrp": ("cp", "attnlrp_cp"),
+        "uniform_lrp": ("uniform", "attnlrp_uniform"),
+    }
+    if attention_rule not in rules:
+        raise ValueError(f"attention_rule inválida: {attention_rule!r}")
+    attention, capability = rules[attention_rule]
+    if capability not in frozenset(capabilities):
+        raise ValueError(
+            f"attention_rule {attention_rule!r} exige capability {capability!r}"
+        )
+    expected_counts = attnlrp_patch_coverage(encoder)
+    missing_categories = [
+        name for name in _PATCH_CATEGORIES if expected_counts[name] <= 0
+    ]
+    if missing_categories:
+        raise ValueError(
+            "AttnLRP patch coverage is incomplete; architecture has zero "
+            f"modules for {missing_categories}"
+        )
+
+    def exact_counts(raw_counts: object) -> dict[str, int]:
+        if (
+            not isinstance(raw_counts, Mapping)
+            or set(raw_counts) != set(_PATCH_CATEGORIES)
+            or any(type(raw_counts[name]) is not int for name in _PATCH_CATEGORIES)
+        ):
+            raise ValueError(
+                "AttnLRP patch coverage deve conter exatamente "
+                f"{list(_PATCH_CATEGORIES)}"
+            )
+        actual = {name: raw_counts[name] for name in _PATCH_CATEGORIES}
+        if actual != expected_counts:
+            mismatch = {
+                name: {"expected": expected_counts[name], "actual": actual[name]}
+                for name in _PATCH_CATEGORIES
+                if actual[name] != expected_counts[name]
+            }
+            raise ValueError(f"AttnLRP patch coverage diverge da arquitetura: {mismatch}")
+        return actual
+
+    marker = getattr(encoder, "_brspeech_attnlrp_patch", None)
+    if marker is None:
+        if patch_fn is None:
+            raise ValueError("encoder não possui marker de patch AttnLRP validado")
+        counts = patch_fn(encoder, attention=attention)
+        counts = exact_counts(counts)
+        marker = {
+            "schema_version": 1,
+            "managed_by": "ensure_ssl_encoder_attnlrp",
+            "attention_rule": attention_rule,
+            "attention": attention,
+            "capability": capability,
+            "counts": counts,
+        }
+        try:
+            setattr(encoder, "_brspeech_attnlrp_patch", marker)
+        except (AttributeError, TypeError) as exc:
+            raise ValueError("encoder não aceita marker AttnLRP validado") from exc
+    expected_keys = {
+        "schema_version",
+        "managed_by",
+        "attention_rule",
+        "attention",
+        "capability",
+        "counts",
+    }
+    if (
+        not isinstance(marker, Mapping)
+        or set(marker) != expected_keys
+        or marker.get("schema_version") != 1
+        or marker.get("managed_by") != "ensure_ssl_encoder_attnlrp"
+        or marker.get("attention_rule") != attention_rule
+        or marker.get("attention") != attention
+        or marker.get("capability") != capability
+    ):
+        raise ValueError("encoder contém marker AttnLRP arbitrário ou incompatível")
+    exact_counts(marker.get("counts"))
+    return marker
 
 
 # Alias de compatibilidade: o nome antigo cobria só o wav2vec2, mas a função é a mesma.

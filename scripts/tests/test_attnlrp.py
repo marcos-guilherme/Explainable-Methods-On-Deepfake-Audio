@@ -6,11 +6,14 @@ então pelo teorema de Euler a relevância Input×Gradient conserva exatamente:
 Cada teste monta um bloco minúsculo sem viés e confere esse balanço. É o portão que valida a
 matemática das regras, independente do modelo real (onde os vieses causam um resíduo pequeno).
 """
+from unittest.mock import Mock
+
+import pytest
 import torch
 
 from brspeech_xai.attnlrp import (_attention_forward_cp, _attention_forward_uniform,
                                   _identity_group_norm_forward, _identity_layer_norm_forward,
-                                  divide_gradient, identity_rule,
+                                  divide_gradient, ensure_ssl_encoder_attnlrp, identity_rule,
                                   patch_ssl_encoder_for_attnlrp, patch_wav2vec2_for_attnlrp)
 
 
@@ -147,3 +150,141 @@ def test_patch_matches_wavlm_attention_by_class_name():
 def test_backward_compat_alias_points_to_generalized_patch():
     """O nome antigo (`patch_wav2vec2_for_attnlrp`) segue válido como alias."""
     assert patch_wav2vec2_for_attnlrp is patch_ssl_encoder_for_attnlrp
+
+
+class GELUActivation(torch.nn.Module):
+    def forward(self, values):
+        return torch.nn.functional.gelu(values)
+
+
+def _coverage_encoder(attentions=1):
+    _HubertAttention.__name__ = "HubertAttention"
+    encoder = torch.nn.Module()
+    encoder.layer_norm = torch.nn.LayerNorm(24)
+    encoder.group_norm = torch.nn.GroupNorm(1, 24)
+    encoder.activation = GELUActivation()
+    encoder.attentions = torch.nn.ModuleList(
+        [_HubertAttention(24, 4) for _ in range(attentions)]
+    )
+    return encoder
+
+
+def test_ensure_attnlrp_requires_exact_rule_capability_and_full_coverage():
+    encoder = _coverage_encoder()
+
+    with pytest.raises(ValueError, match="capability"):
+        ensure_ssl_encoder_attnlrp(
+            encoder,
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_uniform"},
+            patch_fn=lambda model, attention: {},
+        )
+    with pytest.raises(ValueError, match="coverage"):
+        ensure_ssl_encoder_attnlrp(
+            encoder,
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_cp"},
+            patch_fn=lambda model, attention: {"attention": 1},
+        )
+
+
+def test_ensure_attnlrp_rejects_arbitrary_marker_and_reuses_its_own_marker():
+    encoder = _coverage_encoder()
+    encoder._brspeech_attnlrp_patch = {
+        "attention": "cp",
+        "counts": {
+            "layer_norm": 1,
+            "group_norm": 1,
+            "gelu": 1,
+            "attention": 1,
+        },
+    }
+    patch = Mock(
+        return_value={
+            "layer_norm": 1,
+            "group_norm": 1,
+            "gelu": 1,
+            "attention": 1,
+        }
+    )
+
+    with pytest.raises(ValueError, match="marker"):
+        ensure_ssl_encoder_attnlrp(
+            encoder,
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_cp"},
+            patch_fn=patch,
+        )
+
+    del encoder._brspeech_attnlrp_patch
+    first = ensure_ssl_encoder_attnlrp(
+        encoder,
+        attention_rule="cp_lrp",
+        capabilities={"attnlrp_cp"},
+        patch_fn=patch,
+    )
+    second = ensure_ssl_encoder_attnlrp(
+        encoder,
+        attention_rule="cp_lrp",
+        capabilities={"attnlrp_cp"},
+        patch_fn=patch,
+    )
+
+    assert first == second
+    assert first["attention_rule"] == "cp_lrp"
+    assert first["capability"] == "attnlrp_cp"
+    assert patch.call_count == 1
+    with pytest.raises(ValueError, match="marker"):
+        ensure_ssl_encoder_attnlrp(
+            encoder,
+            attention_rule="uniform_lrp",
+            capabilities={"attnlrp_uniform"},
+            patch_fn=patch,
+        )
+
+
+def test_ensure_attnlrp_requires_exact_architectural_coverage():
+    partial = {
+        "layer_norm": 1,
+        "group_norm": 1,
+        "gelu": 1,
+        "attention": 1,
+    }
+    with pytest.raises(ValueError, match="coverage.*attention"):
+        ensure_ssl_encoder_attnlrp(
+            _coverage_encoder(attentions=2),
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_cp"},
+            patch_fn=Mock(return_value=partial),
+        )
+
+    omitted = {"layer_norm": 1, "group_norm": 1, "attention": 2}
+    with pytest.raises(ValueError, match="coverage.*gelu"):
+        ensure_ssl_encoder_attnlrp(
+            _coverage_encoder(attentions=2),
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_cp"},
+            patch_fn=Mock(return_value=omitted),
+        )
+
+    encoder = _coverage_encoder(attentions=2)
+    marker = ensure_ssl_encoder_attnlrp(
+        encoder,
+        attention_rule="cp_lrp",
+        capabilities={"attnlrp_cp"},
+    )
+    assert marker["counts"] == {
+        "layer_norm": 1,
+        "group_norm": 1,
+        "gelu": 1,
+        "attention": 2,
+    }
+
+    marker["counts"]["attention"] = 1
+    with pytest.raises(ValueError, match="coverage.*attention"):
+        ensure_ssl_encoder_attnlrp(
+            encoder,
+            attention_rule="cp_lrp",
+            capabilities={"attnlrp_cp"},
+            patch_fn=None,
+        )

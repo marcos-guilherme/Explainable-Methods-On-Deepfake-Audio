@@ -40,108 +40,15 @@ import torch
 from brspeech_xai import artifacts as A
 from brspeech_xai import dft_lrp
 from brspeech_xai.config import load_config
+from brspeech_xai.lrp_detector import (
+    SSLDetectorAD,
+    _legacy_ssl_detector_ad,
+    conservation_certificate,
+    port_logistic_head,
+    relevance_for_clip,
+)
 from brspeech_xai.logging_utils import get_logger
 from brspeech_xai.occlusion import bootstrap_ci, mel_band_edges, stratified_idx
-
-
-def port_logistic_head(head) -> tuple[np.ndarray, np.ndarray]:
-    """Transplanta o head sklearn (StandardScaler + LogisticRegression) para pesos lineares.
-
-    O logit de spoof do D_ad é ``decision_function`` da regressão logística sobre o embedding
-    padronizado: ``logit = ((x - mean)/scale) @ coef + b0``. Reescrevendo como um único
-    linear ``x @ W + b`` (sem retreino):
-        W = coef / scale ;  b = b0 - sum(coef * mean / scale).
-    A classe positiva (spoof) é a 1 (``SPOOF_LABEL=1``), coluna usada pelo D_ad.
-    """
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
-
-    scaler, clf = head[0], head[-1]
-    if not isinstance(scaler, StandardScaler) or not isinstance(clf, LogisticRegression):
-        raise SystemExit("DFT-LRP requer head 'logistic' (StandardScaler+LogisticRegression). "
-                         f"Recebido: {type(scaler).__name__}+{type(clf).__name__}.")
-    spoof_col = list(clf.classes_).index(1)          # spoof = classe 1
-    coef = clf.coef_[spoof_col] if clf.coef_.shape[0] > 1 else clf.coef_[0]
-    b0 = clf.intercept_[spoof_col] if clf.intercept_.shape[0] > 1 else clf.intercept_[0]
-    mean, scale = scaler.mean_, scaler.scale_
-    w = coef / scale
-    b = float(b0 - np.sum(coef * mean / scale))
-    return w.astype(np.float32), np.float32(b)
-
-
-class SSLDetectorAD(torch.nn.Module):
-    """D_ad end-to-end em torch: encoder SSL congelado -> média dos frames -> logit spoof.
-
-    A média dos frames reproduz o pooling usado no treino do head (masked-mean de um clipe de
-    comprimento fixo, sem padding => média simples). Saída: o logit de spoof (pré-sigmoide),
-    que é o alvo da atribuição LRP.
-    """
-
-    def __init__(self, encoder: torch.nn.Module, layer: int,
-                 w: np.ndarray, b: float) -> None:
-        super().__init__()
-        self.encoder = encoder
-        self.layer = int(layer)
-        self.register_buffer("w", torch.as_tensor(w, dtype=torch.float32))
-        self.register_buffer("b", torch.as_tensor(b, dtype=torch.float32))
-
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        out = self.encoder(input_values, output_hidden_states=True)
-        hidden = out.hidden_states[self.layer]       # (B, T, H)
-        pooled = hidden.mean(dim=1)                   # (B, H)
-        return pooled @ self.w + self.b               # (B,) logit de spoof
-
-
-def relevance_for_clip(model: SSLDetectorAD, processor, wav16k: np.ndarray,
-                       device: str) -> tuple[np.ndarray, np.ndarray, float]:
-    """Relevância por instante (R_n) de um clipe, via backward do logit de spoof.
-
-    Returns:
-        (x_time, r_time, logit): sinal que entrou no modelo (já normalizado pelo processor),
-        relevância por amostra (x * grad, a formulação Input×Gradient) e o logit de spoof.
-    """
-    inputs = processor([wav16k], sampling_rate=16000, return_tensors="pt")
-    input_values = inputs["input_values"].to(device).requires_grad_(True)
-    logit = model(input_values)[0]
-    model.zero_grad(set_to_none=True)
-    if input_values.grad is not None:
-        input_values.grad = None
-    logit.backward()
-    x_time = input_values.detach().cpu().numpy()[0]
-    r_time = (input_values * input_values.grad).detach().cpu().numpy()[0]
-    return x_time, r_time, float(logit.detach().cpu())
-
-
-def conservation_certificate(model: SSLDetectorAD, processor, wavs: list[np.ndarray],
-                             device: str, b: float, tol: float = 1e-3) -> float:
-    """Certificado de correção do AttnLRP (intrínseco, não usa nada externo).
-
-    Zera TEMPORARIAMENTE os vieses do encoder. Sem vieses e com as regras da identidade, a rede
-    fica positivamente homogênea de grau 1, então pelo teorema de Euler a relevância da entrada
-    recupera exatamente ``logit - b_head``: ``sum_n x_n·∂logit/∂x_n == logit - b``. Medimos o
-    resíduo relativo e RESTAURAMOS os vieses. Assim, se as regras estiverem corretas, o resíduo é
-    ~0 independentemente do modelo; qualquer valor grande denunciaria um bug (não os vieses).
-
-    Não afeta o resultado real: o perfil roda depois com os vieses intactos.
-    """
-    saved = {}
-    with torch.no_grad():
-        for name, p in model.encoder.named_parameters():
-            if name.endswith("bias"):
-                saved[name] = p.detach().clone()
-                p.zero_()
-    try:
-        residuals = []
-        for wav in wavs:
-            _, r_time, logit = relevance_for_clip(model, processor, wav, device)
-            target = logit - float(b)
-            residuals.append(abs(float(r_time.sum()) - target) / (abs(target) + 1e-9))
-        return float(np.max(residuals)) if residuals else float("nan")
-    finally:
-        with torch.no_grad():
-            for name, p in model.encoder.named_parameters():
-                if name in saved:
-                    p.copy_(saved[name])
 
 
 def _plot(edges, mean_rel, ci_low, ci_high, checkpoint, backend, out_png, out_pdf):
@@ -419,7 +326,7 @@ def main(argv=None) -> int:
 
     head = joblib.load(paths.path("d_ad.joblib"))
     w, b = port_logistic_head(head)
-    model = SSLDetectorAD(encoder, cfg.model.layer, w, b).to(device).eval()
+    model = _legacy_ssl_detector_ad(encoder, cfg.model.layer, w, b).to(device).eval()
 
     split = "pool" if cfg.adapt.cross_fit else cfg.data.eval_split
     master = A.load_table(paths.path("master_table.parquet"))

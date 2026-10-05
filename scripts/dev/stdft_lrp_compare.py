@@ -27,7 +27,11 @@ from brspeech_xai import artifacts as A
 from brspeech_xai import dft_lrp
 from brspeech_xai.config import load_config
 from brspeech_xai.logging_utils import get_logger
-from dft_lrp_ad import SSLDetectorAD, port_logistic_head, relevance_for_clip
+from dft_lrp_ad import (
+    _legacy_ssl_detector_ad,
+    port_logistic_head,
+    relevance_for_clip,
+)
 
 # Ordem de leitura das colunas (referência primeiro); slugs 'hf_ssl-<nome>'.
 _COL_ORDER = ("wav2vec2", "hubert", "wavlm")
@@ -86,7 +90,7 @@ def _build_lrp_model(cfg, run_dir: Path, device: str):
         patch_ssl_encoder_for_attnlrp(encoder, attention="cp")
     head = joblib.load(run_dir / "d_ad.joblib")
     w, b = port_logistic_head(head)
-    model = SSLDetectorAD(encoder, cfg.model.layer, w, b).to(device).eval()
+    model = _legacy_ssl_detector_ad(encoder, cfg.model.layer, w, b).to(device).eval()
     return emb, model, conservative
 
 
