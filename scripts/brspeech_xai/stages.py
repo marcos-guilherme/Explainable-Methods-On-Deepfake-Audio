@@ -6,15 +6,16 @@ from dataclasses import dataclass
 import joblib
 import numpy as np
 import pandas as pd
+import soundfile as sf
 
 from . import artifacts as A
 from . import bands
-from .adaptation import make_p_spoof_ad
+from .adaptation import crossfit_oof_scores, fit_head, make_p_spoof_ad, score_head
 from .config import RunConfig
 from .data import SPOOF_LABEL, build_balanced_split
 from .features import mel_band_features
 from .logging_utils import progress
-from .metrics import compute_eer, quadrant
+from .metrics import calibrate_threshold, evaluate_at_threshold, quadrant
 from .occlusion import (bootstrap_ci, mel_band_edges, occlusion_drop,
                         per_band_occlusion_drop, stratified_idx, to_16k_mono)
 from .stats import (band_assoc_signed, confirmatory_tests, convergence_bands,
@@ -67,12 +68,86 @@ class RunContext:
         return self.embedder
 
 
+def _has_explicit_calibration(cfg: RunConfig) -> bool:
+    return bool(cfg.data.calibration_split) and cfg.data.n_calibration_per_class > 0
+
+
 def _collect_specs(cfg: RunConfig) -> list[tuple[str, str, int]]:
     """(nome lógico, split-fonte, n por classe) a coletar, por modo."""
+    has_cal_split = bool(cfg.data.calibration_split)
+    has_cal_quota = cfg.data.n_calibration_per_class > 0
+    if has_cal_split != has_cal_quota:
+        raise ValueError(
+            "data.calibration_split e data.n_calibration_per_class devem ser definidos juntos"
+        )
     if cfg.adapt.cross_fit:
+        if has_cal_split:
+            raise ValueError(
+                "adapt.cross_fit não pode ser combinado com calibração holdout explícita"
+            )
         return [(POOL_SPLIT, cfg.data.analysis_split, cfg.data.n_analysis_per_class)]
-    return [(cfg.data.train_split, cfg.data.train_split, cfg.data.n_train_per_class),
-            (cfg.data.eval_split, cfg.data.eval_split, cfg.data.n_test_per_class)]
+    specs = [(cfg.data.train_split, cfg.data.train_split, cfg.data.n_train_per_class)]
+    if _has_explicit_calibration(cfg):
+        specs.append(
+            (
+                cfg.data.calibration_split,
+                cfg.data.calibration_split,
+                cfg.data.n_calibration_per_class,
+            )
+        )
+    specs.append((cfg.data.eval_split, cfg.data.eval_split, cfg.data.n_test_per_class))
+    return specs
+
+
+def _load_split_labels(samples: pd.DataFrame, split: str) -> np.ndarray:
+    return samples.loc[samples.split == split, "label"].to_numpy()
+
+
+def _load_analysis_audio(
+    paths: A.RunPaths,
+    split: str,
+    samples: pd.DataFrame,
+) -> tuple[list[np.ndarray], list[int]]:
+    """Lê cache legado de áudio ou recarrega WAVs canônicos pelo catálogo."""
+    audio_path = paths.path(f"audios_{split}.npy")
+    srs_path = paths.path(f"srs_{split}.npy")
+    if audio_path.is_file() and srs_path.is_file():
+        return (
+            list(np.load(audio_path, allow_pickle=True)),
+            [int(sr) for sr in np.load(srs_path)],
+        )
+    if "processed_path" not in samples.columns:
+        raise ValueError(
+            f"áudio ausente para split={split}: cache .npy e processed_path indisponíveis"
+        )
+    audios: list[np.ndarray] = []
+    srs: list[int] = []
+    for raw_path in samples["processed_path"]:
+        path = str(raw_path)
+        try:
+            audio, sr = sf.read(path, dtype="float32", always_2d=False)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"falha ao ler processed_path: {path}") from exc
+        waveform = np.asarray(audio, dtype=np.float32)
+        if waveform.ndim != 1 or waveform.size == 0 or not np.all(np.isfinite(waveform)):
+            raise ValueError(f"áudio canônico inválido em processed_path: {path}")
+        audios.append(waveform)
+        srs.append(int(sr))
+    return audios, srs
+
+
+def _build_thresholds_payload(
+    *,
+    calibration_source: str,
+    calibration_fallback_train: bool,
+    detectors: dict[str, dict],
+) -> dict:
+    return {
+        "schema_version": 1,
+        "calibration_source": calibration_source,
+        "calibration_fallback_train": bool(calibration_fallback_train),
+        "detectors": detectors,
+    }
 
 
 def stage_collect(ctx: RunContext) -> None:
@@ -80,7 +155,14 @@ def stage_collect(ctx: RunContext) -> None:
     rows = []
     for name, split, n in _collect_specs(cfg):
         audios, srs, labels, prov = build_balanced_split(
-            cfg.data.dataset_id, split, n, loader=cfg.data.loader, seed=cfg.seed)
+            cfg.data.dataset_id,
+            split,
+            n,
+            loader=cfg.data.loader,
+            seed=cfg.seed,
+            dataset_kind=cfg.data.dataset_kind,
+            manifest_path=cfg.data.manifest_path,
+        )
         for i, pr in enumerate(prov):
             rows.append({"split": name, "idx": i, **pr, "sample_rate": srs[i]})
         np.save(p.path(f"audios_{name}.npy"),
@@ -111,65 +193,141 @@ def stage_adapt(ctx: RunContext) -> None:
 def _adapt_crossfit(ctx: RunContext) -> None:
     """Head cross-fitted: P(spoof) OOF por K-fold + head final (p/ oclusão).
 
-    O D_zs (congelado) pontua tudo direto; o D_ad recebe scores out-of-fold, sem
-    vazamento. O EER-precheck usa os scores OOF (estimativa honesta)."""
-    from .adaptation import build_head, crossfit_oof_scores
+    Limiares vêm dos scores OOF do pool (fonte de calibração); nunca de outro alvo."""
+    from .adaptation import build_head
+
     cfg, p = ctx.cfg, ctx.paths
     samples = A.load_table(p.path("samples.parquet"))
     pool = samples[samples.split == POOL_SPLIT].reset_index(drop=True)
     y = pool["label"].to_numpy()
     emb = A.load_npy(p.path(f"emb_{POOL_SPLIT}.npy"))
     make = lambda: build_head(cfg.adapt.head, cfg.seed)
-    p_ad = crossfit_oof_scores(emb, y, make, n_splits=cfg.adapt.cv_folds,
-                               seed=cfg.seed, spoof_label=SPOOF_LABEL)
-    # Head final no pool inteiro: usado só pela oclusão (contrafactual do modelo).
-    final_head = make()
-    final_head.fit(emb, y)
+    p_ad = crossfit_oof_scores(
+        emb, y, make, n_splits=cfg.adapt.cv_folds, seed=cfg.seed, spoof_label=SPOOF_LABEL
+    )
+    final_head = fit_head(emb, y, head=cfg.adapt.head, seed=cfg.seed)
     joblib.dump(final_head, p.path("d_ad.joblib"))
-    eer_ad, _ = compute_eer(p_ad, y)
+
+    cal_source = "pool/crossfit_oof"
+    detectors = {"ad": calibrate_threshold(p_ad, y, cal_source, "ad")}
     enc = ctx.get_embedder()
-    precheck = {"mode": "crossfit", "head": cfg.adapt.head, "cv_folds": cfg.adapt.cv_folds,
-                "n_pool": int(len(y)), "eer_ad": float(eer_ad),
-                "has_zero_shot": bool(getattr(enc, "has_zero_shot", False))}
-    # D_zs (congelado) pontua o pool direto, só quando o encoder expõe zero-shot.
+    precheck = {
+        "mode": "crossfit",
+        "head": cfg.adapt.head,
+        "cv_folds": cfg.adapt.cv_folds,
+        "n_pool": int(len(y)),
+        "calibration_source": cal_source,
+        "calibration_fallback_train": False,
+        "has_zero_shot": bool(getattr(enc, "has_zero_shot", False)),
+        "ad_calibration": detectors["ad"],
+        "ad_eval": evaluate_at_threshold(
+            p_ad, y, detectors["ad"]["threshold"],
+            condition="crossfit_pool", source=cal_source, target=POOL_SPLIT,
+        ),
+    }
     if getattr(enc, "has_zero_shot", False):
         audios = list(np.load(p.path(f"audios_{POOL_SPLIT}.npy"), allow_pickle=True))
         srs = [int(s) for s in np.load(p.path(f"srs_{POOL_SPLIT}.npy"))]
         p_zs = _p_spoof_zs(enc, audios, srs)
-        eer_zs, _ = compute_eer(p_zs, y)
-        precheck.update(eer_zs=float(eer_zs), improved=bool(eer_ad < eer_zs))
+        detectors["zs"] = calibrate_threshold(p_zs, y, cal_source, "zs")
+        zs_eval = evaluate_at_threshold(
+            p_zs, y, detectors["zs"]["threshold"],
+            condition="crossfit_pool", source=cal_source, target=POOL_SPLIT,
+        )
+        precheck.update(
+            zs_calibration=detectors["zs"],
+            zs_eval=zs_eval,
+            improved=bool(
+                detectors["ad"]["calibration_eer"] < detectors["zs"]["calibration_eer"]
+            ),
+        )
         A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+    A.save_json(
+        _build_thresholds_payload(
+            calibration_source=cal_source,
+            calibration_fallback_train=False,
+            detectors=detectors,
+        ),
+        p.path("thresholds.json"),
+    )
     A.save_json(precheck, p.path("eer_precheck.json"))
     A.save_npy(p_ad.astype(np.float32), p.path("p_spoof_ad.npy"))
 
 
 def _adapt_legacy(ctx: RunContext) -> None:
-    """Modo antigo: head treina no split train e pontua o split test (holdout)."""
-    from .adaptation import build_head
+    """Holdout: fit só no train; calibra limiar na fonte; pontua eval/test."""
     cfg, p = ctx.cfg, ctx.paths
     samples = A.load_table(p.path("samples.parquet"))
-    y_train = samples.loc[samples.split == cfg.data.train_split, "label"].to_numpy()
-    y_test = samples.loc[samples.split == cfg.data.eval_split, "label"].to_numpy()
-    emb_train = A.load_npy(p.path(f"emb_{cfg.data.train_split}.npy"))
-    emb_test = A.load_npy(p.path(f"emb_{cfg.data.eval_split}.npy"))
-    ad_head = build_head(cfg.adapt.head, cfg.seed)
-    ad_head.fit(emb_train, y_train)
+    train_split = cfg.data.train_split
+    eval_split = cfg.data.eval_split
+    y_train = _load_split_labels(samples, train_split)
+    y_eval = _load_split_labels(samples, eval_split)
+    emb_train = A.load_npy(p.path(f"emb_{train_split}.npy"))
+    emb_eval = A.load_npy(p.path(f"emb_{eval_split}.npy"))
+
+    ad_head = fit_head(emb_train, y_train, head=cfg.adapt.head, seed=cfg.seed)
     joblib.dump(ad_head, p.path("d_ad.joblib"))
-    p_ad = ad_head.predict_proba(emb_test)[:, SPOOF_LABEL]
-    eer_ad, _ = compute_eer(p_ad, y_test)
+
+    if _has_explicit_calibration(cfg):
+        cal_split = cfg.data.calibration_split
+        y_cal = _load_split_labels(samples, cal_split)
+        emb_cal = A.load_npy(p.path(f"emb_{cal_split}.npy"))
+        cal_fallback = False
+    else:
+        # Calibração in-sample legada (HF/BRSpeech): usa o próprio train após fit.
+        # Nunca usa labels do eval/test para definir limiar.
+        cal_split = train_split
+        y_cal = y_train
+        emb_cal = emb_train
+        cal_fallback = True
+
+    p_ad_cal = score_head(ad_head, emb_cal)
+    detectors = {"ad": calibrate_threshold(p_ad_cal, y_cal, cal_split, "ad")}
+    p_ad_eval = score_head(ad_head, emb_eval)
+
     enc = ctx.get_embedder()
-    precheck = {"mode": "holdout", "head": cfg.adapt.head, "eer_ad": float(eer_ad),
-                "has_zero_shot": bool(getattr(enc, "has_zero_shot", False))}
-    # D_zs (congelado) pontua o split de avaliação, só quando há zero-shot.
+    precheck = {
+        "mode": "holdout",
+        "head": cfg.adapt.head,
+        "calibration_source": cal_split,
+        "calibration_fallback_train": cal_fallback,
+        "has_zero_shot": bool(getattr(enc, "has_zero_shot", False)),
+        "ad_calibration": detectors["ad"],
+        "ad_eval": evaluate_at_threshold(
+            p_ad_eval, y_eval, detectors["ad"]["threshold"],
+            condition="holdout", source=cal_split, target=eval_split,
+        ),
+    }
     if getattr(enc, "has_zero_shot", False):
-        audios = list(np.load(p.path(f"audios_{cfg.data.eval_split}.npy"), allow_pickle=True))
-        srs = [int(s) for s in np.load(p.path(f"srs_{cfg.data.eval_split}.npy"))]
-        p_zs = _p_spoof_zs(enc, audios, srs)
-        eer_zs, _ = compute_eer(p_zs, y_test)
-        precheck.update(eer_zs=float(eer_zs), improved=bool(eer_ad < eer_zs))
-        A.save_npy(p_zs.astype(np.float32), p.path("p_spoof_zs.npy"))
+        audios_cal = list(np.load(p.path(f"audios_{cal_split}.npy"), allow_pickle=True))
+        srs_cal = [int(s) for s in np.load(p.path(f"srs_{cal_split}.npy"))]
+        p_zs_cal = _p_spoof_zs(enc, audios_cal, srs_cal)
+        detectors["zs"] = calibrate_threshold(p_zs_cal, y_cal, cal_split, "zs")
+
+        audios_eval = list(np.load(p.path(f"audios_{eval_split}.npy"), allow_pickle=True))
+        srs_eval = [int(s) for s in np.load(p.path(f"srs_{eval_split}.npy"))]
+        p_zs_eval = _p_spoof_zs(enc, audios_eval, srs_eval)
+        precheck.update(
+            zs_calibration=detectors["zs"],
+            zs_eval=evaluate_at_threshold(
+                p_zs_eval, y_eval, detectors["zs"]["threshold"],
+                condition="holdout", source=cal_split, target=eval_split,
+            ),
+            improved=bool(
+                detectors["ad"]["calibration_eer"] < detectors["zs"]["calibration_eer"]
+            ),
+        )
+        A.save_npy(p_zs_eval.astype(np.float32), p.path("p_spoof_zs.npy"))
+    A.save_json(
+        _build_thresholds_payload(
+            calibration_source=cal_split,
+            calibration_fallback_train=cal_fallback,
+            detectors=detectors,
+        ),
+        p.path("thresholds.json"),
+    )
     A.save_json(precheck, p.path("eer_precheck.json"))
-    A.save_npy(p_ad.astype(np.float32), p.path("p_spoof_ad.npy"))
+    A.save_npy(p_ad_eval.astype(np.float32), p.path("p_spoof_ad.npy"))
 
 
 def stage_features(ctx: RunContext) -> None:
@@ -178,25 +336,56 @@ def stage_features(ctx: RunContext) -> None:
     split = _analysis_split(cfg)
     samples = A.load_table(p.path("samples.parquet"))
     test = samples[samples.split == split].reset_index(drop=True)
-    audios = list(np.load(p.path(f"audios_{split}.npy"), allow_pickle=True))
-    srs = [int(s) for s in np.load(p.path(f"srs_{split}.npy"))]
+    audios, srs = _load_analysis_audio(p, split, test)
     y = test["label"].to_numpy()
+    thresholds = A.load_json(p.path("thresholds.json"))
+    if thresholds.get("schema_version") != 1:
+        raise ValueError("thresholds.json tem schema_version inválida")
+    det_thr = thresholds.get("detectors")
+    if not isinstance(det_thr, dict):
+        raise ValueError("thresholds.json deve conter detectors")
+
+    def _threshold(detector: str) -> float:
+        try:
+            value = float(det_thr[detector]["threshold"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"thresholds.json não contém threshold válido para {detector}"
+            ) from exc
+        if not np.isfinite(value):
+            raise ValueError(f"threshold de {detector} deve ser finito")
+        return value
+
+    p_ad = A.load_npy(p.path("p_spoof_ad.npy"))
+    thr_ad = _threshold("ad")
+    expected_n = len(test)
+    if len(audios) != expected_n or len(srs) != expected_n or len(p_ad) != expected_n:
+        raise ValueError(
+            "artefatos de análise têm comprimentos incompatíveis: "
+            f"samples={expected_n}, audios={len(audios)}, srs={len(srs)}, ad={len(p_ad)}"
+        )
+    p_zs = None
+    thr_zs = None
+    if p.path("p_spoof_zs.npy").exists():
+        p_zs = A.load_npy(p.path("p_spoof_zs.npy"))
+        thr_zs = _threshold("zs")
+        if len(p_zs) != expected_n:
+            raise ValueError(
+                f"artefato zs tem comprimento {len(p_zs)}, esperado {expected_n}"
+            )
     if ctx.logger:
         ctx.logger.info(f"features log-mel: {len(audios)} clipes × "
                         f"{cfg.bands.n_bands} bandas (μ/σ)")
     feats = np.vstack([mel_band_features(a, s)
                        for a, s in progress(list(zip(audios, srs)),
                                             desc="features log-mel", unit="clip")])
-    df = pd.DataFrame({"sample_id": test.index, "ground_truth": y})
+    sample_ids = test["sample_id"] if "sample_id" in test.columns else test.index
+    df = pd.DataFrame({"sample_id": sample_ids, "ground_truth": y})
     # D_zs só existe quando o encoder expõe zero-shot (arquivo gravado no stage_adapt).
-    if p.path("p_spoof_zs.npy").exists():
-        p_zs = A.load_npy(p.path("p_spoof_zs.npy"))
-        thr_zs = compute_eer(p_zs, y)[1]
+    if p_zs is not None:
         df["p_spoof_zs"] = p_zs
         df["pred_zs"] = (p_zs >= thr_zs).astype(int)
         df["quadrant_zs"] = [quadrant(t, pz) for t, pz in zip(df.ground_truth, df.pred_zs)]
-    p_ad = A.load_npy(p.path("p_spoof_ad.npy"))
-    thr_ad = compute_eer(p_ad, y)[1]
     df["p_spoof_ad"] = p_ad
     df["pred_ad"] = (p_ad >= thr_ad).astype(int)
     df["quadrant_ad"] = [quadrant(t, pa) for t, pa in zip(df.ground_truth, df.pred_ad)]
@@ -275,15 +464,18 @@ def stage_occlusion(ctx: RunContext) -> None:
     cfg, p = ctx.cfg, ctx.paths
     split = _analysis_split(cfg)
     master = A.load_table(p.path("master_table.parquet"))
-    audios = list(np.load(p.path(f"audios_{split}.npy"), allow_pickle=True))
-    srs = [int(s) for s in np.load(p.path(f"srs_{split}.npy"))]
+    samples = A.load_table(p.path("samples.parquet"))
+    analysis_samples = samples[samples.split == split].reset_index(drop=True)
+    audios, srs = _load_analysis_audio(p, split, analysis_samples)
     enc = ctx.get_embedder()
     head = joblib.load(p.path("d_ad.joblib"))
     _, p_ad_from_audio = make_p_spoof_ad(head, enc)
     edges = mel_band_edges(cfg.bands.n_bands, cfg.bands.f_min, cfg.bands.f_max)
     # D_ad sempre; D_zs só quando o encoder expõe zero-shot.
     targets = []
-    if getattr(enc, "has_zero_shot", False):
+    if "zs" in _present_detectors(master):
+        if not getattr(enc, "has_zero_shot", False):
+            raise ValueError("master contém D_zs, mas o encoder não oferece zero-shot")
         targets.append(("zs", "quadrant_zs", lambda a, s: enc.spoof_prob(a, s)))
     targets.append(("ad", "quadrant_ad", p_ad_from_audio))
     rows = []
@@ -351,14 +543,38 @@ def stage_report(ctx: RunContext) -> None:
     p = ctx.paths
     master = A.load_table(p.path("master_table.parquet"))
     y = master["ground_truth"].to_numpy()
-    from sklearn.metrics import accuracy_score, matthews_corrcoef
+    thresholds = A.load_json(p.path("thresholds.json"))
+    target = _analysis_split(ctx.cfg)
     rows = []
     for tag in _present_detectors(master):
-        eer, _ = compute_eer(master[f"p_spoof_{tag}"].to_numpy(), y)
+        scores = master[f"p_spoof_{tag}"].to_numpy()
+        thr = float(thresholds["detectors"][tag]["threshold"])
         pred = master[f"pred_{tag}"].to_numpy()
-        rows.append({"detector": tag, "eer": float(eer),
-                     "mcc": float(matthews_corrcoef(y, pred)),
-                     "accuracy": float(accuracy_score(y, pred))})
+        eval_out = evaluate_at_threshold(
+            scores, y, thr,
+            condition="report", source=thresholds["calibration_source"], target=target,
+        )
+        tf = eval_out["threshold_free"]
+        fx = eval_out["fixed_threshold"]
+        rows.append({
+            "detector": tag,
+            "target": target,
+            "calibration_source": thresholds["calibration_source"],
+            "eer_diagnostic": float(tf["eer_diagnostic"]),
+            "roc_auc": float(tf["roc_auc"]),
+            "average_precision": float(tf["average_precision"]),
+            "threshold_fixed": thr,
+            "mcc_at_fixed_threshold": float(fx["mcc"]),
+            "accuracy_at_fixed_threshold": float(fx["accuracy"]),
+            "tpr_at_fixed_threshold": float(fx["tpr"]),
+            "fpr_at_fixed_threshold": float(fx["fpr"]),
+            "fnr_at_fixed_threshold": float(fx["fnr"]),
+            # Compatibilidade com consumidores legados da tabela de performance.
+            "eer": float(tf["eer_diagnostic"]),
+            "mcc": float(fx["mcc"]),
+            "accuracy": float(fx["accuracy"]),
+        })
+        assert np.array_equal(pred, (scores >= thr).astype(int))
     A.save_table(pd.DataFrame(rows), p.path("performance_table.csv"))
     if _plots_on(ctx):
         from .plotting import plot_det, set_plot_style

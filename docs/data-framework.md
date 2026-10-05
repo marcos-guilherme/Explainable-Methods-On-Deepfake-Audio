@@ -234,14 +234,87 @@ ADD (mandarim).
 - Cada campo do manifesto deve registrar sua procedência (`metadata_source`),
   como já ocorre no inglês.
 
+## Dataset XAI trilíngue (seleção, materialização e publicação)
+
+Existe um CLI autônomo, separado de `jmds_prepare.cli`:
+
+```powershell
+python -m jmds_prepare.xai_dataset eng `
+  --output-root E:\xai_out\english `
+  --seed 42 `
+  --english-manifest E:\english_preparation\manifests\english_processed.csv
+
+python -m jmds_prepare.xai_dataset por `
+  --output-root E:\xai_out\portuguese `
+  --seed 42 `
+  --pristine-manifest E:\portuguese_preparation\manifests\coraa_metadata.csv `
+  --generated-manifest E:\portuguese_preparation\manifests\jmds_mlaad_generated_metadata.csv `
+  --coraa-train-rar-part1 E:\sources\coraa\train.part1.rar `
+  --coraa-dev-zip E:\sources\coraa\dev.zip `
+  --coraa-test-zip E:\sources\coraa\test.zip `
+  --unrar-executable "C:\Program Files\WinRAR\UnRAR.exe"
+
+python -m jmds_prepare.xai_dataset zho `
+  --output-root E:\xai_out\mandarin `
+  --seed 42 `
+  --pristine-manifest E:\mandarin_preparation\manifests\aishell3_metadata.csv `
+  --generated-manifest E:\mandarin_preparation\manifests\jmds_add_generated_metadata.csv `
+  --aishell-archive E:\sources\aishell3\data_aishell3.tgz
+```
+
+O pipeline em `pipelines/xai_dataset.py` orquestra seleção determinística
+(`xai_selection`), materialização seletiva (`xai_materialization`), auditoria
+(`xai_audit`), validação do conjunto completo e publicação atômica dos quatro
+artefatos por idioma via `core/publication.py`. O layout está em
+`storage/xai_layout.py`.
+
+Quatro artefatos por idioma (`eng`, `por`, `zho`):
+
+```text
+output_root/
+├── manifests/<language>/xai_samples.csv
+└── reports/<language>/
+    ├── selection_report.json
+    ├── audio_audit.json
+    └── provenance.json
+```
+
+Inglês reutiliza os WAV processados existentes (`reuse_processed`); português e
+mandarim materializam somente a seleção no cache local sob `data/<language>/`.
+Em mandarim, `--pristine-manifest` aponta para o CSV reconciliado publicado pelo
+pipeline de metadados (`aishell3_metadata.csv`); `--aishell-archive` serve
+apenas para extrair os WAV selecionados, sem re-varrer metadados do TGZ.
+A publicação é idempotente por conteúdo: reruns idênticos são aceitos; qualquer
+artefato divergente bloqueia o conjunto sem alterar os demais.
+
+Limitações registradas na proveniência:
+
+- **eng**: seleção pareada por falante (`paired_by_speaker`), mas
+  `paired_utterances=false` (sem pareamento utterance-a-utterance).
+- **zho**: candidatos pristine vêm do manifesto AISHELL reconciliado; detalhes
+  da reconciliação permanecem na proveniência upstream do pipeline de metadados.
+- **por/zho**: `paired_samples=false`, confound classe–corpus
+  (`class_corpus_confound=true`) e validação externa sob deslocamento de corpus
+  (`external_validation_under_corpus_shift=true`).
+- **por/CORAA**: `local_only_no_redistribution=true`, licença
+  `CC-BY-NC-ND-4.0`; derivados CORAA permanecem locais.
+
+A proveniência não usa timestamps de relógio (para não quebrar idempotência).
+
 ## Limites atuais
 
 - `config`, `manifest`, `audio` e `audit` ainda usam o perfil inglês
   diretamente (por exemplo, `PreparationConfig.validate` exige os splits e
   arquivos do inglês, e a validação do manifesto aceita só `eng`).
 - Os quatro comandos de áudio expostos em `cli.py` são apenas ingleses.
-  Metadados portugueses e mandarins têm CLIs autônomos; preparação de áudio
-  português ou mandarim ainda não existe.
+  Metadados portugueses e mandarins têm CLIs autônomos; a preparação XAI
+  seletiva (`xai_dataset`) materializa português e mandarim fora do `cli.py`
+  legado; a matriz experimental `brspeech_xai` já consome os manifests
+  publicados via `data.dataset_kind: local_manifest` e `data.manifest_path`
+  (ver `scripts/configs/xai-*-local.yaml`). O role `calibration` alimenta a
+  calibração **source-only** do limiar em `brspeech_xai` (`thresholds.json`);
+  eval/test nunca define limiar. O baseline HF legado calibra in-sample no
+  `train` quando `calibration_split`/`n_calibration_per_class` estão vazios.
 - Adapters estritos existem para CORAA, JMDS/MLAAD generated (português),
   AISHELL-3 streaming e JMDS/ADD generated (mandarim), mas só para inventário
   de metadados.
