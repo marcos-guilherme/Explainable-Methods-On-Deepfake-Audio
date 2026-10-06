@@ -92,7 +92,7 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --profiles hubert_base \
-  --output /mnt/results/layerwise-suite-eng-por-pilot \
+  --output /mnt/results/hubert_base__eng-por__layerwise_xai__pilot \
   --xai-per-class 2 \
   --dry-run
 ```
@@ -104,13 +104,17 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --profiles hubert_base \
-  --output /mnt/results/layerwise-suite-eng-por-pilot \
+  --output /mnt/results/hubert_base__eng-por__layerwise_xai__pilot \
   --xai-per-class 2
 ```
 
+Os outputs de um único perfil seguem a convenção
+`<model>__<languages>__layerwise_xai__<scope>` descrita em
+[Convenção de nomes dos resultados](#convenção-de-nomes-dos-resultados).
+
 Esse piloto `eng+por` valida a pipeline, mas não substitui o experimento final,
-que continua trilíngue. A execução final deve usar outro diretório de output,
-como `/mnt/results/layerwise-suite`, sem reutilizar o output parcial.
+que continua trilíngue. A execução final usa um diretório de output próprio por
+perfil, com escopo `full` (veja abaixo), sem reutilizar o output parcial.
 
 Execute na VM Linux com Python 3.11, as dependências do projeto, PyTorch e
 Transformers compatíveis com a CUDA instalada. Monte no contêiner/VM:
@@ -125,21 +129,32 @@ Cada config deve usar `dataset_kind: local_manifest`, conter os papéis
 `calibration_split: calibration` e `n_calibration_per_class` positivo. A
 calibração in-sample é rejeitada.
 
-O preflight com `--dry-run` é obrigatório antes de carregar modelos:
+Cada perfil é executado separadamente e tem o seu próprio diretório de output,
+nomeado pela [convenção](#convenção-de-nomes-dos-resultados), para que cada
+resultado de modelo/idioma seja fácil de identificar. O preflight com
+`--dry-run` é obrigatório antes de carregar modelos e é feito uma vez por perfil;
+o padrão para `hubert_base` é:
 
 ```bash
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles hubert_base wavlm_base_plus wav2vec2_base \
-  --output /mnt/results/layerwise-suite \
+  --profiles hubert_base \
+  --output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25 \
   --dry-run
 ```
 
-Leia `/mnt/results/layerwise-suite/execution_plan.json` antes de continuar. Ele
-registra hashes de configs/manifests, 108 probes, 324 células, estimativas
+Repita com `--profiles wavlm_base_plus` e o output
+`/mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full`, e com
+`--profiles wav2vec2_base` e o output
+`/mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full`.
+
+Leia o `execution_plan.json` de cada output (por exemplo,
+`/mnt/results/hubert_base__eng-por-zho__layerwise_xai__full/execution_plan.json`)
+antes de continuar. Ele registra hashes de configs/manifests, 36 probes e 108
+células por perfil (108 probes e 324 células nos três perfis), estimativas
 separadas de backprops de explicação/certificação/trace e a fórmula de espaço
 dos embeddings. Confirme espaço disponível, quotas, paths montados e orçamento
 de backprops.
@@ -152,7 +167,7 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
   --profiles hubert_base \
-  --output /mnt/results/layerwise-suite-pilot \
+  --output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__pilot \
   --xai-per-class 2
 ```
 
@@ -161,17 +176,39 @@ AttnLRP/DFT/STDFT, hashes e manifests das gerações, identidade das coortes e a
 seis tabelas agregadas. Com apenas um perfil,
 `encoder_relevance_agreement.csv` deve ser uma tabela vazia válida com status
 `not_applicable_less_than_two_profiles`, e a figura correspondente deve ser
-pulada; as outras cinco tabelas continuam obrigatórias. Então execute:
+pulada; as outras cinco tabelas continuam obrigatórias. Então execute três
+execuções separadas, uma por perfil, cada uma com o seu output canônico:
 
 ```bash
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles hubert_base wavlm_base_plus wav2vec2_base \
-  --output /mnt/results/layerwise-suite \
+  --profiles hubert_base \
+  --output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__full \
+  --xai-per-class 25
+
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles wavlm_base_plus \
+  --output /mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full \
+  --xai-per-class 25
+
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles wav2vec2_base \
+  --output /mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25
 ```
+
+Como cada execução contém um único perfil,
+`encoder_relevance_agreement.csv` (que exige dois ou mais perfis no mesmo output)
+volta a ser uma tabela vazia válida com status
+`not_applicable_less_than_two_profiles`.
 
 A retomada é automática: stages com marker e artefatos íntegros são pulados.
 `run_status.json` informa `running`, `failed` ou `complete`; `--force`
@@ -196,3 +233,79 @@ O smoke local da Task 11 usa CPU e fakes determinísticos e não comprova
 compatibilidade com checkpoint real, CUDA ou áudio real; nenhum sucesso
 GPU/modelo HuggingFace real é alegado. O piloto acima continua sendo o próximo
 passo de validação na VM.
+
+### Convenção de nomes dos resultados
+
+Todo diretório de resultado que alimenta o relatório layer-wise segue
+
+```text
+<model>__<languages>__layerwise_xai__<scope>
+```
+
+- `<model>`: perfil do encoder, por exemplo `hubert_base`, `wavlm_base_plus` ou
+  `wav2vec2_base`;
+- `<languages>`: códigos ISO 639-3 na ordem canônica `eng`, `por`, `zho`,
+  unidos por `-`. A suíte aceita qualquer subconjunto não vazio de inglês,
+  português e mandarim, e o relatório aceita as sete combinações: `eng`, `por`,
+  `zho`, `eng-por`, `eng-zho`, `por-zho` e `eng-por-zho`;
+- `layerwise_xai`: protocolo;
+- `<scope>`: `pilot` ou `full`.
+
+Exemplos: `hubert_base__eng__layerwise_xai__full`,
+`wavlm_base_plus__eng__layerwise_xai__full` e
+`hubert_base__eng-por-zho__layerwise_xai__pilot`. O nome é passado em
+`--output` ao executar a suíte; um diretório já concluído pode ser renomeado
+inteiro, sem alterar seu conteúdo.
+
+O relatório lê **um modelo por diretório**, e é por isso que os comandos acima
+executam cada perfil em seu próprio diretório:
+`hubert_base__eng-por-zho__layerwise_xai__full`,
+`wavlm_base_plus__eng-por-zho__layerwise_xai__full` e
+`wav2vec2_base__eng-por-zho__layerwise_xai__full`.
+
+O exemplo HuBERT `hubert_base__eng__layerwise_xai__full` usado abaixo é o estudo
+de caso somente em inglês, já concluído, e é separado das futuras execuções
+trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
+
+## Relatório layer-wise atualizável
+
+`brspeech_xai.layerwise_report` gera, a partir de resultados concluídos, um
+bundle LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
+LaTeX), `report_manifest.json` e `build_local.ps1`.
+
+Na VM, informe cada diretório de resultado explicitamente (a opção `--result`
+pode ser repetida; nenhum diretório é varrido por padrão e identidades
+modelo/idioma/escopo duplicadas são rejeitadas):
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.layerwise_report \
+  --result /mnt/results/hubert_base__eng__layerwise_xai__full \
+  --output /mnt/results/layerwise_xai_report
+```
+
+Copie o bundle da VM para a máquina Windows (por exemplo, para
+`escrita/relatorio-layerwise-xai/`) e compile com o `pdflatex` do MiKTeX:
+
+```powershell
+Set-Location escrita\relatorio-layerwise-xai
+.\build_local.ps1
+```
+
+`build_local.ps1` executa `pdflatex` duas vezes em modo `nonstopmode` e falha se
+`report.pdf` não for produzido. Os arquivos temporários do LaTeX não devem ser
+versionados.
+
+**Garantia somente leitura e sem GPU.** O gerador só lê artefatos persistidos:
+valida o status `complete` da execução, as gerações imutáveis (hashes) e os
+markers das células, e grava apenas dentro de `--output`. Ele recusa um
+`--output` que se sobreponha a um diretório de resultado ou que seja um
+diretório não vazio sem bundle anterior. Nunca carrega encoder, não importa
+`torch` nem `transformers` e não exige GPU. A saída é determinística para os
+mesmos artefatos: `report_manifest.json` registra, com caminhos relativos e
+SHA-256, os artefatos consumidos e os arquivos gerados.
+
+**Limitação atual.** A primeira edição é um estudo de caso de modelo único e
+idioma único (HuBERT Base em inglês) e não faz afirmações entre modelos ou entre
+idiomas. Comparações sem sentido para o número disponível de modelos/idiomas
+(acordo entre encoders, mudança entre idiomas, diagonal versus fora da diagonal
+e divergência espectral) são omitidas e listadas como espaços futuros.

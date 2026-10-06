@@ -383,42 +383,74 @@ output directory. All three configs must declare a separate `calibration`
 split and a positive per-class calibration quota; in-sample calibration is
 forbidden.
 
-Run the mandatory preflight first:
+Each profile is run separately and has its own output directory, named by the
+[result naming convention](#result-naming-and-report-workflow), so every
+model/language result is easy to identify. Run the mandatory preflight first,
+once per profile; the pattern for `hubert_base` is:
 
 ```bash
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles hubert_base wavlm_base_plus wav2vec2_base \
-  --output /mnt/results/layerwise-suite \
+  --profiles hubert_base \
+  --output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25 \
   --dry-run
 ```
 
-Inspect `execution_plan.json` for config/manifest hashes, disk-space formula,
-108 probes, 324 cells and separate backprop estimates. Then run a one-profile
-pilot by removing `--dry-run`, changing the output directory, and using:
+Repeat it with `--profiles wavlm_base_plus` and the output
+`/mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full`, and with
+`--profiles wav2vec2_base` and the output
+`/mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full`. Inspect each
+`execution_plan.json` for config/manifest hashes, disk-space formula, the
+profile's 36 probes and 108 cells (108 probes and 324 cells across the three
+profiles) and separate backprop estimates. Then run a one-profile pilot by
+removing `--dry-run`, changing the output directory to the `pilot` scope, and
+using:
 
 ```bash
---profiles hubert_base --xai-per-class 2
+--profiles hubert_base \
+--output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__pilot \
+--xai-per-class 2
 ```
 
 Verify AttnLRP/DFT/STDFT conservation, immutable-generation integrity, fixed
 cohort IDs and all aggregate tables before the complete run. In the
 one-profile pilot, `encoder_relevance_agreement.csv` is intentionally empty
 with status `not_applicable_less_than_two_profiles`, and its plot is skipped;
-the other five tables remain required. The complete command is:
+the other five tables remain required. The complete run is three separate
+executions, one per profile, each with its own canonical output:
 
 ```bash
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles hubert_base wavlm_base_plus wav2vec2_base \
-  --output /mnt/results/layerwise-suite \
+  --profiles hubert_base \
+  --output /mnt/results/hubert_base__eng-por-zho__layerwise_xai__full \
+  --xai-per-class 25
+
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles wavlm_base_plus \
+  --output /mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full \
+  --xai-per-class 25
+
+PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
+  --eng-config scripts/configs/xai-eng-local.yaml \
+  --por-config scripts/configs/xai-por-local.yaml \
+  --zho-config scripts/configs/xai-zho-local.yaml \
+  --profiles wav2vec2_base \
+  --output /mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25
 ```
+
+Because each execution holds one profile, `encoder_relevance_agreement.csv`
+(which needs two or more profiles in the same output) is again a valid empty
+table with status `not_applicable_less_than_two_profiles`.
 
 Runs resume automatically from valid stage markers. Check `run_status.json`;
 use `--force` only to recompute the complete DAG. Outputs include embeddings,
@@ -440,3 +472,55 @@ The deterministic local smoke does not demonstrate real checkpoint, CUDA or
 audio compatibility. No local real-HuggingFace/GPU success is claimed; the VM
 pilot remains the next validation step. Operational details are in
 [scripts/README.md](scripts/README.md#suíte-layer-wise-trilíngue-na-vm).
+
+### Result naming and report workflow
+
+Every result directory that feeds the layer-wise report is named
+
+```text
+<model>__<languages>__layerwise_xai__<scope>
+```
+
+where `<model>` is the encoder profile (`hubert_base`, `wavlm_base_plus`,
+`wav2vec2_base`), `<languages>` are ISO 639-3 codes in canonical order joined
+by `-` and `<scope>` is `pilot` or `full`. The suite accepts any non-empty subset
+of English, Portuguese and Mandarin, so the report accepts all seven
+combinations: `eng`, `por`, `zho`, `eng-por`, `eng-zho`, `por-zho` and
+`eng-por-zho`. The report reads one model per directory, which is why the
+commands above run each profile in its own convention-named directory
+(`hubert_base__eng-por-zho__layerwise_xai__full`,
+`wavlm_base_plus__eng-por-zho__layerwise_xai__full` and
+`wav2vec2_base__eng-por-zho__layerwise_xai__full`).
+
+The HuBERT example below, `hubert_base__eng__layerwise_xai__full`, is the
+English-only case study that is already complete; it is separate from the future
+trilingual executions above, whose results will live in the `eng-por-zho`
+directories.
+
+Generate the portable Portuguese LaTeX bundle on the VM from explicit result
+directories (repeat `--result` to add more; duplicate model/language/scope
+identities are rejected and no directory is scanned by default):
+
+```bash
+PYTHONPATH=scripts python -m brspeech_xai.layerwise_report \
+  --result /mnt/results/hubert_base__eng__layerwise_xai__full \
+  --output /mnt/results/layerwise_xai_report
+```
+
+Copy the bundle to Windows (for example `escrita/relatorio-layerwise-xai/`) and
+compile it with MiKTeX:
+
+```powershell
+Set-Location escrita\relatorio-layerwise-xai
+.\build_local.ps1
+```
+
+The generator is read-only and needs no GPU: it only reads persisted results,
+validates their immutable generations, writes solely inside `--output`, and
+never loads an encoder or imports `torch`/`transformers`. Output is
+deterministic, and `report_manifest.json` records the consumed artifacts and
+generated files with relative paths and SHA-256 hashes. The first edition is a
+single-model, single-language case study (HuBERT Base, English) and makes no
+cross-model or cross-language claim; inapplicable comparisons are omitted. See
+[scripts/README.md](scripts/README.md#relatório-layer-wise-atualizável) for
+details.
