@@ -27,6 +27,7 @@ from brspeech_xai.layerwise_xai import (
     run_layerwise_xai,
     select_fixed_cohort,
 )
+from brspeech_xai.lrp_detector import ConservationDiagnostics
 
 
 def _catalog(tmp_path, *, order=None):
@@ -144,6 +145,27 @@ class _FixtureDetector(torch.nn.Module):
         self.register_buffer("b", torch.as_tensor(b, dtype=torch.float32))
 
 
+def _conservation_diagnostics(
+    *,
+    absolute_error=0.0,
+    relative_error=0.0,
+    accepted=True,
+):
+    evidence = 0.1
+    relative_tolerance = 1e-3
+    absolute_tolerance = 5e-3
+    return ConservationDiagnostics(
+        evidence=evidence,
+        relevance_sum=evidence - absolute_error,
+        absolute_error=absolute_error,
+        relative_error=relative_error,
+        absolute_tolerance=absolute_tolerance,
+        relative_tolerance=relative_tolerance,
+        bound=absolute_tolerance + relative_tolerance * abs(evidence),
+        accepted=accepted,
+    )
+
+
 def _run_fixture(
     tmp_path,
     *,
@@ -177,7 +199,7 @@ def _run_fixture(
             np.ones((1, 2)),
         )
     )
-    temporal_certificate = Mock(return_value=0.0)
+    temporal_certificate = Mock(return_value=_conservation_diagnostics())
     patch_encoder = Mock(
         return_value=patch_counts
         or {"layer_norm": 1, "group_norm": 1, "gelu": 1, "attention": 1}
@@ -430,7 +452,13 @@ def test_missing_capability_fails_before_encoder_or_backward(tmp_path):
             "non-finite|AttnLRP",
         ),
         (
-            {"temporal_certificate_fn": lambda *args: 0.5},
+            {
+                "temporal_certificate_fn": lambda *args: _conservation_diagnostics(
+                    absolute_error=0.01,
+                    relative_error=0.1,
+                    accepted=False,
+                )
+            },
             "bias-zeroed model/rule conservation",
         ),
         (
@@ -442,6 +470,47 @@ def test_missing_capability_fails_before_encoder_or_backward(tmp_path):
 def test_numerical_failures_are_closed(tmp_path, overrides, message):
     with pytest.raises(ValueError, match=message):
         _run_fixture(tmp_path, cell_overrides=overrides)
+
+
+def test_mixed_conservation_acceptance_is_persisted_with_full_diagnostics(tmp_path):
+    diagnostics = _conservation_diagnostics(
+        absolute_error=0.0011,
+        relative_error=0.011,
+        accepted=True,
+    )
+    summary, paths, *_ = _run_fixture(
+        tmp_path,
+        cell_overrides={
+            "temporal_certificate_fn": lambda *args: diagnostics,
+        },
+    )
+
+    row = summary.iloc[0]
+    generation = resolve_active_xai_generation(
+        paths.layer_xai(
+            row["profile"], int(row["layer"]), row["source"], row["target"]
+        )
+    )
+    certificate = json.loads(
+        (generation / "attnlrp_conservation.json").read_text(encoding="utf-8")
+    )
+
+    assert certificate["bias_zeroed_validation_evidence"] == pytest.approx(0.1)
+    assert certificate["bias_zeroed_validation_relevance_sum"] == pytest.approx(
+        0.0989
+    )
+    assert certificate["bias_zeroed_validation_absolute_error"] == pytest.approx(
+        0.0011
+    )
+    assert certificate["bias_zeroed_validation_residual"] == pytest.approx(0.011)
+    assert certificate["bias_zeroed_validation_absolute_tolerance"] == pytest.approx(
+        0.005
+    )
+    assert certificate["bias_zeroed_validation_relative_tolerance"] == pytest.approx(
+        0.001
+    )
+    assert certificate["bias_zeroed_validation_bound"] == pytest.approx(0.0051)
+    assert certificate["bias_zeroed_validation_accepted"] is True
 
 
 def test_small_recomputed_score_drift_is_audited(tmp_path):
@@ -826,7 +895,7 @@ def test_detector_is_moved_to_device_and_eval_before_any_backward(tmp_path):
         assert model.training is False
         assert model.w.device.type == "cpu"
         assert model.b.device.type == "cpu"
-        return 0.0
+        return _conservation_diagnostics()
 
     _run_fixture(
         tmp_path,

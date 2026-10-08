@@ -6,6 +6,7 @@ continua ativo para Input×Gradient/AttnLRP.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from numbers import Integral
 from typing import Sequence
 
@@ -373,6 +374,18 @@ def verify_score_equivalence(
     return max_error
 
 
+@dataclass(frozen=True)
+class ConservationDiagnostics:
+    evidence: float
+    relevance_sum: float
+    absolute_error: float
+    relative_error: float
+    absolute_tolerance: float
+    relative_tolerance: float
+    bound: float
+    accepted: bool
+
+
 def conservation_certificate(
     model: SSLDetectorAD,
     processor,
@@ -380,17 +393,20 @@ def conservation_certificate(
     device: str | torch.device,
     b: float,
     tol: float = 1e-3,
-) -> float:
+    atol: float = 5e-3,
+) -> ConservationDiagnostics:
     """Mede conservação com biases do encoder temporariamente zerados.
 
-    A fórmula é a mesma do script original:
-    ``abs(sum(R_input) - (logit - b_head)) / (abs(logit - b_head) + 1e-9)``.
+    A aceitação usa um limite misto, ``atol + tol * abs(evidência)``, para que
+    evidências próximas de zero não tornem o teste relativo instável.
     """
     clips = list(wavs)
     if not clips:
         raise ValueError("wavs não pode ser vazio")
     if not np.isfinite(tol) or tol <= 0:
         raise ValueError("tol deve ser finita e positiva")
+    if not np.isfinite(atol) or atol < 0:
+        raise ValueError("atol deve ser finita e não negativa")
     if not np.isfinite(b):
         raise ValueError("b_head deve ser finito")
 
@@ -401,15 +417,40 @@ def conservation_certificate(
                 if name.endswith("bias"):
                     saved[name] = parameter.detach().clone()
                     parameter.zero_()
-        residuals = []
+        diagnostics: list[ConservationDiagnostics] = []
         for wav in clips:
             _, r_time, logit = relevance_for_clip(model, processor, wav, device)
-            target = logit - float(b)
-            residual = abs(float(r_time.sum()) - target) / (abs(target) + 1e-9)
-            if not np.isfinite(residual):
+            evidence = float(logit) - float(b)
+            relevance_sum = float(np.asarray(r_time, dtype=np.float64).sum())
+            absolute_error = abs(relevance_sum - evidence)
+            relative_error = absolute_error / (abs(evidence) + 1e-9)
+            bound = float(atol) + float(tol) * abs(evidence)
+            values = (
+                evidence,
+                relevance_sum,
+                absolute_error,
+                relative_error,
+                bound,
+            )
+            if not all(np.isfinite(value) for value in values):
                 raise ValueError("certificado produziu resíduo não finito")
-            residuals.append(residual)
-        return float(np.max(residuals))
+            diagnostics.append(
+                ConservationDiagnostics(
+                    evidence=evidence,
+                    relevance_sum=relevance_sum,
+                    absolute_error=absolute_error,
+                    relative_error=relative_error,
+                    absolute_tolerance=float(atol),
+                    relative_tolerance=float(tol),
+                    bound=bound,
+                    accepted=absolute_error <= bound,
+                )
+            )
+        return max(
+            diagnostics,
+            key=lambda diagnostic: diagnostic.absolute_error
+            / max(diagnostic.bound, np.finfo(float).tiny),
+        )
     finally:
         with torch.no_grad():
             parameters = dict(model.encoder.named_parameters())

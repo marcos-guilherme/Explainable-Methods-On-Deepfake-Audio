@@ -308,12 +308,52 @@ def test_conservation_certificate_preserves_formula_and_restores_bias():
     original_bias = encoder.bias.detach().clone()
     wavs = [np.array([0.2, -0.1, 0.7]), np.array([1.0, 0.5])]
 
-    residual = conservation_certificate(
+    diagnostics = conservation_certificate(
         model, _Processor([[0.2, -0.1, 0.7]]), wavs[:1], "cpu", b=0.4
     )
 
-    assert residual < 1e-6
+    assert diagnostics.relative_error < 1e-6
+    assert diagnostics.accepted
     torch.testing.assert_close(encoder.bias, original_bias)
+
+
+@pytest.mark.parametrize(
+    ("relevance_sum", "accepted"),
+    [(0.0989, True), (0.09, False)],
+)
+def test_conservation_certificate_uses_mixed_absolute_relative_bound(
+    monkeypatch, relevance_sum, accepted
+):
+    encoder = _HomogeneousEncoder()
+    model = SSLDetectorAD(encoder, 1, np.array([1.25]), 0.4)
+    monkeypatch.setattr(
+        lrp_detector,
+        "relevance_for_clip",
+        lambda *args: (
+            np.ones(1, dtype=np.float32),
+            np.asarray([relevance_sum], dtype=np.float64),
+            0.5,
+        ),
+    )
+
+    diagnostics = conservation_certificate(
+        model,
+        _Processor([[1.0]]),
+        [np.array([1.0])],
+        "cpu",
+        b=0.4,
+        tol=1e-3,
+        atol=5e-3,
+    )
+
+    assert diagnostics.evidence == pytest.approx(0.1)
+    assert diagnostics.relevance_sum == pytest.approx(relevance_sum)
+    assert diagnostics.absolute_error == pytest.approx(abs(relevance_sum - 0.1))
+    assert diagnostics.relative_error == pytest.approx(
+        abs(relevance_sum - 0.1) / (0.1 + 1e-9)
+    )
+    assert diagnostics.bound == pytest.approx(5e-3 + 1e-3 * 0.1)
+    assert diagnostics.accepted is accepted
 
 
 def test_conservation_certificate_restores_bias_after_exception():
@@ -366,10 +406,18 @@ def test_conservation_certificate_restores_touched_bias_when_zeroing_raises(monk
 
 
 @pytest.mark.parametrize(
-    "wavs, tol",
-    [([], 1e-3), ([np.array([1.0])], 0.0), ([np.array([1.0])], np.inf)],
+    "wavs, tol, atol",
+    [
+        ([], 1e-3, 5e-3),
+        ([np.array([1.0])], 0.0, 5e-3),
+        ([np.array([1.0])], np.inf, 5e-3),
+        ([np.array([1.0])], 1e-3, -1.0),
+        ([np.array([1.0])], 1e-3, np.inf),
+    ],
 )
-def test_conservation_certificate_validates_inputs(wavs, tol):
+def test_conservation_certificate_validates_inputs(wavs, tol, atol):
     model = SSLDetectorAD(_HomogeneousEncoder(), 1, np.array([1.0]), 0.0)
     with pytest.raises(ValueError):
-        conservation_certificate(model, _Processor([[1.0]]), wavs, "cpu", 0.0, tol)
+        conservation_certificate(
+            model, _Processor([[1.0]]), wavs, "cpu", 0.0, tol, atol
+        )

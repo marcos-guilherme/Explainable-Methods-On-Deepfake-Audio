@@ -28,6 +28,7 @@ from .layerwise_paths import (
     sample_id_catalog_hash,
 )
 from .lrp_detector import (
+    ConservationDiagnostics,
     SSLDetectorAD,
     conservation_certificate,
     port_logistic_head,
@@ -475,23 +476,46 @@ def run_layer_xai_cell(
         loaded_wavs[sample_id] = wav
 
     validation_sample_id = str(cohort.iloc[0]["sample_id"])
-    bias_zeroed_validation_residual = float(
-        temporal_certificate_fn(
-            model,
-            processor,
-            [loaded_wavs[validation_sample_id]],
-            device,
-            bias,
-            conservation_tolerance,
+    conservation = temporal_certificate_fn(
+        model,
+        processor,
+        [loaded_wavs[validation_sample_id]],
+        device,
+        bias,
+        conservation_tolerance,
+    )
+    if not isinstance(conservation, ConservationDiagnostics):
+        raise ValueError(
+            "bias-zeroed model/rule conservation returned invalid diagnostics"
         )
+    diagnostic_values = (
+        conservation.evidence,
+        conservation.relevance_sum,
+        conservation.absolute_error,
+        conservation.relative_error,
+        conservation.absolute_tolerance,
+        conservation.relative_tolerance,
+        conservation.bound,
     )
     if (
-        not np.isfinite(bias_zeroed_validation_residual)
-        or bias_zeroed_validation_residual > conservation_tolerance
+        not all(np.isfinite(value) for value in diagnostic_values)
+        or conservation.absolute_error < 0
+        or conservation.relative_error < 0
+        or conservation.absolute_tolerance < 0
+        or conservation.relative_tolerance <= 0
+        or conservation.bound <= 0
+        or conservation.relative_tolerance != conservation_tolerance
     ):
         raise ValueError(
+            "bias-zeroed model/rule conservation returned invalid diagnostics"
+        )
+    bias_zeroed_validation_residual = float(conservation.relative_error)
+    if not conservation.accepted:
+        raise ValueError(
             "bias-zeroed model/rule conservation exceeded tolerance: "
-            f"{bias_zeroed_validation_residual}"
+            f"absolute_error={conservation.absolute_error}, "
+            f"bound={conservation.bound}, "
+            f"relative_error={conservation.relative_error}"
         )
 
     for row in cohort.itertuples(index=False):
@@ -683,6 +707,21 @@ def run_layer_xai_cell(
                     "bias_zeroed_validation_residual": (
                         bias_zeroed_validation_residual
                     ),
+                    "bias_zeroed_validation_evidence": conservation.evidence,
+                    "bias_zeroed_validation_relevance_sum": (
+                        conservation.relevance_sum
+                    ),
+                    "bias_zeroed_validation_absolute_error": (
+                        conservation.absolute_error
+                    ),
+                    "bias_zeroed_validation_absolute_tolerance": (
+                        conservation.absolute_tolerance
+                    ),
+                    "bias_zeroed_validation_relative_tolerance": (
+                        conservation.relative_tolerance
+                    ),
+                    "bias_zeroed_validation_bound": conservation.bound,
+                    "bias_zeroed_validation_accepted": conservation.accepted,
                     "max_bias_inclusive_attribution_gap": float(
                         samples["bias_inclusive_attribution_gap"].max()
                     ),

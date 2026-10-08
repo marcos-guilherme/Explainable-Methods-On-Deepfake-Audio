@@ -342,9 +342,14 @@ def main(argv=None) -> int:
     if backend == "attnlrp" and args.norm_stab <= 0:
         cert_wavs = [emb._to_16k_mono(audios[i], srs[i]) for i in idx[:3]]
         cert = conservation_certificate(model, emb._processor, cert_wavs, device, float(b))
-        status = "OK" if cert < 1e-3 else "FALHOU"
-        log.info(f"certificado de conservação (vieses zerados): resíduo relativo máx={cert:.2e} "
-                 f"[{status}] (esperado ~0; independe do modelo)")
+        status = "OK" if cert.accepted else "FALHOU"
+        log.info(
+            "certificado de conservação (vieses zerados): "
+            f"erro absoluto={cert.absolute_error:.2e}, "
+            f"limite={cert.bound:.2e}, "
+            f"resíduo relativo={cert.relative_error:.2e} "
+            f"[{status}] (esperado ~0; independe do modelo)"
+        )
 
     # MODO EXEMPLOS: figura STDFT-LRP (heatmap tempo-frequência) de poucos clipes e encerra.
     # Ativa se --stdft-examples>0 OU se índices fixos foram passados (--clip-indices).
