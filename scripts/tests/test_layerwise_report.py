@@ -1689,13 +1689,11 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
     assert tables.languages == ("eng", "por")
     assert set(tables.performance["language"]) == {"eng", "por"}
     assert len(tables.performance.groupby(["source", "target"])) == 4
-    assert tables.omitted_comparisons["encoder_agreement"] == "single_model"
-    for name in (
-        "language_shift",
-        "diagonal_vs_offdiagonal",
-        "spectral_divergence",
-    ):
-        assert tables.omitted_comparisons[name] == "not_in_first_edition"
+    # With two languages the language comparisons now ship complete tables and
+    # are removed from the omission map; only encoder_agreement stays omitted.
+    assert tables.omitted_comparisons == {"encoder_agreement": "single_model"}
+    for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
+        assert not getattr(tables, name).empty
     records = render_report_figures(tables, tmp_path / "figs")
     assert tuple(record.name for record in records) == _EIGHT_FAMILIES
     assert len(list((tmp_path / "figs").iterdir())) == 16
@@ -1711,7 +1709,12 @@ def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
         ]
     )
     assert tables.models == ("hubert_base", "wavlm_base")
-    assert tables.omitted_comparisons["encoder_agreement"] == "not_in_first_edition"
+    # With two models encoder_agreement now ships a complete table and leaves the
+    # omission map; the single-language comparisons remain omitted.
+    assert "encoder_agreement" not in tables.omitted_comparisons
+    assert not tables.encoder_agreement.empty
+    for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
+        assert tables.omitted_comparisons[name] == "single_language"
     assert tables.planned_figures == _EIGHT_FAMILIES
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 

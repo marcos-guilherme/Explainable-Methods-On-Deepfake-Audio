@@ -270,6 +270,23 @@ COMPARISON_FAMILIES: tuple[str, ...] = (
     "diagonal_vs_offdiagonal",
     "spectral_divergence",
 )
+# Fixed, non-negotiable bootstrap contract shared by every comparison builder.
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 42
+BOOTSTRAP_CI_LEVEL = 0.95
+_CI_PERCENTILES = (
+    100.0 * (1.0 - BOOTSTRAP_CI_LEVEL) / 2.0,
+    100.0 * (1.0 + BOOTSTRAP_CI_LEVEL) / 2.0,
+)
+# Jensen-Shannon distance is reported in bits (base-2 logarithm, range [0, 1]).
+_JS_BASE = 2.0
+# Comparison groups condition on the true class; "all" pools both classes but is
+# still stratified by class during resampling.
+_COMPARISON_GROUPS: tuple[tuple[str, object], ...] = (
+    ("all", None),
+    ("real", 0),
+    ("synthetic", 1),
+)
 CLASS_NAMES: Mapping[int, str] = MappingProxyType({0: "real", 1: "synthetic"})
 FALLBACK_BAND_ORIGIN = "fallback_default_mel_contract"
 CONFIG_BAND_ORIGIN = "config"
@@ -442,6 +459,10 @@ class ReportTables:
     layer_faithfulness: pd.DataFrame
     cell_predictions: pd.DataFrame
     sample_relevance: pd.DataFrame
+    encoder_agreement: pd.DataFrame
+    language_shift: pd.DataFrame
+    diagonal_vs_offdiagonal: pd.DataFrame
+    spectral_divergence: pd.DataFrame
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1645,18 +1666,29 @@ def _transition_summary(transitions: pd.DataFrame) -> pd.DataFrame:
 
 
 def _omitted_comparisons(
-    models: Sequence[str], languages: Sequence[str]
+    models: Sequence[str],
+    languages: Sequence[str],
+    availability: Mapping[str, bool],
 ) -> dict[str, str]:
-    multi_model = "not_in_first_edition" if len(models) > 1 else "single_model"
-    multi_language = (
-        "not_in_first_edition" if len(languages) > 1 else "single_language"
-    )
-    return {
-        "encoder_agreement": multi_model,
-        "language_shift": multi_language,
-        "diagonal_vs_offdiagonal": multi_language,
-        "spectral_divergence": multi_language,
+    """Reasons for comparisons that are *not* delivered this edition.
+
+    A comparison is removed from the omission map only once its complete table is
+    available; until then it reports why it is missing (too few models/languages,
+    or an unexpectedly empty table despite sufficient inputs).
+    """
+    requirements = {
+        "encoder_agreement": (len(models) > 1, "single_model"),
+        "language_shift": (len(languages) > 1, "single_language"),
+        "diagonal_vs_offdiagonal": (len(languages) > 1, "single_language"),
+        "spectral_divergence": (len(languages) > 1, "single_language"),
     }
+    omitted: dict[str, str] = {}
+    for name, (has_inputs, insufficient_reason) in requirements.items():
+        if not has_inputs:
+            omitted[name] = insufficient_reason
+        elif not availability.get(name, False):
+            omitted[name] = "unavailable_incomplete_table"
+    return omitted
 
 
 def build_transfer_selection(performance: pd.DataFrame) -> pd.DataFrame:
@@ -1745,6 +1777,822 @@ def build_xai_performance_associations(
     return _ordered(pd.DataFrame(rows), keys)
 
 
+# ---------------------------------------------------------------------------
+# Cross-model / cross-language comparisons (pure, deterministic builders)
+#
+# Every builder is a pure function over the identity-labelled report tables.
+# It reads nothing from disk, loads no model, and produces byte-identical output
+# regardless of the order of its input rows. All uncertainty is quantified with
+# the fixed bootstrap contract: BOOTSTRAP_RESAMPLES stratified resamples, base
+# seed BOOTSTRAP_SEED (combined with a stable hash of the row identity so order
+# cannot change the output), and a percentile BOOTSTRAP_CI_LEVEL interval. No
+# p-values are produced anywhere.
+# ---------------------------------------------------------------------------
+
+_ENCODER_AGREEMENT_COLUMNS = (
+    "model_a",
+    "model_b",
+    "source",
+    "target",
+    "layer",
+    "metric",
+    "unit",
+    "estimate",
+    "ci_low",
+    "ci_high",
+    "n",
+    "status",
+    "n_resamples",
+    "seed",
+    "ci_level",
+)
+_LANGUAGE_SHIFT_COLUMNS = (
+    "model",
+    "source",
+    "target_a",
+    "target_b",
+    "layer",
+    "group",
+    "metric",
+    "unit",
+    "estimate",
+    "ci_low",
+    "ci_high",
+    "n_a",
+    "n_b",
+    "status",
+    "n_resamples",
+    "seed",
+    "ci_level",
+)
+_DIAGONAL_COMPARISON_COLUMNS = (
+    "model",
+    "source",
+    "target",
+    "layer",
+    "metric",
+    "unit",
+    "estimate",
+    "ci_low",
+    "ci_high",
+    "n",
+    "status",
+    "n_resamples",
+    "seed",
+    "ci_level",
+)
+_SPECTRAL_DIVERGENCE_COLUMNS = (
+    "model",
+    "language_a",
+    "language_b",
+    "layer",
+    "group",
+    "metric",
+    "unit",
+    "estimate",
+    "ci_low",
+    "ci_high",
+    "n_a",
+    "n_b",
+    "status",
+    "n_resamples",
+    "seed",
+    "ci_level",
+)
+
+
+def _empty_comparison(columns: Sequence[str]) -> pd.DataFrame:
+    """A typed, empty comparison frame used for single model/language backends."""
+    return pd.DataFrame({name: pd.Series(dtype="object") for name in columns})
+
+
+def _finalize_comparison(
+    rows: Sequence[Mapping[str, object]], columns: Sequence[str], keys: Sequence[str]
+) -> pd.DataFrame:
+    if not rows:
+        return _empty_comparison(columns)
+    frame = pd.DataFrame(list(rows))[list(columns)]
+    return frame.sort_values(list(keys), kind="mergesort").reset_index(drop=True)
+
+
+def _comparison_rng(*identity: object) -> np.random.Generator:
+    """A generator whose seed is stably derived from the base seed and identity."""
+    digest = hashlib.sha256(
+        "||".join(str(part) for part in identity).encode("utf-8")
+    ).digest()
+    return np.random.default_rng([BOOTSTRAP_SEED, int.from_bytes(digest[:8], "big")])
+
+
+def _resample_matrix(
+    rng: np.random.Generator, labels: np.ndarray, n_resamples: int
+) -> np.ndarray:
+    """A ``(n_resamples, n)`` matrix of stratified bootstrap row positions.
+
+    Each class is resampled with replacement to its original count, so every
+    resample preserves the class balance. Columns are grouped by class; because
+    all downstream statistics are permutation-invariant within a resample this
+    grouping does not affect any result.
+    """
+    labels = np.asarray(labels)
+    blocks = []
+    for value in np.unique(labels):
+        members = np.flatnonzero(labels == value)
+        draws = rng.integers(0, len(members), size=(n_resamples, len(members)))
+        blocks.append(members[draws])
+    return np.concatenate(blocks, axis=1)
+
+
+def _rowwise_pearson(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    xm = x - x.mean(axis=1, keepdims=True)
+    ym = y - y.mean(axis=1, keepdims=True)
+    numerator = (xm * ym).sum(axis=1)
+    denominator = np.sqrt((xm ** 2).sum(axis=1) * (ym ** 2).sum(axis=1))
+    out = np.full(len(x), np.nan)
+    nonzero = denominator > 0
+    out[nonzero] = numerator[nonzero] / denominator[nonzero]
+    return out
+
+
+def _rowwise_spearman(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Spearman's rho per row; NaN where either row is a constant series."""
+    from scipy.stats import rankdata
+
+    return _rowwise_pearson(rankdata(a, axis=1), rankdata(b, axis=1))
+
+
+def _rowwise_kappa(pred_a: np.ndarray, pred_b: np.ndarray) -> np.ndarray:
+    """Binary Cohen's kappa per row; NaN on a degenerate (p_e == 1) denominator."""
+    n = pred_a.shape[1]
+    agreement = (pred_a == pred_b).mean(axis=1)
+    pa1 = pred_a.mean(axis=1)
+    pb1 = pred_b.mean(axis=1)
+    expected = pa1 * pb1 + (1.0 - pa1) * (1.0 - pb1)
+    out = np.full(pred_a.shape[0], np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        valid = expected < 1.0
+        out[valid] = (agreement[valid] - expected[valid]) / (1.0 - expected[valid])
+    return out
+
+
+def _rowwise_jensenshannon(p: np.ndarray, q: np.ndarray, base: float) -> np.ndarray:
+    p = p / p.sum(axis=1, keepdims=True)
+    q = q / q.sum(axis=1, keepdims=True)
+    m = 0.5 * (p + q)
+
+    def _kl(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            term = np.where(a > 0, a * np.log(a / b), 0.0)
+        return term.sum(axis=1)
+
+    divergence = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
+    divergence = np.clip(divergence, 0.0, None)
+    return np.sqrt(divergence / math.log(base))
+
+
+def _rowwise_auc(labels: np.ndarray, scores: np.ndarray) -> np.ndarray:
+    """ROC-AUC per row via average ranks (matches roc_auc_score)."""
+    from scipy.stats import rankdata
+
+    ranks = rankdata(scores, axis=1)
+    positive = labels == 1
+    n_pos = positive.sum(axis=1).astype(np.float64)
+    n_neg = labels.shape[1] - n_pos
+    out = np.full(labels.shape[0], np.nan)
+    valid = (n_pos > 0) & (n_neg > 0)
+    rank_sum = (ranks * positive).sum(axis=1)
+    out[valid] = (
+        rank_sum[valid] - n_pos[valid] * (n_pos[valid] + 1) / 2.0
+    ) / (n_pos[valid] * n_neg[valid])
+    return out
+
+
+def _rowwise_mcc(labels: np.ndarray, prediction: np.ndarray) -> np.ndarray:
+    """Matthews correlation per row; 0.0 on a degenerate denominator."""
+    tp = ((prediction == 1) & (labels == 1)).sum(axis=1).astype(np.float64)
+    tn = ((prediction == 0) & (labels == 0)).sum(axis=1).astype(np.float64)
+    fp = ((prediction == 1) & (labels == 0)).sum(axis=1).astype(np.float64)
+    fn = ((prediction == 0) & (labels == 1)).sum(axis=1).astype(np.float64)
+    denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    out = np.zeros(labels.shape[0])
+    nonzero = denominator > 0
+    out[nonzero] = (tp[nonzero] * tn[nonzero] - fp[nonzero] * fn[nonzero]) / denominator[
+        nonzero
+    ]
+    return out
+
+
+def _resampled_means(vectors: np.ndarray, index_matrix: np.ndarray) -> np.ndarray:
+    """Mean band vector for every resample: ``(n_resamples, n_bands)``."""
+    return vectors[index_matrix].mean(axis=1)
+
+
+def _wasserstein_batch(
+    support_a: np.ndarray,
+    support_b: np.ndarray,
+    weights_a: np.ndarray,
+    weights_b: np.ndarray,
+) -> np.ndarray:
+    """1-D Wasserstein distance for many weight rows over fixed supports.
+
+    Mirrors ``scipy.stats.wasserstein_distance`` (which normalizes the weights)
+    but shares the support-dependent structure across all resample rows.
+    """
+    sorter_a = np.argsort(support_a, kind="mergesort")
+    sorter_b = np.argsort(support_b, kind="mergesort")
+    values_a = support_a[sorter_a]
+    values_b = support_b[sorter_b]
+    all_values = np.concatenate((values_a, values_b))
+    all_values.sort(kind="mergesort")
+    deltas = np.diff(all_values)
+    a_indices = values_a.searchsorted(all_values[:-1], side="right")
+    b_indices = values_b.searchsorted(all_values[:-1], side="right")
+
+    def _cdf(weights: np.ndarray, sorter: np.ndarray, indices: np.ndarray) -> np.ndarray:
+        ordered = weights[:, sorter]
+        cumulative = np.concatenate(
+            (np.zeros((ordered.shape[0], 1)), np.cumsum(ordered, axis=1)), axis=1
+        )
+        totals = cumulative[:, -1:]
+        return cumulative[:, indices] / totals
+
+    cdf_a = _cdf(weights_a, sorter_a, a_indices)
+    cdf_b = _cdf(weights_b, sorter_b, b_indices)
+    return (np.abs(cdf_a - cdf_b) * deltas).sum(axis=1)
+
+
+def _ci_bounds(samples: np.ndarray) -> tuple[float, float]:
+    """Percentile confidence bounds; never clamped to the point estimate."""
+    finite = np.asarray(samples, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    low, high = np.percentile(finite, _CI_PERCENTILES)
+    return float(low), float(high)
+
+
+def _as_distribution(values: object, context: str) -> np.ndarray:
+    """Validate a normalized relevance vector, failing closed on zero vectors."""
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all() or np.any(arr < 0):
+        raise ValueError(
+            f"{context}: normalized relevance must be a finite non-negative vector"
+        )
+    total = float(arr.sum())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(
+            f"{context}: normalized relevance must sum to 1 (got {total:.6g}); "
+            "zero or unnormalized vectors are rejected rather than fabricated"
+        )
+    return arr
+
+
+def _distribution_matrix(frame: pd.DataFrame, context: str) -> np.ndarray:
+    vectors = [
+        _as_distribution(value, context) for value in frame["band_abs_normalized"]
+    ]
+    widths = {len(vector) for vector in vectors}
+    if len(widths) != 1:
+        raise ValueError(f"{context}: relevance vectors have inconsistent band counts")
+    return np.stack(vectors)
+
+
+def _spearman_rho(a: np.ndarray, b: np.ndarray) -> float:
+    """Spearman's rho; NaN (constant-series) when either series does not vary."""
+    from scipy.stats import rankdata
+
+    if np.ptp(a) == 0 or np.ptp(b) == 0:
+        return float("nan")
+    return float(np.corrcoef(rankdata(a), rankdata(b))[0, 1])
+
+
+def _fast_auc(labels: np.ndarray, scores: np.ndarray) -> float:
+    """ROC-AUC via average ranks; matches sklearn.metrics.roc_auc_score."""
+    from scipy.stats import rankdata
+
+    ranks = rankdata(scores)
+    positive = labels == 1
+    n_pos = int(positive.sum())
+    n_neg = int(len(labels) - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    return float(
+        (ranks[positive].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    )
+
+
+def _fast_mcc(labels: np.ndarray, prediction: np.ndarray) -> float:
+    """Matthews correlation; 0.0 on a degenerate denominator (as sklearn does)."""
+    tp = float(((prediction == 1) & (labels == 1)).sum())
+    tn = float(((prediction == 0) & (labels == 0)).sum())
+    fp = float(((prediction == 1) & (labels == 0)).sum())
+    fn = float(((prediction == 0) & (labels == 1)).sum())
+    denominator = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    return (tp * tn - fp * fn) / denominator if denominator else 0.0
+
+
+def _aligned_pair(
+    left: pd.DataFrame, right: pd.DataFrame, context: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Sort two cohorts by sample_id and require identical IDs and labels."""
+    left = left.sort_values("sample_id", kind="mergesort").reset_index(drop=True)
+    right = right.sort_values("sample_id", kind="mergesort").reset_index(drop=True)
+    if left["sample_id"].tolist() != right["sample_id"].tolist():
+        raise ValueError(f"{context}: cohorts have non-identical sample IDs")
+    if not np.array_equal(
+        left["y_true"].to_numpy(dtype=np.int64),
+        right["y_true"].to_numpy(dtype=np.int64),
+    ):
+        raise ValueError(f"{context}: cohorts disagree on y_true labels")
+    return left, right
+
+
+def _cell_keys(frame: pd.DataFrame, columns: Sequence[str]) -> list[tuple]:
+    unique = frame[list(columns)].drop_duplicates()
+    return sorted(tuple(row) for row in unique.itertuples(index=False, name=None))
+
+
+def _metadata() -> dict[str, object]:
+    return {
+        "n_resamples": BOOTSTRAP_RESAMPLES,
+        "seed": BOOTSTRAP_SEED,
+        "ci_level": BOOTSTRAP_CI_LEVEL,
+    }
+
+
+def build_encoder_agreement(
+    cell_predictions: pd.DataFrame, sample_relevance: pd.DataFrame
+) -> pd.DataFrame:
+    """Agreement between every unordered model pair on each source/target/layer.
+
+    Full predictions yield the score Spearman rho, the fraction of matching
+    predictions and Cohen's kappa; the XAI cohort yields the mean per-sample
+    cosine similarity and Jensen-Shannon distance between absolute-normalized
+    relevance vectors. Each metric carries its own CI, n, unit and status.
+    """
+    from sklearn.metrics import cohen_kappa_score
+
+    models = sorted(set(cell_predictions["model"]))
+    if len(models) < 2:
+        return _empty_comparison(_ENCODER_AGREEMENT_COLUMNS)
+
+    rows: list[dict[str, object]] = []
+    meta = _metadata()
+    for index_a in range(len(models)):
+        for index_b in range(index_a + 1, len(models)):
+            model_a, model_b = models[index_a], models[index_b]
+
+            def _row(src, tgt, layer, metric, unit, estimate, ci_low, ci_high, n, status):
+                rows.append(
+                    {
+                        "model_a": model_a,
+                        "model_b": model_b,
+                        "source": src,
+                        "target": tgt,
+                        "layer": int(layer),
+                        "metric": metric,
+                        "unit": unit,
+                        "estimate": float(estimate),
+                        "ci_low": float(ci_low),
+                        "ci_high": float(ci_high),
+                        "n": int(n),
+                        "status": status,
+                        **meta,
+                    }
+                )
+
+            pred_a = cell_predictions[cell_predictions["model"] == model_a]
+            pred_b = cell_predictions[cell_predictions["model"] == model_b]
+            shared_pred = sorted(
+                set(_cell_keys(pred_a, ("source", "target", "layer")))
+                & set(_cell_keys(pred_b, ("source", "target", "layer")))
+            )
+            for source, target, layer in shared_pred:
+                mask_a = (
+                    (pred_a["source"] == source)
+                    & (pred_a["target"] == target)
+                    & (pred_a["layer"] == layer)
+                )
+                mask_b = (
+                    (pred_b["source"] == source)
+                    & (pred_b["target"] == target)
+                    & (pred_b["layer"] == layer)
+                )
+                context = f"encoder_agreement {model_a}|{model_b} {source}->{target} L{layer}"
+                left, right = _aligned_pair(pred_a[mask_a], pred_b[mask_b], context)
+                labels = left["y_true"].to_numpy(dtype=np.int64)
+                score_a = left["score"].to_numpy(dtype=np.float64)
+                score_b = right["score"].to_numpy(dtype=np.float64)
+                pred_la = left["prediction"].to_numpy(dtype=np.int64)
+                pred_lb = right["prediction"].to_numpy(dtype=np.int64)
+                n = len(labels)
+                identity = (model_a, model_b, source, target, layer)
+                matrix = _resample_matrix(
+                    _comparison_rng(*identity, "predictions"), labels, BOOTSTRAP_RESAMPLES
+                )
+
+                rho = _spearman_rho(score_a, score_b)
+                if math.isnan(rho):
+                    _row(source, target, layer, "score_spearman", "rho",
+                         float("nan"), float("nan"), float("nan"), n, "constant_series")
+                else:
+                    low, high = _ci_bounds(
+                        _rowwise_spearman(score_a[matrix], score_b[matrix])
+                    )
+                    _row(source, target, layer, "score_spearman", "rho", rho, low, high, n, "ok")
+
+                match = (pred_la == pred_lb).astype(np.float64)
+                low, high = _ci_bounds(match[matrix].mean(axis=1))
+                _row(source, target, layer, "prediction_agreement", "fraction",
+                     float(match.mean()), low, high, n, "ok")
+
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    kappa = float(cohen_kappa_score(pred_la, pred_lb))
+                if not math.isfinite(kappa):
+                    _row(source, target, layer, "cohen_kappa", "kappa",
+                         float("nan"), float("nan"), float("nan"), n, "degenerate")
+                else:
+                    low, high = _ci_bounds(
+                        _rowwise_kappa(pred_la[matrix], pred_lb[matrix])
+                    )
+                    _row(source, target, layer, "cohen_kappa", "kappa", kappa, low, high, n, "ok")
+
+            rel_a = sample_relevance[sample_relevance["model"] == model_a]
+            rel_b = sample_relevance[sample_relevance["model"] == model_b]
+            shared_rel = sorted(
+                set(_cell_keys(rel_a, ("source", "target", "layer")))
+                & set(_cell_keys(rel_b, ("source", "target", "layer")))
+            )
+            for source, target, layer in shared_rel:
+                mask_a = (
+                    (rel_a["source"] == source)
+                    & (rel_a["target"] == target)
+                    & (rel_a["layer"] == layer)
+                )
+                mask_b = (
+                    (rel_b["source"] == source)
+                    & (rel_b["target"] == target)
+                    & (rel_b["layer"] == layer)
+                )
+                context = (
+                    f"encoder_agreement/xai {model_a}|{model_b} {source}->{target} L{layer}"
+                )
+                left, right = _aligned_pair(rel_a[mask_a], rel_b[mask_b], context)
+                labels = left["y_true"].to_numpy(dtype=np.int64)
+                matrix_a = _distribution_matrix(left, context)
+                matrix_b = _distribution_matrix(right, context)
+                n = len(labels)
+                identity = (model_a, model_b, source, target, layer)
+                if matrix_a.shape[1] != matrix_b.shape[1]:
+                    # The two encoders report on different band grids, so their
+                    # relevance vectors are not comparable element-wise. Record
+                    # the fact explicitly rather than fabricating a distance.
+                    for metric, unit in (
+                        ("relevance_cosine_similarity", "cosine"),
+                        ("relevance_jensen_shannon_distance", "bits"),
+                    ):
+                        _row(source, target, layer, metric, unit, float("nan"),
+                             float("nan"), float("nan"), n, "incomparable_band_grid")
+                    continue
+                norms = np.linalg.norm(matrix_a, axis=1) * np.linalg.norm(matrix_b, axis=1)
+                cosine = (matrix_a * matrix_b).sum(axis=1) / norms
+                js = _rowwise_jensenshannon(matrix_a, matrix_b, _JS_BASE)
+                matrix = _resample_matrix(
+                    _comparison_rng(*identity, "relevance"), labels, BOOTSTRAP_RESAMPLES
+                )
+                for metric, unit, values in (
+                    ("relevance_cosine_similarity", "cosine", cosine),
+                    ("relevance_jensen_shannon_distance", "bits", js),
+                ):
+                    low, high = _ci_bounds(values[matrix].mean(axis=1))
+                    _row(source, target, layer, metric, unit,
+                         float(values.mean()), low, high, n, "ok")
+
+    return _finalize_comparison(
+        rows,
+        _ENCODER_AGREEMENT_COLUMNS,
+        ["model_a", "model_b", "source", "target", "layer", "metric"],
+    )
+
+
+def build_language_shift(sample_relevance: pd.DataFrame) -> pd.DataFrame:
+    """Jensen-Shannon distance between a fixed model/source's relevance under two
+    target languages, per layer and class group.
+
+    Different target languages describe different test audio, so the two mean
+    distributions are resampled independently (each stratified by class).
+    """
+    from scipy.spatial.distance import jensenshannon
+
+    targets = sorted(set(sample_relevance["target"]))
+    if len(targets) < 2:
+        return _empty_comparison(_LANGUAGE_SHIFT_COLUMNS)
+
+    rows: list[dict[str, object]] = []
+    meta = _metadata()
+    for model in sorted(set(sample_relevance["model"])):
+        model_frame = sample_relevance[sample_relevance["model"] == model]
+        for source in sorted(set(model_frame["source"])):
+            source_frame = model_frame[model_frame["source"] == source]
+            available_targets = sorted(set(source_frame["target"]))
+            for index_a in range(len(available_targets)):
+                for index_b in range(index_a + 1, len(available_targets)):
+                    target_a = available_targets[index_a]
+                    target_b = available_targets[index_b]
+                    for layer in sorted(set(source_frame["layer"])):
+                        layer_frame = source_frame[source_frame["layer"] == layer]
+                        cell_a = layer_frame[layer_frame["target"] == target_a]
+                        cell_b = layer_frame[layer_frame["target"] == target_b]
+                        if cell_a.empty or cell_b.empty:
+                            continue
+                        for group, class_value in _COMPARISON_GROUPS:
+                            sub_a = (
+                                cell_a
+                                if class_value is None
+                                else cell_a[cell_a["y_true"] == class_value]
+                            )
+                            sub_b = (
+                                cell_b
+                                if class_value is None
+                                else cell_b[cell_b["y_true"] == class_value]
+                            )
+                            if sub_a.empty or sub_b.empty:
+                                continue
+                            context = (
+                                f"language_shift {model} {source}->"
+                                f"{target_a}|{target_b} L{layer} {group}"
+                            )
+                            matrix_a = _distribution_matrix(
+                                sub_a.sort_values("sample_id", kind="mergesort"), context
+                            )
+                            matrix_b = _distribution_matrix(
+                                sub_b.sort_values("sample_id", kind="mergesort"), context
+                            )
+                            labels_a = (
+                                sub_a.sort_values("sample_id", kind="mergesort")[
+                                    "y_true"
+                                ].to_numpy(dtype=np.int64)
+                            )
+                            labels_b = (
+                                sub_b.sort_values("sample_id", kind="mergesort")[
+                                    "y_true"
+                                ].to_numpy(dtype=np.int64)
+                            )
+
+                            estimate = float(
+                                jensenshannon(
+                                    matrix_a.mean(axis=0),
+                                    matrix_b.mean(axis=0),
+                                    base=_JS_BASE,
+                                )
+                            )
+                            rng = _comparison_rng(
+                                model, source, target_a, target_b, layer, group
+                            )
+                            means_a = _resampled_means(
+                                matrix_a,
+                                _resample_matrix(rng, labels_a, BOOTSTRAP_RESAMPLES),
+                            )
+                            means_b = _resampled_means(
+                                matrix_b,
+                                _resample_matrix(rng, labels_b, BOOTSTRAP_RESAMPLES),
+                            )
+                            draws = _rowwise_jensenshannon(means_a, means_b, _JS_BASE)
+                            low, high = _ci_bounds(draws)
+                            rows.append(
+                                {
+                                    "model": model,
+                                    "source": source,
+                                    "target_a": target_a,
+                                    "target_b": target_b,
+                                    "layer": int(layer),
+                                    "group": group,
+                                    "metric": "jensen_shannon_distance",
+                                    "unit": "bits",
+                                    "estimate": estimate,
+                                    "ci_low": low,
+                                    "ci_high": high,
+                                    "n_a": int(len(matrix_a)),
+                                    "n_b": int(len(matrix_b)),
+                                    "status": "ok",
+                                    **meta,
+                                }
+                            )
+    return _finalize_comparison(
+        rows,
+        _LANGUAGE_SHIFT_COLUMNS,
+        ["model", "source", "target_a", "target_b", "layer", "group"],
+    )
+
+
+def build_diagonal_vs_offdiagonal(cell_predictions: pd.DataFrame) -> pd.DataFrame:
+    """Delta (offdiagonal minus diagonal) of ROC-AUC and MCC on the shared test
+    set, per model/target/offdiagonal-source/layer.
+
+    Both cells describe the same target audio, so the stratified bootstrap is
+    paired: one resample of sample positions is applied to both cells. The IDs
+    and labels must match exactly or the comparison fails closed.
+    """
+    targets = sorted(set(cell_predictions["target"]))
+    if len(set(cell_predictions["source"]) | set(cell_predictions["target"])) < 2:
+        return _empty_comparison(_DIAGONAL_COMPARISON_COLUMNS)
+
+    rows: list[dict[str, object]] = []
+    meta = _metadata()
+    for model in sorted(set(cell_predictions["model"])):
+        model_frame = cell_predictions[cell_predictions["model"] == model]
+        for target in targets:
+            to_target = model_frame[model_frame["target"] == target]
+            diagonal = to_target[to_target["source"] == target]
+            if diagonal.empty:
+                continue
+            offdiagonal_sources = sorted(
+                set(to_target[to_target["source"] != target]["source"])
+            )
+            for source in offdiagonal_sources:
+                offdiagonal = to_target[to_target["source"] == source]
+                for layer in sorted(set(offdiagonal["layer"])):
+                    diag_cell = diagonal[diagonal["layer"] == layer]
+                    off_cell = offdiagonal[offdiagonal["layer"] == layer]
+                    if diag_cell.empty or off_cell.empty:
+                        continue
+                    context = (
+                        f"diagonal_vs_offdiagonal {model} {source}->{target} L{layer}"
+                    )
+                    diag_sorted, off_sorted = _aligned_pair(diag_cell, off_cell, context)
+                    labels = diag_sorted["y_true"].to_numpy(dtype=np.int64)
+                    diag_score = diag_sorted["score"].to_numpy(dtype=np.float64)
+                    off_score = off_sorted["score"].to_numpy(dtype=np.float64)
+                    diag_pred = diag_sorted["prediction"].to_numpy(dtype=np.int64)
+                    off_pred = off_sorted["prediction"].to_numpy(dtype=np.int64)
+                    n = len(labels)
+                    identity = (model, source, target, layer)
+                    matrix = _resample_matrix(
+                        _comparison_rng(*identity), labels, BOOTSTRAP_RESAMPLES
+                    )
+                    labels_rows = labels[matrix]
+                    auc_draws = _rowwise_auc(labels_rows, off_score[matrix]) - _rowwise_auc(
+                        labels_rows, diag_score[matrix]
+                    )
+                    mcc_draws = _rowwise_mcc(labels_rows, off_pred[matrix]) - _rowwise_mcc(
+                        labels_rows, diag_pred[matrix]
+                    )
+                    estimates = {
+                        "delta_roc_auc": (
+                            _fast_auc(labels, off_score) - _fast_auc(labels, diag_score),
+                            auc_draws,
+                        ),
+                        "delta_mcc": (
+                            _fast_mcc(labels, off_pred) - _fast_mcc(labels, diag_pred),
+                            mcc_draws,
+                        ),
+                    }
+                    for metric, (estimate, draws) in estimates.items():
+                        low, high = _ci_bounds(draws)
+                        rows.append(
+                            {
+                                "model": model,
+                                "source": source,
+                                "target": target,
+                                "layer": int(layer),
+                                "metric": metric,
+                                "unit": "dimensionless",
+                                "estimate": float(estimate),
+                                "ci_low": float(low),
+                                "ci_high": float(high),
+                                "n": int(n),
+                                "status": "ok",
+                                **meta,
+                            }
+                        )
+    return _finalize_comparison(
+        rows,
+        _DIAGONAL_COMPARISON_COLUMNS,
+        ["model", "source", "target", "layer", "metric"],
+    )
+
+
+def build_spectral_divergence(
+    sample_relevance: pd.DataFrame, band_edges: pd.DataFrame
+) -> pd.DataFrame:
+    """Wasserstein distance (in Hz) between two languages' diagonal relevance
+    distributions, per model, layer and class group.
+
+    The support of each distribution is that model/language's recorded band
+    centers. Different languages describe different audio, so the two
+    distributions are resampled independently (each stratified by class).
+    """
+    from scipy.stats import wasserstein_distance
+
+    diagonal = sample_relevance[sample_relevance["source"] == sample_relevance["target"]]
+    languages = sorted(set(diagonal["target"]))
+    if len(languages) < 2:
+        return _empty_comparison(_SPECTRAL_DIVERGENCE_COLUMNS)
+
+    centers = {
+        (str(model), str(language)): group.sort_values("band")["center_hz"].to_numpy(
+            dtype=np.float64
+        )
+        for (model, language), group in band_edges.groupby(["model", "language"])
+    }
+
+    rows: list[dict[str, object]] = []
+    meta = _metadata()
+    for model in sorted(set(diagonal["model"])):
+        model_frame = diagonal[diagonal["model"] == model]
+        present = sorted(set(model_frame["target"]))
+        for index_a in range(len(present)):
+            for index_b in range(index_a + 1, len(present)):
+                language_a = present[index_a]
+                language_b = present[index_b]
+                support_a = centers.get((model, language_a))
+                support_b = centers.get((model, language_b))
+                if support_a is None or support_b is None:
+                    raise ValueError(
+                        f"spectral_divergence {model} {language_a}|{language_b}: "
+                        "missing recorded band centers"
+                    )
+                for layer in sorted(set(model_frame["layer"])):
+                    layer_frame = model_frame[model_frame["layer"] == layer]
+                    cell_a = layer_frame[layer_frame["target"] == language_a]
+                    cell_b = layer_frame[layer_frame["target"] == language_b]
+                    if cell_a.empty or cell_b.empty:
+                        continue
+                    for group, class_value in _COMPARISON_GROUPS:
+                        sub_a = (
+                            cell_a
+                            if class_value is None
+                            else cell_a[cell_a["y_true"] == class_value]
+                        )
+                        sub_b = (
+                            cell_b
+                            if class_value is None
+                            else cell_b[cell_b["y_true"] == class_value]
+                        )
+                        if sub_a.empty or sub_b.empty:
+                            continue
+                        context = (
+                            f"spectral_divergence {model} {language_a}|{language_b} "
+                            f"L{layer} {group}"
+                        )
+                        sorted_a = sub_a.sort_values("sample_id", kind="mergesort")
+                        sorted_b = sub_b.sort_values("sample_id", kind="mergesort")
+                        matrix_a = _distribution_matrix(sorted_a, context)
+                        matrix_b = _distribution_matrix(sorted_b, context)
+                        if matrix_a.shape[1] != len(support_a) or matrix_b.shape[1] != len(
+                            support_b
+                        ):
+                            raise ValueError(
+                                f"{context}: band vectors disagree with recorded centers"
+                            )
+                        labels_a = sorted_a["y_true"].to_numpy(dtype=np.int64)
+                        labels_b = sorted_b["y_true"].to_numpy(dtype=np.int64)
+
+                        estimate = float(
+                            wasserstein_distance(
+                                support_a,
+                                support_b,
+                                matrix_a.mean(axis=0),
+                                matrix_b.mean(axis=0),
+                            )
+                        )
+                        rng = _comparison_rng(
+                            model, language_a, language_b, layer, group
+                        )
+                        means_a = _resampled_means(
+                            matrix_a, _resample_matrix(rng, labels_a, BOOTSTRAP_RESAMPLES)
+                        )
+                        means_b = _resampled_means(
+                            matrix_b, _resample_matrix(rng, labels_b, BOOTSTRAP_RESAMPLES)
+                        )
+                        draws = _wasserstein_batch(
+                            support_a, support_b, means_a, means_b
+                        )
+                        low, high = _ci_bounds(draws)
+                        rows.append(
+                            {
+                                "model": model,
+                                "language_a": language_a,
+                                "language_b": language_b,
+                                "layer": int(layer),
+                                "group": group,
+                                "metric": "wasserstein_distance",
+                                "unit": "Hz",
+                                "estimate": estimate,
+                                "ci_low": low,
+                                "ci_high": high,
+                                "n_a": int(len(matrix_a)),
+                                "n_b": int(len(matrix_b)),
+                                "status": "ok",
+                                **meta,
+                            }
+                        )
+    return _finalize_comparison(
+        rows,
+        _SPECTRAL_DIVERGENCE_COLUMNS,
+        ["model", "language_a", "language_b", "layer", "group"],
+    )
+
+
 def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     """Merge loaded sources into deterministic, identity-labelled report tables."""
     loaded = list(sources)
@@ -1823,6 +2671,17 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     payloads: dict[tuple, Mapping[str, np.ndarray]] = {}
     for item in loaded:
         payloads.update(item.stdft_payloads)
+
+    encoder_agreement = build_encoder_agreement(cell_predictions, sample_relevance)
+    language_shift = build_language_shift(sample_relevance)
+    diagonal_vs_offdiagonal = build_diagonal_vs_offdiagonal(cell_predictions)
+    spectral_divergence = build_spectral_divergence(sample_relevance, band_edges)
+    availability = {
+        "encoder_agreement": not encoder_agreement.empty,
+        "language_shift": not language_shift.empty,
+        "diagonal_vs_offdiagonal": not diagonal_vs_offdiagonal.empty,
+        "spectral_divergence": not spectral_divergence.empty,
+    }
     return ReportTables(
         models=models,
         languages=languages,
@@ -1845,7 +2704,7 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
             performance, band_relevance
         ),
         planned_figures=FIGURE_FAMILIES,
-        omitted_comparisons=_omitted_comparisons(models, languages),
+        omitted_comparisons=_omitted_comparisons(models, languages, availability),
         probe_stability=merged(
             "probe_stability",
             ["model", "source", "target", "layer"],
@@ -1860,6 +2719,10 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         else pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS)),
         cell_predictions=cell_predictions,
         sample_relevance=sample_relevance,
+        encoder_agreement=encoder_agreement,
+        language_shift=language_shift,
+        diagonal_vs_offdiagonal=diagonal_vs_offdiagonal,
+        spectral_divergence=spectral_divergence,
     )
 
 
@@ -3003,6 +3866,7 @@ _OMISSION_REASONS: Mapping[str, str] = MappingProxyType(
         "single_model": "indisponível porque há apenas um modelo",
         "single_language": "indisponível porque há apenas um idioma",
         "not_in_first_edition": "ainda não gerado nesta edição",
+        "unavailable_incomplete_table": "tabela de comparação incompleta nesta edição",
     }
 )
 _SECTION_TITLES_PT: tuple[str, ...] = (
