@@ -21,6 +21,7 @@ import pandas as pd
 
 from .bands import F_MAX, F_MIN, N_BANDS, mel_band_edges
 from .encoder_suite import LANGUAGE_ORDER, LAYER_ORDER, ROLE_ORDER
+from .layerwise_faithfulness import FINAL_LAYER
 from .layerwise_paths import LayerwiseSuitePaths, resolve_active_generation
 _LANGUAGE_SEGMENTS: dict[str, tuple[str, ...]] = {
     "eng": ("eng",),
@@ -394,6 +395,7 @@ class LoadedReportSource:
     stdft_examples: pd.DataFrame
     stdft_payloads: Mapping[tuple, Mapping[str, np.ndarray]]
     probe_stability: pd.DataFrame
+    layer_faithfulness: pd.DataFrame
     band_edges: tuple[BandEdges, ...]
 
     def __post_init__(self) -> None:
@@ -432,6 +434,7 @@ class ReportTables:
     planned_figures: tuple[str, ...]
     omitted_comparisons: Mapping[str, str]
     probe_stability: pd.DataFrame
+    layer_faithfulness: pd.DataFrame
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -826,6 +829,84 @@ def _load_probe_stability_summary(
     return _ordered(
         _identified(frame, profile),
         ["model", "source", "target", "layer"],
+    )
+
+
+_LAYER_FAITHFULNESS_COLUMNS = frozenset(
+    {
+        "model",
+        "source",
+        "target",
+        "layer",
+        "k",
+        "true_class",
+        "comparison",
+        "mean_difference",
+        "ci_low",
+        "ci_high",
+        "n_pairs",
+        "wilcoxon_p",
+        "status",
+    }
+)
+
+
+def _load_layer_faithfulness_summaries(
+    source: ReportSource, paths: LayerwiseSuitePaths
+) -> pd.DataFrame:
+    profile = source.identity.profile
+    rows: list[dict[str, object]] = []
+    for language in source.identity.languages:
+        destination = paths.layer_faithfulness_cell(
+            profile, FINAL_LAYER, language, language
+        )
+        if not (destination / "active.json").is_file():
+            continue
+        try:
+            generation = resolve_active_generation(
+                destination, expected_role="layer_faithfulness"
+            )
+        except ValueError:
+            continue
+        paired_path = generation / "paired_comparisons.csv"
+        if not paired_path.is_file():
+            continue
+        frame = _read_csv(
+            paired_path,
+            frozenset(
+                {
+                    "level",
+                    "k",
+                    "true_class",
+                    "comparison",
+                    "mean_difference",
+                    "ci_low",
+                    "ci_high",
+                    "n_pairs",
+                    "wilcoxon_p",
+                    "status",
+                }
+            ),
+        )
+        aggregate = frame.loc[frame["level"] == "aggregate"].copy()
+        if aggregate.empty:
+            continue
+        aggregate = aggregate.assign(
+            source=language,
+            layer=FINAL_LAYER,
+            target=language,
+        )
+        rows.extend(aggregate.to_dict(orient="records"))
+    if not rows:
+        return pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS))
+    result = _identified(pd.DataFrame(rows), profile)
+    if (result["source"] != result["target"]).any():
+        raise ValueError("layer faithfulness summaries must be diagonal cells only")
+    if (result["layer"] != FINAL_LAYER).any():
+        raise ValueError("layer faithfulness summaries must refer to the final layer")
+    return _ordered(
+        result,
+        ["model", "source", "target", "layer", "k", "true_class", "comparison"],
     )
 
 
@@ -1309,6 +1390,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
 
     performance = _load_performance(source, paths)
     probe_stability = _load_probe_stability_summary(source, paths)
+    layer_faithfulness = _load_layer_faithfulness_summaries(source, paths)
     emergence = _load_emergence(source)
 
     band_frames, class_frames = [], []
@@ -1373,6 +1455,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
             key: payload for key, payload in payloads.items()
         },
         probe_stability=probe_stability,
+        layer_faithfulness=layer_faithfulness,
         band_edges=tuple(band_edges[language] for language in languages),
     )
 
@@ -1635,6 +1718,12 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         )
         if any(not item.probe_stability.empty for item in loaded)
         else pd.DataFrame(columns=sorted(_PROBE_STABILITY_COLUMNS)),
+        layer_faithfulness=merged(
+            "layer_faithfulness",
+            ["model", "source", "target", "layer", "k", "true_class", "comparison"],
+        )
+        if any(not item.layer_faithfulness.empty for item in loaded)
+        else pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS)),
     )
 
 
@@ -3341,7 +3430,11 @@ def _performance_section(
         "transfer_performance_heatmaps",
     )
     present = [name for name in names if name in figures]
-    if not present and _aligned_probe_stability(tables).empty:
+    if (
+        not present
+        and _aligned_probe_stability(tables).empty
+        and _aligned_layer_faithfulness(tables).empty
+    ):
         return []
     lines = [
         rf"\section{{{_SECTION_TITLES_PT[3]}}}",
@@ -3407,6 +3500,25 @@ def _performance_section(
         ]
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
     stability_tex = _probe_stability_tex(tables)
+    fidelity_tex = _layer_faithfulness_tex(tables)
+    if fidelity_tex.strip():
+        lines += [
+            r"\subsection{Fidelidade por intervenção (camada 12, diagonal)}",
+            "Comparações pareadas de comprehensividade (delete) entre faixas "
+            r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
+            "aleatórias com energia RMS igualada, com recomputação AttnLRP "
+            r"$\rightarrow$ STDFT sobre subamostra da coorte XAI fixa. Valores "
+            "positivos de top-minus-random ou top-minus-bottom sugerem, com "
+            "cautela, que as faixas mais relevantes segundo o DFT-LRP sustentam "
+            "mais a decisão do que controles; a filtragem STFT e o "
+            "reescalonamento RMS são fontes de variação introduzidas pelo "
+            "procedimento e não autorizam alegação causal no mundo real. "
+            "Escopo restrito à camada~12 com source=target; não extrapolar para "
+            "outras camadas ou células fora da diagonal.",
+            "",
+            r"\input{tables/layer_faithfulness_summary.tex}",
+            "",
+        ]
     if stability_tex.strip():
         lines += [
             r"\subsection{Variabilidade por reamostragem estratificada do treino do probe}",
@@ -3671,6 +3783,13 @@ def _limitations_section(tables: ReportTables) -> list[str]:
             "de sementes do experimento completo, nem substitui recomputação de "
             "AttnLRP/DFT-LRP."
         )
+    if not tables.layer_faithfulness.empty:
+        limitations.append(
+            "quando presente, a subseção de fidelidade por intervenção resume "
+            "experimentos controlados na camada~12 diagonal com filtragem STFT; "
+            "não substitui auditoria causal, não cobre outras camadas e não "
+            "valida transferência off-diagonal."
+        )
     slots_intro = (
         [
             "Espaços de comparação reservados para edições futuras, sem "
@@ -3795,6 +3914,76 @@ def _aligned_probe_stability(tables: ReportTables) -> pd.DataFrame:
     keys = ["model", "source", "target", "layer"]
     perf_keys = tables.performance[keys].drop_duplicates()
     return frame.merge(perf_keys, on=keys, how="inner")
+
+
+def _aligned_layer_faithfulness(tables: ReportTables) -> pd.DataFrame:
+    frame = tables.layer_faithfulness
+    if frame.empty:
+        return frame
+    keys = ["model", "source", "target", "layer"]
+    perf_keys = tables.performance[keys].drop_duplicates()
+    subset = frame[
+        frame["comparison"].isin(("top_minus_random", "top_minus_bottom"))
+    ].copy()
+    return subset.merge(perf_keys, on=keys, how="inner")
+
+
+def _layer_faithfulness_tex(tables: ReportTables) -> str:
+    aligned = _aligned_layer_faithfulness(tables)
+    if aligned.empty:
+        return ""
+    blocks: list[str] = []
+    for cell in _cells(tables):
+        rows = _cell_rows(aligned, cell)
+        if rows.empty:
+            continue
+        body = [
+            _row(
+                [
+                    int(row.k),
+                    escape_latex(str(row.true_class)),
+                    escape_latex(str(row.comparison)),
+                    _num(row.mean_difference),
+                    _num(row.ci_low),
+                    _num(row.ci_high),
+                    int(row.n_pairs),
+                    escape_latex(str(row.status)),
+                ]
+            )
+            for row in rows.itertuples(index=False)
+        ]
+        blocks += [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
+            rf"\caption{{Comprehensividade pareada (delete): {_cell_tex(cell)}, "
+            r"camada 12 diagonal. Diferença média top/bottom vs.\ random com IC "
+            r"bootstrap pareado; Wilcoxon omitido aqui por brevidade.}",
+            rf"\label{{tab:layer-faithfulness-{_label(*cell)}}}",
+            _FIT_WIDTH_OPEN,
+            r"\begin{tabular}{rrlrrrrl}",
+            r"\toprule",
+            _row(
+                [
+                    "$k$",
+                    "Classe",
+                    "Comparação",
+                    r"$\Delta$ média",
+                    "IC inf.",
+                    "IC sup.",
+                    "$n$ pares",
+                    "Status",
+                ]
+            ),
+            r"\midrule",
+            *body,
+            r"\bottomrule",
+            r"\end{tabular}}",
+            r"\end{table}",
+            "",
+        ]
+    return "\n".join(blocks)
 
 
 def _num_std(value: object, n_seeds: object) -> str:
@@ -4023,6 +4212,9 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
     stability_tex = _probe_stability_tex(tables)
     if stability_tex.strip():
         fragments["probe_stability_by_layer"] = stability_tex
+    fidelity_tex = _layer_faithfulness_tex(tables)
+    if fidelity_tex.strip():
+        fragments["layer_faithfulness_summary"] = fidelity_tex
     for name, text in fragments.items():
         if text:
             _write_tex(tables_dir / f"{name}.tex", text)
@@ -4035,6 +4227,14 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
             lineterminator="\n",
         )
         written.append("probe_stability_by_layer.csv")
+    aligned_fidelity = _aligned_layer_faithfulness(tables)
+    if not aligned_fidelity.empty:
+        aligned_fidelity.to_csv(
+            tables_dir / "layer_faithfulness_summary.csv",
+            index=False,
+            lineterminator="\n",
+        )
+        written.append("layer_faithfulness_summary.csv")
     return tuple(sorted(written))
 
 

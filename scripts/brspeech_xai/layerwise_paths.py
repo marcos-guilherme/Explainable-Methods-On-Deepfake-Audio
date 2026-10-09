@@ -206,6 +206,23 @@ class LayerwiseSuitePaths:
     def probe_stability_manifest(self, profile_id: str) -> Path:
         return self.probe_stability_dir(profile_id) / "probe_stability_manifest.json"
 
+    def layer_faithfulness_cell(
+        self,
+        profile_id: str,
+        layer: int,
+        source: str,
+        target: str,
+    ) -> Path:
+        return (
+            self.profile(profile_id)
+            / "layer_faithfulness"
+            / f"layer_{_layer(layer):02d}"
+            / (
+                f"{_language(source, field='source')}"
+                f"_to_{_language(target, field='target')}"
+            )
+        )
+
     def probe_stability_train_bootstrap(
         self, profile_id: str, seed: int, source: str
     ) -> Path:

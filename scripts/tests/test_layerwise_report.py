@@ -3890,3 +3890,70 @@ def test_report_probe_stability_section_states_non_xai_scope(tmp_path):
     assert "amostra finita de treino" in text
     assert "AttnLRP/DFT-LRP" in text
     assert "ponta-a-ponta" in text
+
+
+def _write_layer_faithfulness_generation(
+    paths: LayerwiseSuitePaths,
+    profile: str,
+    language: str,
+) -> None:
+    destination = paths.layer_faithfulness_cell(profile, 12, language, language)
+
+    def writer(directory: Path) -> None:
+        pd.DataFrame(
+            [
+                {
+                    "level": "aggregate",
+                    "index": "",
+                    "k": 1,
+                    "true_class": "spoof",
+                    "comparison": "top_minus_random",
+                    "lhs": 0.5,
+                    "rhs": 0.3,
+                    "difference": float("nan"),
+                    "mean_difference": 0.2,
+                    "ci_low": 0.05,
+                    "ci_high": 0.35,
+                    "n_pairs": 8,
+                    "wilcoxon_p": 0.04,
+                    "status": "ok",
+                }
+            ]
+        ).to_csv(directory / "paired_comparisons.csv", index=False)
+        (directory / "faithfulness_run_manifest.json").write_text(
+            json.dumps({"fingerprint": "test", "layer": 12}, indent=2),
+            encoding="utf-8",
+        )
+
+    publish_generation(destination, writer, role="layer_faithfulness")
+
+
+def test_report_omits_layer_faithfulness_without_artifacts(tmp_path):
+    root = write_scientific_result_root(tmp_path / "no_fidelity")
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    assert tables.layer_faithfulness.empty
+    report_path = tmp_path / "report.tex"
+    write_report_tex(report_path, tables, [], [loaded])
+    text = report_path.read_text(encoding="utf-8")
+    assert "Fidelidade por intervenção" not in text
+    assert "layer_faithfulness_summary.tex" not in text
+
+
+def test_report_layer_faithfulness_section_is_cautious_in_portuguese(tmp_path):
+    root = write_scientific_result_root(tmp_path / "with_fidelity")
+    paths = LayerwiseSuitePaths(root)
+    _write_layer_faithfulness_generation(paths, "hubert_base", "eng")
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    assert not tables.layer_faithfulness.empty
+    report_path = tmp_path / "report.tex"
+    write_report_tex(report_path, tables, [], [loaded])
+    text = report_path.read_text(encoding="utf-8")
+    assert "Fidelidade por intervenção (camada 12, diagonal)" in text
+    assert "layer_faithfulness_summary.tex" in text
+    assert "energia RMS igualada" in text
+    assert "fontes de variação introduzidas pelo procedimento" in text
+    assert "causal" in text.lower()
+    assert "camada~12" in text
+    assert "fora da diagonal" in text
