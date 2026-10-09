@@ -9,7 +9,7 @@ import shutil
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -185,6 +185,34 @@ class LayerwiseSuitePaths:
 
     def suite_aggregate(self, name: str) -> Path:
         return self.root / "aggregates" / _simple_id(name, field="aggregate name")
+
+    def probe_stability_dir(self, profile_id: str) -> Path:
+        return self.profile(profile_id) / "probe_stability"
+
+    def probe_stability_seed_dir(self, profile_id: str, seed: int) -> Path:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("seed must be an integer")
+        return self.probe_stability_dir(profile_id) / f"seed_{seed:03d}"
+
+    def probe_stability_performance(self, profile_id: str, seed: int) -> Path:
+        return (
+            self.probe_stability_seed_dir(profile_id, seed)
+            / "layerwise_performance.csv"
+        )
+
+    def probe_stability_summary(self, profile_id: str) -> Path:
+        return self.probe_stability_dir(profile_id) / "probe_stability_by_layer.csv"
+
+    def probe_stability_manifest(self, profile_id: str) -> Path:
+        return self.probe_stability_dir(profile_id) / "probe_stability_manifest.json"
+
+    def probe_stability_train_bootstrap(
+        self, profile_id: str, seed: int, source: str
+    ) -> Path:
+        return (
+            self.probe_stability_seed_dir(profile_id, seed)
+            / f"train_bootstrap_{_language(source, field='source')}.json"
+        )
 
 
 def _file_sha256(path: Path) -> str:
@@ -378,6 +406,111 @@ def sample_id_catalog_hash(sample_ids: Sequence[str]) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+_PROBE_ALIGNMENT_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "profile",
+        "language",
+        "role",
+        "shape",
+        "dtype",
+        "sample_ids",
+        "sample_ids_sha256",
+    }
+)
+
+
+def read_embedding_metadata_json(metadata_path: Path) -> dict[str, Any]:
+    """Lê metadata de embedding; falha fechada se ausente ou ilegível."""
+    path = Path(metadata_path)
+    if not path.is_file():
+        raise ValueError(f"embedding metadata is missing: {path}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"embedding metadata is unreadable: {path}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"embedding metadata must be a JSON object: {path}")
+    return raw
+
+
+def assert_catalog_aligned_with_embedding_metadata(
+    *,
+    profile_id: str,
+    language: str,
+    role: str,
+    catalog_sample_ids: Sequence[str],
+    array: np.ndarray,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Exige ordem idêntica entre catálogo regenerado e ``sample_ids`` persistidos."""
+    location = f"{_profile_id(profile_id)}/{_language(language)}/{_simple_id(role, field='role')}"
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"embedding metadata must be a mapping for {location}")
+    missing = _PROBE_ALIGNMENT_METADATA_FIELDS - set(metadata)
+    if missing:
+        raise ValueError(
+            f"embedding metadata lacks fields {sorted(missing)} for {location}"
+        )
+    if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            f"embedding metadata schema_version is invalid for {location}"
+        )
+    if metadata.get("profile") != _profile_id(profile_id):
+        raise ValueError(
+            f"embedding metadata profile mismatch for {location}: "
+            f"expected {profile_id!r}, found {metadata.get('profile')!r}"
+        )
+    if metadata.get("language") != _language(language):
+        raise ValueError(
+            f"embedding metadata language mismatch for {location}: "
+            f"expected {language!r}, found {metadata.get('language')!r}"
+        )
+    if metadata.get("role") != _simple_id(role, field="role"):
+        raise ValueError(
+            f"embedding metadata role mismatch for {location}: "
+            f"expected {role!r}, found {metadata.get('role')!r}"
+        )
+    if metadata.get("dtype") != "float32":
+        raise ValueError(
+            f"embedding metadata dtype must be float32 for {location}"
+        )
+    catalog_ids = _validated_sample_ids(catalog_sample_ids)
+    try:
+        metadata_ids = _validated_sample_ids(metadata["sample_ids"])
+    except ValueError as exc:
+        raise ValueError(
+            f"embedding metadata sample_ids are invalid for {location}"
+        ) from exc
+    if catalog_ids != metadata_ids:
+        raise ValueError(
+            f"catalog sample_id order does not match embedding metadata for "
+            f"{location}"
+        )
+    expected_hash = sample_id_catalog_hash(catalog_ids)
+    recorded_hash = metadata.get("sample_ids_sha256")
+    if not isinstance(recorded_hash, str) or _SHA256_RE.fullmatch(recorded_hash) is None:
+        raise ValueError(
+            f"embedding metadata sample_ids_sha256 is invalid for {location}"
+        )
+    if recorded_hash.lower() != expected_hash:
+        raise ValueError(
+            f"catalog sample_ids_sha256 does not match embedding metadata for "
+            f"{location}"
+        )
+    if metadata.get("sample_ids_sha256") != sample_id_catalog_hash(metadata_ids):
+        raise ValueError(
+            f"embedding metadata sample_ids_sha256 is inconsistent with "
+            f"sample_ids for {location}"
+        )
+    _validate_embedding_array(array, expected_samples=len(catalog_ids))
+    if metadata.get("shape") != list(array.shape):
+        raise ValueError(
+            f"embedding metadata shape does not match array for {location}: "
+            f"metadata {metadata.get('shape')!r} vs array {list(array.shape)!r}"
+        )
 
 
 def _validate_embedding_array(

@@ -3818,3 +3818,75 @@ def test_long_id_bundle_compiles_without_significant_overfull_boxes(
         for value in re.findall(r"Overfull \\hbox \(([0-9.]+)pt too wide", log)
     ]
     assert [value for value in overfull if value >= 1.0] == [], overfull
+
+
+def test_report_omits_probe_stability_input_when_rows_miss_performance_cells(
+    tmp_path,
+):
+    root = write_scientific_result_root(tmp_path / "orphan_stability_case")
+    paths = LayerwiseSuitePaths(root)
+    profile = "hubert_base"
+    paths.probe_stability_dir(profile).mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "profile": profile,
+                "layer": 99,
+                "source": "eng",
+                "target": "por",
+                "n_seeds": 3,
+                "roc_auc_mean": 0.5,
+                "roc_auc_std": 0.01,
+                "roc_auc_min": 0.49,
+                "roc_auc_max": 0.51,
+                "mcc_mean": 0.1,
+                "mcc_std": 0.01,
+                "mcc_min": 0.09,
+                "mcc_max": 0.11,
+            }
+        ]
+    ).to_csv(paths.probe_stability_summary(profile), index=False)
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    assert not tables.probe_stability.empty
+    report_path = tmp_path / "report_orphan.tex"
+    write_report_tex(report_path, tables, [], [loaded])
+    text = report_path.read_text(encoding="utf-8")
+    assert "probe_stability_by_layer.tex" not in text
+
+
+def test_report_probe_stability_section_states_non_xai_scope(tmp_path):
+    root = write_scientific_result_root(tmp_path / "probe_stability_case")
+    paths = LayerwiseSuitePaths(root)
+    profile = "hubert_base"
+    stability_dir = paths.probe_stability_dir(profile)
+    stability_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "profile": profile,
+                "layer": 12,
+                "source": "eng",
+                "target": "eng",
+                "n_seeds": 3,
+                "roc_auc_mean": 0.91,
+                "roc_auc_std": 0.01,
+                "roc_auc_min": 0.9,
+                "roc_auc_max": 0.92,
+                "mcc_mean": 0.55,
+                "mcc_std": 0.02,
+                "mcc_min": 0.53,
+                "mcc_max": 0.57,
+            }
+        ]
+    ).to_csv(paths.probe_stability_summary(profile), index=False)
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    assert not tables.probe_stability.empty
+    report_path = tmp_path / "report.tex"
+    write_report_tex(report_path, tables, [], [loaded])
+    text = report_path.read_text(encoding="utf-8")
+    assert "reamostragem estratificada do treino do probe" in text.lower()
+    assert "amostra finita de treino" in text
+    assert "AttnLRP/DFT-LRP" in text
+    assert "ponta-a-ponta" in text

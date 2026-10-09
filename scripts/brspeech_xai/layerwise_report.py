@@ -393,6 +393,7 @@ class LoadedReportSource:
     transitions: pd.DataFrame
     stdft_examples: pd.DataFrame
     stdft_payloads: Mapping[tuple, Mapping[str, np.ndarray]]
+    probe_stability: pd.DataFrame
     band_edges: tuple[BandEdges, ...]
 
     def __post_init__(self) -> None:
@@ -430,6 +431,7 @@ class ReportTables:
     xai_performance_association: pd.DataFrame
     planned_figures: tuple[str, ...]
     omitted_comparisons: Mapping[str, str]
+    probe_stability: pd.DataFrame
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -786,6 +788,45 @@ def _validate_cell_marker(
                 f"cell marker {name} artifact sha256 does not match the current "
                 f"file for {cell}"
             )
+
+
+_PROBE_STABILITY_COLUMNS = frozenset(
+    {
+        "profile",
+        "layer",
+        "source",
+        "target",
+        "n_seeds",
+        "roc_auc_mean",
+        "roc_auc_std",
+        "roc_auc_min",
+        "roc_auc_max",
+        "mcc_mean",
+        "mcc_std",
+        "mcc_min",
+        "mcc_max",
+    }
+)
+
+
+def _load_probe_stability_summary(
+    source: ReportSource, paths: LayerwiseSuitePaths
+) -> pd.DataFrame:
+    profile = source.identity.profile
+    summary_path = paths.probe_stability_summary(profile)
+    if not summary_path.is_file():
+        return pd.DataFrame(columns=sorted(_PROBE_STABILITY_COLUMNS))
+    frame = _read_csv(summary_path, _PROBE_STABILITY_COLUMNS)
+    if frame.empty:
+        return frame
+    if (frame["profile"] != profile).any():
+        raise ValueError(
+            "probe_stability_by_layer.csv profile does not match report source"
+        )
+    return _ordered(
+        _identified(frame, profile),
+        ["model", "source", "target", "layer"],
+    )
 
 
 def _load_performance(
@@ -1267,6 +1308,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
     _check_persisted_band_counts(source, band_edges)
 
     performance = _load_performance(source, paths)
+    probe_stability = _load_probe_stability_summary(source, paths)
     emergence = _load_emergence(source)
 
     band_frames, class_frames = [], []
@@ -1330,6 +1372,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
         stdft_payloads={
             key: payload for key, payload in payloads.items()
         },
+        probe_stability=probe_stability,
         band_edges=tuple(band_edges[language] for language in languages),
     )
 
@@ -1586,6 +1629,12 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         ),
         planned_figures=FIGURE_FAMILIES,
         omitted_comparisons=_omitted_comparisons(models, languages),
+        probe_stability=merged(
+            "probe_stability",
+            ["model", "source", "target", "layer"],
+        )
+        if any(not item.probe_stability.empty for item in loaded)
+        else pd.DataFrame(columns=sorted(_PROBE_STABILITY_COLUMNS)),
     )
 
 
@@ -3292,7 +3341,7 @@ def _performance_section(
         "transfer_performance_heatmaps",
     )
     present = [name for name in names if name in figures]
-    if not present:
+    if not present and _aligned_probe_stability(tables).empty:
         return []
     lines = [
         rf"\section{{{_SECTION_TITLES_PT[3]}}}",
@@ -3357,6 +3406,22 @@ def _performance_section(
             "",
         ]
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
+    stability_tex = _probe_stability_tex(tables)
+    if stability_tex.strip():
+        lines += [
+            r"\subsection{Variabilidade por reamostragem estratificada do treino do probe}",
+            "Esta subseção resume re-treinos do probe linear após bootstrap "
+            "estratificado com reposição do conjunto de treino de cada idioma-fonte "
+            "(contagens por classe preservadas), com calibração e teste fixos, sobre "
+            "os mesmos embeddings materializados. Trata-se de análise de sensibilidade "
+            "à amostra finita de treino; "
+            r"\textbf{não} mede estabilidade de atribuições XAI (AttnLRP/DFT-LRP), "
+            "nem estabilidade ponta-a-ponta de sementes do pipeline completo, "
+            "nem recomputa explicações.",
+            "",
+            r"\input{tables/probe_stability_by_layer.tex}",
+            "",
+        ]
     return lines
 
 
@@ -3597,6 +3662,15 @@ def _limitations_section(tables: ReportTables) -> list[str]:
         "resultados fora da diagonal, quando existirem, são validação externa "
         "sob corpus shift e não efeitos causais do idioma.",
     ]
+    if not tables.probe_stability.empty:
+        limitations.append(
+            "quando presente, a tabela de variabilidade por reamostragem "
+            "estratificada do treino do probe quantifica sensibilidade à "
+            "amostra finita de treino (bootstrap estratificado); não avalia "
+            "estabilidade das explicações XAI, nem estabilidade ponta-a-ponta "
+            "de sementes do experimento completo, nem substitui recomputação de "
+            "AttnLRP/DFT-LRP."
+        )
     slots_intro = (
         [
             "Espaços de comparação reservados para edições futuras, sem "
@@ -3712,6 +3786,83 @@ def write_report_tex(
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
+
+
+def _aligned_probe_stability(tables: ReportTables) -> pd.DataFrame:
+    frame = tables.probe_stability
+    if frame.empty:
+        return frame
+    keys = ["model", "source", "target", "layer"]
+    perf_keys = tables.performance[keys].drop_duplicates()
+    return frame.merge(perf_keys, on=keys, how="inner")
+
+
+def _num_std(value: object, n_seeds: object) -> str:
+    if int(n_seeds) <= 1:
+        return r"\multicolumn{1}{c}{--}"
+    return _num(value)
+
+
+def _probe_stability_tex(tables: ReportTables) -> str:
+    aligned = _aligned_probe_stability(tables)
+    if aligned.empty:
+        return ""
+    blocks: list[str] = []
+    for cell in _cells(tables):
+        rows = _cell_rows(aligned, cell)
+        if rows.empty:
+            continue
+        body = [
+            _row(
+                [
+                    int(row.layer),
+                    int(row.n_seeds),
+                    _num(row.roc_auc_mean),
+                    _num_std(row.roc_auc_std, row.n_seeds),
+                    _num(row.roc_auc_min),
+                    _num(row.roc_auc_max),
+                    _num(row.mcc_mean),
+                    _num_std(row.mcc_std, row.n_seeds),
+                    _num(row.mcc_min),
+                    _num(row.mcc_max),
+                ]
+            )
+            for row in rows.itertuples(index=False)
+        ]
+        blocks += [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
+            rf"\caption{{Reamostragem estratificada do treino do probe: {_cell_tex(cell)}. "
+            r"Média, desvio-padrão, mínimo e máximo de ROC-AUC e MCC sobre "
+            r"bootstrap estratificado do treino (embeddings e calibração/teste fixos).}",
+            rf"\label{{tab:probe-stability-{_label(*cell)}}}",
+            _FIT_WIDTH_OPEN,
+            r"\begin{tabular}{rrrrrrrrrr}",
+            r"\toprule",
+            _row(
+                [
+                    "Camada",
+                    "$n$ seeds",
+                    r"ROC-AUC $\mu$",
+                    r"ROC-AUC $\sigma$",
+                    "ROC min",
+                    "ROC max",
+                    r"MCC $\mu$",
+                    r"MCC $\sigma$",
+                    "MCC min",
+                    "MCC max",
+                ]
+            ),
+            r"\midrule",
+            *body,
+            r"\bottomrule",
+            r"\end{tabular}}",
+            r"\end{table}",
+            "",
+        ]
+    return "\n".join(blocks)
 
 
 def _performance_tex(tables: ReportTables) -> str:
@@ -3869,9 +4020,21 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
         "emergence_layers": _emergence_tex(tables),
         "conservation_by_layer": _conservation_tex(tables),
     }
+    stability_tex = _probe_stability_tex(tables)
+    if stability_tex.strip():
+        fragments["probe_stability_by_layer"] = stability_tex
     for name, text in fragments.items():
-        _write_tex(tables_dir / f"{name}.tex", text)
-        written.append(f"{name}.tex")
+        if text:
+            _write_tex(tables_dir / f"{name}.tex", text)
+            written.append(f"{name}.tex")
+    aligned = _aligned_probe_stability(tables)
+    if not aligned.empty:
+        aligned.to_csv(
+            tables_dir / "probe_stability_by_layer.csv",
+            index=False,
+            lineterminator="\n",
+        )
+        written.append("probe_stability_by_layer.csv")
     return tuple(sorted(written))
 
 
