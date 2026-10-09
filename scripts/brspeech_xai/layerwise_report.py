@@ -4094,19 +4094,20 @@ def _faithfulness_pattern_paragraph(counts: pd.DataFrame) -> str:
 def _probe_stability_pattern_paragraph(summary: pd.DataFrame) -> str:
     if summary.empty:
         return ""
-    ordered = summary.sort_values("roc_auc_std_median")
-    calm = ordered.iloc[0]
-    volatile = summary.loc[summary["roc_auc_std_max"].idxmax()]
-    calm_name = escape_latex(_model_name(calm["model"]))
-    volatile_name = escape_latex(_model_name(volatile["model"]))
+    auc_calm = summary.loc[summary["roc_auc_std_median"].idxmin()]
+    mcc_calm = summary.loc[summary["mcc_std_median"].idxmin()]
+    auc_volatile = summary.loc[summary["roc_auc_std_max"].idxmax()]
+    mcc_volatile = summary.loc[summary["mcc_std_max"].idxmax()]
     return (
-        "Entre os modelos listados, "
-        f"{calm_name} apresenta a mediana mais baixa de desvio-padrão da "
-        f"ROC-AUC ({_num(calm['roc_auc_std_median'])}) e do MCC "
-        f"({_num(calm['mcc_std_median'])}), enquanto "
-        f"{volatile_name} atinge o maior desvio-padrão máximo observado "
-        f"(ROC-AUC {_num(volatile['roc_auc_std_max'])}, MCC "
-        f"{_num(volatile['mcc_std_max'])}). "
+        "Entre os modelos listados, a menor mediana de desvio-padrão da "
+        f"ROC-AUC aparece em {escape_latex(_model_name(auc_calm['model']))} "
+        f"({_num(auc_calm['roc_auc_std_median'])}); para o MCC, em "
+        f"{escape_latex(_model_name(mcc_calm['model']))} "
+        f"({_num(mcc_calm['mcc_std_median'])}). O maior desvio-padrão máximo "
+        f"da ROC-AUC aparece em {escape_latex(_model_name(auc_volatile['model']))} "
+        f"({_num(auc_volatile['roc_auc_std_max'])}); para o MCC, em "
+        f"{escape_latex(_model_name(mcc_volatile['model']))} "
+        f"({_num(mcc_volatile['mcc_std_max'])}). "
         "Com apenas três reamostragens bootstrap, estes números funcionam "
         "como verificação de sensibilidade à amostra finita de treino, não "
         "como intervalo de confiança preciso para o desempenho."

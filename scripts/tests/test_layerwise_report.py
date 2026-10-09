@@ -4028,6 +4028,41 @@ def test_probe_stability_aggregate_by_model_median_and_max():
     assert float(row["mcc_std_max"]) == pytest.approx(0.04)
 
 
+def test_probe_stability_pattern_selects_each_metric_extreme_independently():
+    summary = pd.DataFrame(
+        [
+            {
+                "model": "hubert_base",
+                "roc_auc_std_median": 0.03,
+                "roc_auc_std_max": 0.05,
+                "mcc_std_median": 0.01,
+                "mcc_std_max": 0.07,
+            },
+            {
+                "model": "wav2vec2_base",
+                "roc_auc_std_median": 0.01,
+                "roc_auc_std_max": 0.09,
+                "mcc_std_median": 0.03,
+                "mcc_std_max": 0.08,
+            },
+            {
+                "model": "wavlm_base",
+                "roc_auc_std_median": 0.02,
+                "roc_auc_std_max": 0.06,
+                "mcc_std_median": 0.02,
+                "mcc_std_max": 0.12,
+            },
+        ]
+    )
+
+    text = report_module._probe_stability_pattern_paragraph(summary)
+
+    assert "ROC-AUC aparece em Wav2Vec2 Base (0,010)" in text
+    assert "para o MCC, em HuBERT Base (0,010)" in text
+    assert "ROC-AUC aparece em Wav2Vec2 Base (0,090)" in text
+    assert "para o MCC, em WavLM Base (0,120)" in text
+
+
 def test_faithfulness_tex_is_single_compact_table(tmp_path):
     root = write_scientific_result_root(tmp_path / "compact_fidelity_tex")
     paths = LayerwiseSuitePaths(root)
