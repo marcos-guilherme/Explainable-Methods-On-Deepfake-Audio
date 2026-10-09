@@ -18,10 +18,13 @@ from brspeech_xai.layerwise_report import (
     BOOTSTRAP_CI_LEVEL,
     BOOTSTRAP_RESAMPLES,
     BOOTSTRAP_SEED,
+    _bootstrap_ci,
+    _MIN_VALID_RESAMPLES,
     build_diagonal_vs_offdiagonal,
     build_encoder_agreement,
     build_language_shift,
     build_spectral_divergence,
+    comparison_completeness,
 )
 
 _JS_BASE = 2.0
@@ -89,6 +92,15 @@ def _shuffle(frame: pd.DataFrame, seed: int = 7) -> pd.DataFrame:
     return frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
+# Metadata/uncertainty columns shared by every comparison row.
+_META_COLUMNS = {
+    "status",
+    "n_resamples",
+    "seed",
+    "ci_level",
+    "valid_bootstrap_n",
+    "degenerate_n",
+}
 _ENCODER_COLUMNS = {
     "model_a",
     "model_b",
@@ -101,11 +113,7 @@ _ENCODER_COLUMNS = {
     "ci_low",
     "ci_high",
     "n",
-    "status",
-    "n_resamples",
-    "seed",
-    "ci_level",
-}
+} | _META_COLUMNS
 _LANGUAGE_SHIFT_COLUMNS = {
     "model",
     "source",
@@ -120,11 +128,7 @@ _LANGUAGE_SHIFT_COLUMNS = {
     "ci_high",
     "n_a",
     "n_b",
-    "status",
-    "n_resamples",
-    "seed",
-    "ci_level",
-}
+} | _META_COLUMNS
 _DIAGONAL_COLUMNS = {
     "model",
     "source",
@@ -136,11 +140,7 @@ _DIAGONAL_COLUMNS = {
     "ci_low",
     "ci_high",
     "n",
-    "status",
-    "n_resamples",
-    "seed",
-    "ci_level",
-}
+} | _META_COLUMNS
 _SPECTRAL_COLUMNS = {
     "model",
     "language_a",
@@ -154,11 +154,7 @@ _SPECTRAL_COLUMNS = {
     "ci_high",
     "n_a",
     "n_b",
-    "status",
-    "n_resamples",
-    "seed",
-    "ci_level",
-}
+} | _META_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -526,3 +522,172 @@ def test_spectral_divergence_is_deterministic_under_input_shuffle():
     base = build_spectral_divergence(relevance, band_edges)
     shuffled = build_spectral_divergence(_shuffle(relevance, 9), _shuffle(band_edges, 11))
     pd.testing.assert_frame_equal(base, shuffled)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: valid_bootstrap_n and reduced/insufficient bootstrap status
+# ---------------------------------------------------------------------------
+def test_bootstrap_ci_reports_full_valid_count_and_ok_status():
+    draws = np.linspace(0.0, 1.0, 500)
+    low, high, valid_n, status = _bootstrap_ci(draws)
+    assert valid_n == 500
+    assert status == "ok"
+    assert low < high
+    assert np.isfinite(low) and np.isfinite(high)
+
+
+def test_bootstrap_ci_flags_reduced_sample_without_hiding_it():
+    draws = np.concatenate([np.linspace(0.0, 1.0, 400), np.full(100, np.nan)])
+    low, high, valid_n, status = _bootstrap_ci(draws)
+    assert valid_n == 400
+    assert status == "reduced_bootstrap"  # not silently "ok"
+    assert np.isfinite(low) and np.isfinite(high)
+
+
+def test_bootstrap_ci_refuses_ci_when_finite_draws_are_insufficient():
+    draws = np.full(2000, np.nan)
+    low, high, valid_n, status = _bootstrap_ci(draws)
+    assert valid_n == 0
+    assert status == "insufficient_bootstrap"
+    assert not np.isfinite(low) and not np.isfinite(high)
+    # A handful of finite draws (below the floor) is still refused.
+    draws = np.array([0.1, 0.2] + [np.nan] * 2000)
+    if _MIN_VALID_RESAMPLES > 2:
+        _, _, valid_small, status_small = _bootstrap_ci(draws)
+        assert valid_small == 2
+        assert status_small == "insufficient_bootstrap"
+
+
+def test_metrics_record_requested_and_valid_bootstrap_counts():
+    table = build_encoder_agreement(_two_model_predictions(), _two_model_relevance())
+    finite = table[table["status"].isin(["ok", "reduced_bootstrap"])]
+    assert (finite["n_resamples"] == BOOTSTRAP_RESAMPLES).all()
+    assert (finite["valid_bootstrap_n"] <= finite["n_resamples"]).all()
+    assert (finite["valid_bootstrap_n"] > 0).all()
+    # Constant-series rows carry no usable resamples.
+    predictions = _two_model_predictions()
+    predictions.loc[predictions["model"] == "wavlm", "score"] = 0.7
+    constant = build_encoder_agreement(predictions, _two_model_relevance())
+    spearman = constant[constant["metric"] == "score_spearman"].iloc[0]
+    assert spearman["status"] == "constant_series"
+    assert int(spearman["valid_bootstrap_n"]) == 0
+    assert not np.isfinite(spearman["ci_low"])
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: degenerate MCC denominators are surfaced, not disguised as ok
+# ---------------------------------------------------------------------------
+def _degenerate_mcc_predictions() -> pd.DataFrame:
+    diag = [("a", 0, 0.1), ("b", 0, 0.2), ("c", 1, 0.8), ("d", 1, 0.9)]
+    # Offdiagonal predicts a single class for every sample -> MCC denominator 0.
+    off = [("a", 0, 0.6), ("b", 0, 0.7), ("c", 1, 0.8), ("d", 1, 0.9)]
+    rows = []
+    for sid, y, s in diag:
+        rows.append(_pred_row("hubert", "eng", "eng", 1, sid, y, s))
+    for sid, y, s in off:
+        rows.append(_pred_row("hubert", "por", "eng", 1, sid, y, s))
+    return pd.DataFrame(rows)
+
+
+def test_diagonal_mcc_degeneracy_is_surfaced_in_status():
+    table = build_diagonal_vs_offdiagonal(_degenerate_mcc_predictions()).set_index("metric")
+    mcc = table.loc["delta_mcc"]
+    assert "degenerate" in str(mcc["status"]).lower()
+    assert int(mcc["degenerate_n"]) > 0
+    # The delta remains finite (preserve delta semantics where possible).
+    assert np.isfinite(mcc["estimate"])
+    # ROC-AUC is unaffected and stays ok.
+    assert table.loc["delta_roc_auc", "status"] == "ok"
+    assert int(table.loc["delta_roc_auc", "degenerate_n"]) == 0
+
+
+def _perfect_diag_off_predictions() -> pd.DataFrame:
+    # Both cells predict every sample correctly, so each resample keeps both
+    # predicted classes and no MCC denominator can collapse.
+    diag = [("a", 0, 0.1), ("b", 0, 0.2), ("c", 1, 0.8), ("d", 1, 0.9)]
+    off = [("a", 0, 0.15), ("b", 0, 0.25), ("c", 1, 0.75), ("d", 1, 0.85)]
+    rows = []
+    for sid, y, s in diag:
+        rows.append(_pred_row("hubert", "eng", "eng", 1, sid, y, s))
+    for sid, y, s in off:
+        rows.append(_pred_row("hubert", "por", "eng", 1, sid, y, s))
+    return pd.DataFrame(rows)
+
+
+def test_diagonal_non_degenerate_mcc_stays_ok():
+    table = build_diagonal_vs_offdiagonal(_perfect_diag_off_predictions()).set_index(
+        "metric"
+    )
+    assert table.loc["delta_mcc", "status"] == "ok"
+    assert int(table.loc["delta_mcc", "degenerate_n"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: strict completeness against the expected comparison grid
+# ---------------------------------------------------------------------------
+_COMPLETENESS_KEYS = {
+    "encoder_agreement": [
+        "model_a",
+        "model_b",
+        "source",
+        "target",
+        "layer",
+        "metric",
+    ],
+    "language_shift": ["model", "source", "target_a", "target_b", "layer", "group"],
+    "diagonal_vs_offdiagonal": ["model", "source", "target", "layer", "metric"],
+    "spectral_divergence": ["model", "language_a", "language_b", "layer", "group"],
+}
+
+
+def _full_table_for(name, models, languages, layers):
+    """A table whose identity rows exactly cover the expected grid."""
+    info = comparison_completeness(name, pd.DataFrame(), models, languages, layers)
+    # Reconstruct the expected identities by asking the assessor what is missing
+    # from an empty table (its missing set is the full expected set).
+    rows = [dict(zip(_COMPLETENESS_KEYS[name], identity)) for identity in info["expected"]]
+    return pd.DataFrame(rows)
+
+
+def test_completeness_expected_row_counts_match_the_grid():
+    models = ["m1", "m2", "m3"]
+    languages = ["eng", "por", "zho"]
+    layers = [1, 2]
+    assert comparison_completeness(
+        "encoder_agreement", pd.DataFrame(), models, languages, layers
+    )["expected_rows"] == 3 * 3 * 3 * 2 * 5
+    assert comparison_completeness(
+        "language_shift", pd.DataFrame(), models, languages, layers
+    )["expected_rows"] == 3 * 3 * 3 * 2 * 3
+    assert comparison_completeness(
+        "diagonal_vs_offdiagonal", pd.DataFrame(), models, languages, layers
+    )["expected_rows"] == 3 * 3 * 2 * 2 * 2
+    assert comparison_completeness(
+        "spectral_divergence", pd.DataFrame(), models, languages, layers
+    )["expected_rows"] == 3 * 3 * 2 * 3
+
+
+def test_homogeneous_three_by_three_production_is_recognized_complete():
+    models = ["hubert", "wav2vec2", "wavlm"]
+    languages = ["eng", "por", "zho"]
+    layers = list(range(1, 13))
+    for name in _COMPLETENESS_KEYS:
+        table = _full_table_for(name, models, languages, layers)
+        info = comparison_completeness(name, table, models, languages, layers)
+        assert info["complete"] is True
+        assert info["status"] == "complete"
+        assert info["missing_rows"] == 0
+
+
+def test_partially_populated_table_is_incomplete_and_diagnosable():
+    models = ["hubert", "wavlm"]
+    languages = ["eng", "por"]
+    layers = [1, 2, 3]
+    for name in _COMPLETENESS_KEYS:
+        table = _full_table_for(name, models, languages, layers)
+        dropped = table.iloc[1:].reset_index(drop=True)  # remove one expected row
+        info = comparison_completeness(name, dropped, models, languages, layers)
+        assert info["complete"] is False
+        assert info["status"] == "unavailable_incomplete_table"
+        assert info["missing_rows"] == 1
+        assert len(info["missing_examples"]) == 1

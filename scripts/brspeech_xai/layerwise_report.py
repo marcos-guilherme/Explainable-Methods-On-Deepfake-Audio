@@ -278,6 +278,10 @@ _CI_PERCENTILES = (
     100.0 * (1.0 - BOOTSTRAP_CI_LEVEL) / 2.0,
     100.0 * (1.0 + BOOTSTRAP_CI_LEVEL) / 2.0,
 )
+# Minimum number of finite bootstrap draws required to report a percentile CI.
+# Below this floor the interval is refused (NaN) rather than computed from an
+# unknown, silently reduced sample.
+_MIN_VALID_RESAMPLES = 2
 # Jensen-Shannon distance is reported in bits (base-2 logarithm, range [0, 1]).
 _JS_BASE = 2.0
 # Comparison groups condition on the true class; "all" pools both classes but is
@@ -463,6 +467,7 @@ class ReportTables:
     language_shift: pd.DataFrame
     diagonal_vs_offdiagonal: pd.DataFrame
     spectral_divergence: pd.DataFrame
+    comparison_completeness: Mapping[str, Mapping[str, object]]
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -472,6 +477,16 @@ class ReportTables:
             self,
             "omitted_comparisons",
             MappingProxyType(dict(self.omitted_comparisons)),
+        )
+        object.__setattr__(
+            self,
+            "comparison_completeness",
+            MappingProxyType(
+                {
+                    name: MappingProxyType(dict(info))
+                    for name, info in self.comparison_completeness.items()
+                }
+            ),
         )
 
 
@@ -1666,27 +1681,21 @@ def _transition_summary(transitions: pd.DataFrame) -> pd.DataFrame:
 
 
 def _omitted_comparisons(
-    models: Sequence[str],
-    languages: Sequence[str],
-    availability: Mapping[str, bool],
+    completeness: Mapping[str, Mapping[str, object]],
 ) -> dict[str, str]:
     """Reasons for comparisons that are *not* delivered this edition.
 
-    A comparison is removed from the omission map only once its complete table is
-    available; until then it reports why it is missing (too few models/languages,
-    or an unexpectedly empty table despite sufficient inputs).
+    A comparison is removed from the omission map only once its table is complete
+    against the expected grid. Until then it reports why it is missing: too few
+    models/languages, or a table that is only partially populated relative to the
+    actual model/language/source/target/layer availability.
     """
-    requirements = {
-        "encoder_agreement": (len(models) > 1, "single_model"),
-        "language_shift": (len(languages) > 1, "single_language"),
-        "diagonal_vs_offdiagonal": (len(languages) > 1, "single_language"),
-        "spectral_divergence": (len(languages) > 1, "single_language"),
-    }
     omitted: dict[str, str] = {}
-    for name, (has_inputs, insufficient_reason) in requirements.items():
-        if not has_inputs:
-            omitted[name] = insufficient_reason
-        elif not availability.get(name, False):
+    for name, info in completeness.items():
+        status = info.get("status")
+        if status in ("single_model", "single_language"):
+            omitted[name] = str(status)
+        elif not info.get("complete", False):
             omitted[name] = "unavailable_incomplete_table"
     return omitted
 
@@ -1805,6 +1814,8 @@ _ENCODER_AGREEMENT_COLUMNS = (
     "n_resamples",
     "seed",
     "ci_level",
+    "valid_bootstrap_n",
+    "degenerate_n",
 )
 _LANGUAGE_SHIFT_COLUMNS = (
     "model",
@@ -1824,6 +1835,8 @@ _LANGUAGE_SHIFT_COLUMNS = (
     "n_resamples",
     "seed",
     "ci_level",
+    "valid_bootstrap_n",
+    "degenerate_n",
 )
 _DIAGONAL_COMPARISON_COLUMNS = (
     "model",
@@ -1840,6 +1853,8 @@ _DIAGONAL_COMPARISON_COLUMNS = (
     "n_resamples",
     "seed",
     "ci_level",
+    "valid_bootstrap_n",
+    "degenerate_n",
 )
 _SPECTRAL_DIVERGENCE_COLUMNS = (
     "model",
@@ -1858,6 +1873,8 @@ _SPECTRAL_DIVERGENCE_COLUMNS = (
     "n_resamples",
     "seed",
     "ci_level",
+    "valid_bootstrap_n",
+    "degenerate_n",
 )
 
 
@@ -1966,19 +1983,20 @@ def _rowwise_auc(labels: np.ndarray, scores: np.ndarray) -> np.ndarray:
     return out
 
 
-def _rowwise_mcc(labels: np.ndarray, prediction: np.ndarray) -> np.ndarray:
-    """Matthews correlation per row; 0.0 on a degenerate denominator."""
+def _rowwise_mcc(labels: np.ndarray, prediction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row Matthews correlation and a boolean degenerate-denominator mask."""
     tp = ((prediction == 1) & (labels == 1)).sum(axis=1).astype(np.float64)
     tn = ((prediction == 0) & (labels == 0)).sum(axis=1).astype(np.float64)
     fp = ((prediction == 1) & (labels == 0)).sum(axis=1).astype(np.float64)
     fn = ((prediction == 0) & (labels == 1)).sum(axis=1).astype(np.float64)
     denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    degenerate = denominator == 0
     out = np.zeros(labels.shape[0])
-    nonzero = denominator > 0
+    nonzero = ~degenerate
     out[nonzero] = (tp[nonzero] * tn[nonzero] - fp[nonzero] * fn[nonzero]) / denominator[
         nonzero
     ]
-    return out
+    return out, degenerate
 
 
 def _resampled_means(vectors: np.ndarray, index_matrix: np.ndarray) -> np.ndarray:
@@ -2020,14 +2038,24 @@ def _wasserstein_batch(
     return (np.abs(cdf_a - cdf_b) * deltas).sum(axis=1)
 
 
-def _ci_bounds(samples: np.ndarray) -> tuple[float, float]:
-    """Percentile confidence bounds; never clamped to the point estimate."""
-    finite = np.asarray(samples, dtype=np.float64)
-    finite = finite[np.isfinite(finite)]
-    if finite.size == 0:
-        return float("nan"), float("nan")
+def _bootstrap_ci(draws: np.ndarray) -> tuple[float, float, int, str]:
+    """Percentile CI plus the finite-draw bookkeeping needed to trust it.
+
+    Returns ``(ci_low, ci_high, valid_bootstrap_n, status)``. The bounds are
+    never clamped to the point estimate. When fewer than ``_MIN_VALID_RESAMPLES``
+    draws are finite the interval is refused (NaN) with an explicit status; when
+    some but not all draws are finite the status flags the reduction rather than
+    presenting a silent ``ok``.
+    """
+    draws = np.asarray(draws, dtype=np.float64)
+    requested = int(draws.size)
+    finite = draws[np.isfinite(draws)]
+    valid_n = int(finite.size)
+    if valid_n < _MIN_VALID_RESAMPLES:
+        return float("nan"), float("nan"), valid_n, "insufficient_bootstrap"
     low, high = np.percentile(finite, _CI_PERCENTILES)
-    return float(low), float(high)
+    status = "ok" if valid_n == requested else "reduced_bootstrap"
+    return float(low), float(high), valid_n, status
 
 
 def _as_distribution(values: object, context: str) -> np.ndarray:
@@ -2080,14 +2108,21 @@ def _fast_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     )
 
 
-def _fast_mcc(labels: np.ndarray, prediction: np.ndarray) -> float:
-    """Matthews correlation; 0.0 on a degenerate denominator (as sklearn does)."""
+def _fast_mcc(labels: np.ndarray, prediction: np.ndarray) -> tuple[float, bool]:
+    """Matthews correlation and whether its denominator was degenerate.
+
+    A degenerate denominator (a prediction or truth vector with a single class)
+    yields 0.0 as sklearn does, but the degeneracy flag is returned so callers
+    can surface it instead of silently reporting a bare 0.0.
+    """
     tp = float(((prediction == 1) & (labels == 1)).sum())
     tn = float(((prediction == 0) & (labels == 0)).sum())
     fp = float(((prediction == 1) & (labels == 0)).sum())
     fn = float(((prediction == 0) & (labels == 1)).sum())
     denominator = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
-    return (tp * tn - fp * fn) / denominator if denominator else 0.0
+    if denominator == 0:
+        return 0.0, True
+    return (tp * tn - fp * fn) / denominator, False
 
 
 def _aligned_pair(
@@ -2141,7 +2176,8 @@ def build_encoder_agreement(
         for index_b in range(index_a + 1, len(models)):
             model_a, model_b = models[index_a], models[index_b]
 
-            def _row(src, tgt, layer, metric, unit, estimate, ci_low, ci_high, n, status):
+            def _row(src, tgt, layer, metric, unit, estimate, ci_low, ci_high, n,
+                     status, valid_bootstrap_n=0, degenerate_n=0):
                 rows.append(
                     {
                         "model_a": model_a,
@@ -2156,6 +2192,8 @@ def build_encoder_agreement(
                         "ci_high": float(ci_high),
                         "n": int(n),
                         "status": status,
+                        "valid_bootstrap_n": int(valid_bootstrap_n),
+                        "degenerate_n": int(degenerate_n),
                         **meta,
                     }
                 )
@@ -2195,15 +2233,16 @@ def build_encoder_agreement(
                     _row(source, target, layer, "score_spearman", "rho",
                          float("nan"), float("nan"), float("nan"), n, "constant_series")
                 else:
-                    low, high = _ci_bounds(
+                    low, high, valid_n, status = _bootstrap_ci(
                         _rowwise_spearman(score_a[matrix], score_b[matrix])
                     )
-                    _row(source, target, layer, "score_spearman", "rho", rho, low, high, n, "ok")
+                    _row(source, target, layer, "score_spearman", "rho", rho, low, high,
+                         n, status, valid_n)
 
                 match = (pred_la == pred_lb).astype(np.float64)
-                low, high = _ci_bounds(match[matrix].mean(axis=1))
+                low, high, valid_n, status = _bootstrap_ci(match[matrix].mean(axis=1))
                 _row(source, target, layer, "prediction_agreement", "fraction",
-                     float(match.mean()), low, high, n, "ok")
+                     float(match.mean()), low, high, n, status, valid_n)
 
                 with np.errstate(invalid="ignore", divide="ignore"):
                     kappa = float(cohen_kappa_score(pred_la, pred_lb))
@@ -2211,10 +2250,11 @@ def build_encoder_agreement(
                     _row(source, target, layer, "cohen_kappa", "kappa",
                          float("nan"), float("nan"), float("nan"), n, "degenerate")
                 else:
-                    low, high = _ci_bounds(
-                        _rowwise_kappa(pred_la[matrix], pred_lb[matrix])
-                    )
-                    _row(source, target, layer, "cohen_kappa", "kappa", kappa, low, high, n, "ok")
+                    draws = _rowwise_kappa(pred_la[matrix], pred_lb[matrix])
+                    low, high, valid_n, status = _bootstrap_ci(draws)
+                    degenerate_n = int(BOOTSTRAP_RESAMPLES - valid_n)
+                    _row(source, target, layer, "cohen_kappa", "kappa", kappa, low, high,
+                         n, status, valid_n, degenerate_n)
 
             rel_a = sample_relevance[sample_relevance["model"] == model_a]
             rel_b = sample_relevance[sample_relevance["model"] == model_b]
@@ -2263,9 +2303,9 @@ def build_encoder_agreement(
                     ("relevance_cosine_similarity", "cosine", cosine),
                     ("relevance_jensen_shannon_distance", "bits", js),
                 ):
-                    low, high = _ci_bounds(values[matrix].mean(axis=1))
+                    low, high, valid_n, status = _bootstrap_ci(values[matrix].mean(axis=1))
                     _row(source, target, layer, metric, unit,
-                         float(values.mean()), low, high, n, "ok")
+                         float(values.mean()), low, high, n, status, valid_n)
 
     return _finalize_comparison(
         rows,
@@ -2357,7 +2397,7 @@ def build_language_shift(sample_relevance: pd.DataFrame) -> pd.DataFrame:
                                 _resample_matrix(rng, labels_b, BOOTSTRAP_RESAMPLES),
                             )
                             draws = _rowwise_jensenshannon(means_a, means_b, _JS_BASE)
-                            low, high = _ci_bounds(draws)
+                            low, high, valid_n, status = _bootstrap_ci(draws)
                             rows.append(
                                 {
                                     "model": model,
@@ -2373,7 +2413,9 @@ def build_language_shift(sample_relevance: pd.DataFrame) -> pd.DataFrame:
                                     "ci_high": high,
                                     "n_a": int(len(matrix_a)),
                                     "n_b": int(len(matrix_b)),
-                                    "status": "ok",
+                                    "status": status,
+                                    "valid_bootstrap_n": int(valid_n),
+                                    "degenerate_n": 0,
                                     **meta,
                                 }
                             )
@@ -2433,37 +2475,61 @@ def build_diagonal_vs_offdiagonal(cell_predictions: pd.DataFrame) -> pd.DataFram
                     auc_draws = _rowwise_auc(labels_rows, off_score[matrix]) - _rowwise_auc(
                         labels_rows, diag_score[matrix]
                     )
-                    mcc_draws = _rowwise_mcc(labels_rows, off_pred[matrix]) - _rowwise_mcc(
-                        labels_rows, diag_pred[matrix]
+                    off_mcc_draws, off_mcc_deg = _rowwise_mcc(labels_rows, off_pred[matrix])
+                    diag_mcc_draws, diag_mcc_deg = _rowwise_mcc(labels_rows, diag_pred[matrix])
+                    mcc_draws = off_mcc_draws - diag_mcc_draws
+                    mcc_degenerate = int((off_mcc_deg | diag_mcc_deg).sum())
+
+                    off_mcc_point, off_point_deg = _fast_mcc(labels, off_pred)
+                    diag_mcc_point, diag_point_deg = _fast_mcc(labels, diag_pred)
+
+                    auc_low, auc_high, auc_valid, auc_status = _bootstrap_ci(auc_draws)
+                    rows.append(
+                        {
+                            "model": model,
+                            "source": source,
+                            "target": target,
+                            "layer": int(layer),
+                            "metric": "delta_roc_auc",
+                            "unit": "dimensionless",
+                            "estimate": float(
+                                _fast_auc(labels, off_score) - _fast_auc(labels, diag_score)
+                            ),
+                            "ci_low": float(auc_low),
+                            "ci_high": float(auc_high),
+                            "n": int(n),
+                            "status": auc_status,
+                            "valid_bootstrap_n": int(auc_valid),
+                            "degenerate_n": 0,
+                            **meta,
+                        }
                     )
-                    estimates = {
-                        "delta_roc_auc": (
-                            _fast_auc(labels, off_score) - _fast_auc(labels, diag_score),
-                            auc_draws,
-                        ),
-                        "delta_mcc": (
-                            _fast_mcc(labels, off_pred) - _fast_mcc(labels, diag_pred),
-                            mcc_draws,
-                        ),
-                    }
-                    for metric, (estimate, draws) in estimates.items():
-                        low, high = _ci_bounds(draws)
-                        rows.append(
-                            {
-                                "model": model,
-                                "source": source,
-                                "target": target,
-                                "layer": int(layer),
-                                "metric": metric,
-                                "unit": "dimensionless",
-                                "estimate": float(estimate),
-                                "ci_low": float(low),
-                                "ci_high": float(high),
-                                "n": int(n),
-                                "status": "ok",
-                                **meta,
-                            }
-                        )
+
+                    mcc_low, mcc_high, mcc_valid, mcc_boot_status = _bootstrap_ci(mcc_draws)
+                    point_degenerate = off_point_deg or diag_point_deg
+                    mcc_status = (
+                        "degenerate_mcc_denominator"
+                        if (point_degenerate or mcc_degenerate > 0)
+                        else mcc_boot_status
+                    )
+                    rows.append(
+                        {
+                            "model": model,
+                            "source": source,
+                            "target": target,
+                            "layer": int(layer),
+                            "metric": "delta_mcc",
+                            "unit": "dimensionless",
+                            "estimate": float(off_mcc_point - diag_mcc_point),
+                            "ci_low": float(mcc_low),
+                            "ci_high": float(mcc_high),
+                            "n": int(n),
+                            "status": mcc_status,
+                            "valid_bootstrap_n": int(mcc_valid),
+                            "degenerate_n": mcc_degenerate,
+                            **meta,
+                        }
+                    )
     return _finalize_comparison(
         rows,
         _DIAGONAL_COMPARISON_COLUMNS,
@@ -2504,8 +2570,10 @@ def build_spectral_divergence(
             for index_b in range(index_a + 1, len(present)):
                 language_a = present[index_a]
                 language_b = present[index_b]
-                support_a = centers.get((model, language_a))
-                support_b = centers.get((model, language_b))
+                # Keys are stored as plain ``str`` so numpy string dtypes from the
+                # grouped frame cannot miss an otherwise-equal center entry.
+                support_a = centers.get((str(model), str(language_a)))
+                support_b = centers.get((str(model), str(language_b)))
                 if support_a is None or support_b is None:
                     raise ValueError(
                         f"spectral_divergence {model} {language_a}|{language_b}: "
@@ -2567,7 +2635,7 @@ def build_spectral_divergence(
                         draws = _wasserstein_batch(
                             support_a, support_b, means_a, means_b
                         )
-                        low, high = _ci_bounds(draws)
+                        low, high, valid_n, status = _bootstrap_ci(draws)
                         rows.append(
                             {
                                 "model": model,
@@ -2582,7 +2650,9 @@ def build_spectral_divergence(
                                 "ci_high": high,
                                 "n_a": int(len(matrix_a)),
                                 "n_b": int(len(matrix_b)),
-                                "status": "ok",
+                                "status": status,
+                                "valid_bootstrap_n": int(valid_n),
+                                "degenerate_n": 0,
                                 **meta,
                             }
                         )
@@ -2591,6 +2661,148 @@ def build_spectral_divergence(
         _SPECTRAL_DIVERGENCE_COLUMNS,
         ["model", "language_a", "language_b", "layer", "group"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Completeness of comparison tables against the expected grid
+# ---------------------------------------------------------------------------
+
+_ENCODER_METRICS = (
+    "cohen_kappa",
+    "prediction_agreement",
+    "relevance_cosine_similarity",
+    "relevance_jensen_shannon_distance",
+    "score_spearman",
+)
+_DIAGONAL_METRICS = ("delta_mcc", "delta_roc_auc")
+
+
+def _expected_encoder_identities(models, languages, layers):
+    pairs = [
+        (models[i], models[j])
+        for i in range(len(models))
+        for j in range(i + 1, len(models))
+    ]
+    return {
+        (a, b, source, target, layer, metric)
+        for a, b in pairs
+        for source in languages
+        for target in languages
+        for layer in layers
+        for metric in _ENCODER_METRICS
+    }
+
+
+def _expected_language_shift_identities(models, languages, layers):
+    target_pairs = [
+        (languages[i], languages[j])
+        for i in range(len(languages))
+        for j in range(i + 1, len(languages))
+    ]
+    return {
+        (model, source, target_a, target_b, layer, group)
+        for model in models
+        for source in languages
+        for target_a, target_b in target_pairs
+        for layer in layers
+        for group, _ in _COMPARISON_GROUPS
+    }
+
+
+def _expected_diagonal_identities(models, languages, layers):
+    return {
+        (model, source, target, layer, metric)
+        for model in models
+        for target in languages
+        for source in languages
+        if source != target
+        for layer in layers
+        for metric in _DIAGONAL_METRICS
+    }
+
+
+def _expected_spectral_identities(models, languages, layers):
+    language_pairs = [
+        (languages[i], languages[j])
+        for i in range(len(languages))
+        for j in range(i + 1, len(languages))
+    ]
+    return {
+        (model, language_a, language_b, layer, group)
+        for model in models
+        for language_a, language_b in language_pairs
+        for layer in layers
+        for group, _ in _COMPARISON_GROUPS
+    }
+
+
+_COMPLETENESS_SPECS: Mapping[str, tuple] = MappingProxyType(
+    {
+        "encoder_agreement": (
+            _expected_encoder_identities,
+            ("model_a", "model_b", "source", "target", "layer", "metric"),
+        ),
+        "language_shift": (
+            _expected_language_shift_identities,
+            ("model", "source", "target_a", "target_b", "layer", "group"),
+        ),
+        "diagonal_vs_offdiagonal": (
+            _expected_diagonal_identities,
+            ("model", "source", "target", "layer", "metric"),
+        ),
+        "spectral_divergence": (
+            _expected_spectral_identities,
+            ("model", "language_a", "language_b", "layer", "group"),
+        ),
+    }
+)
+
+
+def _observed_identities(table: pd.DataFrame, keys: Sequence[str]) -> set:
+    if table is None or table.empty:
+        return set()
+    identities = set()
+    for row in table[list(keys)].itertuples(index=False, name=None):
+        identities.add(
+            tuple(int(value) if key == "layer" else value for key, value in zip(keys, row))
+        )
+    return identities
+
+
+def comparison_completeness(
+    name: str,
+    table: pd.DataFrame,
+    models: Sequence[str],
+    languages: Sequence[str],
+    layers: Sequence[int],
+) -> dict[str, object]:
+    """Assess one comparison table against the grid implied by availability.
+
+    The expected grid is the full combinatorial product of the actually observed
+    models, languages and layers (plus the comparison's metric/group axes). A
+    table is complete only when it covers that grid exactly; otherwise it is
+    reported as ``unavailable_incomplete_table`` with the number and a sample of
+    the missing identities so the gap can be diagnosed.
+    """
+    generator, keys = _COMPLETENESS_SPECS[name]
+    models = sorted(str(model) for model in set(models))
+    languages = sorted(str(language) for language in set(languages))
+    layers = sorted(int(layer) for layer in set(layers))
+    expected = generator(models, languages, layers)
+    observed = _observed_identities(table, keys)
+    missing = expected - observed
+    extra = observed - expected
+    complete = bool(expected) and not missing and not extra
+    return {
+        "status": "complete" if complete else "unavailable_incomplete_table",
+        "complete": complete,
+        "expected_rows": len(expected),
+        "observed_rows": len(observed),
+        "missing_rows": len(missing),
+        "extra_rows": len(extra),
+        "missing_examples": tuple(sorted(missing, key=lambda item: tuple(map(str, item)))[:10]),
+        "expected": tuple(sorted(expected, key=lambda item: tuple(map(str, item)))),
+    }
 
 
 def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
@@ -2676,11 +2888,45 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     language_shift = build_language_shift(sample_relevance)
     diagonal_vs_offdiagonal = build_diagonal_vs_offdiagonal(cell_predictions)
     spectral_divergence = build_spectral_divergence(sample_relevance, band_edges)
-    availability = {
-        "encoder_agreement": not encoder_agreement.empty,
-        "language_shift": not language_shift.empty,
-        "diagonal_vs_offdiagonal": not diagonal_vs_offdiagonal.empty,
-        "spectral_divergence": not spectral_divergence.empty,
+
+    model_list = list(models)
+    pred_languages = sorted(set(cell_predictions["source"]) | set(cell_predictions["target"]))
+    pred_layers = sorted({int(value) for value in cell_predictions["layer"]})
+    rel_languages = sorted(set(sample_relevance["source"]) | set(sample_relevance["target"]))
+    rel_layers = sorted({int(value) for value in sample_relevance["layer"]})
+
+    def _assess(name, table, langs, layers_list, has_inputs, insufficient_reason):
+        if not has_inputs:
+            return {
+                "status": insufficient_reason,
+                "complete": False,
+                "expected_rows": 0,
+                "observed_rows": int(len(table)),
+                "missing_rows": 0,
+                "extra_rows": 0,
+                "missing_examples": (),
+            }
+        info = comparison_completeness(name, table, model_list, langs, layers_list)
+        info.pop("expected", None)  # keep ReportTables lightweight
+        return info
+
+    comparison_completeness_map = {
+        "encoder_agreement": _assess(
+            "encoder_agreement", encoder_agreement, pred_languages, pred_layers,
+            len(model_list) > 1, "single_model",
+        ),
+        "language_shift": _assess(
+            "language_shift", language_shift, rel_languages, rel_layers,
+            len(rel_languages) > 1, "single_language",
+        ),
+        "diagonal_vs_offdiagonal": _assess(
+            "diagonal_vs_offdiagonal", diagonal_vs_offdiagonal, pred_languages, pred_layers,
+            len(pred_languages) > 1, "single_language",
+        ),
+        "spectral_divergence": _assess(
+            "spectral_divergence", spectral_divergence, rel_languages, rel_layers,
+            len(rel_languages) > 1, "single_language",
+        ),
     }
     return ReportTables(
         models=models,
@@ -2704,7 +2950,7 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
             performance, band_relevance
         ),
         planned_figures=FIGURE_FAMILIES,
-        omitted_comparisons=_omitted_comparisons(models, languages, availability),
+        omitted_comparisons=_omitted_comparisons(comparison_completeness_map),
         probe_stability=merged(
             "probe_stability",
             ["model", "source", "target", "layer"],
@@ -2723,6 +2969,7 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         language_shift=language_shift,
         diagonal_vs_offdiagonal=diagonal_vs_offdiagonal,
         spectral_divergence=spectral_divergence,
+        comparison_completeness=comparison_completeness_map,
     )
 
 
