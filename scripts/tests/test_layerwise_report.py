@@ -19,7 +19,11 @@ import pytest
 
 import brspeech_xai.layerwise_report as report_module
 from brspeech_xai.encoder_suite import LANGUAGE_ORDER, LAYER_ORDER
-from brspeech_xai.layerwise_paths import LayerwiseSuitePaths, publish_generation
+from brspeech_xai.layerwise_paths import (
+    LayerwiseSuitePaths,
+    publish_generation,
+    resolve_active_generation,
+)
 from brspeech_xai.layerwise_report import (
     ExperimentIdentity,
     LoadedReportSource,
@@ -692,13 +696,18 @@ def _write_final_trace_generation(
 
 
 @functools.lru_cache(maxsize=None)
-def _cell_artifacts(layer: int, source: str, target: str):
+def _cell_artifacts(
+    layer: int,
+    source: str,
+    target: str,
+    cohort: tuple[tuple[str, int], ...] = _COHORT,
+):
     """Self-consistent persisted predictions and the metrics derived from them."""
     from brspeech_xai.metrics import evaluate_at_threshold
 
     rng = np.random.default_rng(_cell_seed(layer, source, target) + 7)
-    ids = [sample_id for sample_id, _ in _COHORT]
-    labels = [label for _, label in _COHORT]
+    ids = [sample_id for sample_id, _ in cohort]
+    labels = [label for _, label in cohort]
     for index in range(36):
         ids.append(f"fill-{index:02d}")
         labels.append(index % 2)
@@ -717,8 +726,13 @@ def _cell_artifacts(layer: int, source: str, target: str):
     return predictions, metrics
 
 
-def _cell_metrics(layer: int, source: str, target: str) -> dict:
-    return _cell_artifacts(layer, source, target)[1]
+def _cell_metrics(
+    layer: int,
+    source: str,
+    target: str,
+    cohort: tuple[tuple[str, int], ...] = _COHORT,
+) -> dict:
+    return _cell_artifacts(layer, source, target, cohort)[1]
 
 
 def _sha256_file(path: Path) -> str:
@@ -871,6 +885,11 @@ def write_scientific_result_root(
         for source in languages
         for target in languages
     ]
+    cohort_overrides = cohort_overrides or {}
+
+    def cell_cohort(layer: int) -> tuple[tuple[str, int], ...]:
+        return tuple(cohort_overrides.get(layer, _COHORT))
+
     performance = pd.DataFrame(
         [
             {
@@ -878,12 +897,14 @@ def write_scientific_result_root(
                 "layer": layer,
                 "source": source,
                 "target": target,
-                "n": len(_cell_artifacts(layer, source, target)[0])
+                "n": len(
+                    _cell_artifacts(layer, source, target, cell_cohort(layer))[0]
+                )
                 + aggregate_n_offset,
-                "auc": _cell_metrics(layer, source, target)["threshold_free"][
-                    "roc_auc"
-                ],
-                "accuracy": _cell_metrics(layer, source, target)[
+                "auc": _cell_metrics(
+                    layer, source, target, cell_cohort(layer)
+                )["threshold_free"]["roc_auc"],
+                "accuracy": _cell_metrics(layer, source, target, cell_cohort(layer))[
                     "fixed_threshold"
                 ]["accuracy"],
                 "diagonal": source == target,
@@ -930,7 +951,8 @@ def write_scientific_result_root(
     for layer, source, target in cells:
         cell_dir = paths.cell(profile, layer, source, target)
         cell_dir.mkdir(parents=True)
-        predictions, metrics = _cell_artifacts(layer, source, target)
+        cohort = cell_cohort(layer)
+        predictions, metrics = _cell_artifacts(layer, source, target, cohort)
         predictions.to_parquet(cell_dir / "predictions.parquet", index=False)
         np.save(
             cell_dir / "scores.npy",
@@ -1026,6 +1048,8 @@ def test_tables_attach_explicit_model_and_language_identity(eng_tables):
         eng_tables.transitions,
         eng_tables.conservation,
         eng_tables.stdft_examples,
+        eng_tables.cell_predictions,
+        eng_tables.sample_relevance,
     )
     for frame in frames:
         assert set(frame["model"]) == {"hubert_base"}
@@ -4120,3 +4144,287 @@ def test_report_fidelity_and_stability_use_compact_tables_and_cautious_prose(
         encoding="utf-8"
     )
     assert stability_tex.count(r"\begin{table}") == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-sample predictions and XAI relevance for downstream comparisons
+# ---------------------------------------------------------------------------
+
+_PER_SAMPLE_ORDER = ["model", "source", "target", "layer", "sample_id"]
+
+
+def _rewrite_predictions_parquet(
+    root: Path,
+    profile: str,
+    layer: int,
+    source: str,
+    target: str,
+    mutate,
+) -> None:
+    cell_dir = LayerwiseSuitePaths(root).cell(profile, layer, source, target)
+    frame = pd.read_parquet(cell_dir / "predictions.parquet")
+    mutate(frame)
+    frame.to_parquet(cell_dir / "predictions.parquet", index=False)
+    np.save(
+        cell_dir / "scores.npy",
+        frame["score"].to_numpy(dtype=np.float32),
+    )
+    _refresh_cell_marker(root, profile, layer, source, target)
+
+
+def _rewrite_sample_relevance_parquet(
+    root: Path,
+    profile: str,
+    layer: int,
+    source: str,
+    target: str,
+    mutate,
+) -> None:
+    paths = LayerwiseSuitePaths(root)
+    generation = resolve_active_generation(
+        paths.layer_xai(profile, layer, source, target),
+        expected_role="layer_xai",
+    )
+    path = generation / "sample_relevance.parquet"
+    frame = pd.read_parquet(path)
+    mutate(frame)
+    frame.to_parquet(path, index=False)
+    overall = pd.DataFrame(_summary_rows(frame, grouping="all", group_column=None))
+    byclass = pd.DataFrame(
+        _summary_rows(frame, grouping="y_true", group_column="y_true")
+        + _summary_rows(frame, grouping="prediction", group_column="prediction")
+    )
+    overall.to_csv(generation / "dft_band_relevance.csv", index=False)
+    byclass.to_csv(generation / "dft_band_relevance_byclass.csv", index=False)
+    conservation_path = generation / "attnlrp_conservation.json"
+    conservation = json.loads(conservation_path.read_text(encoding="utf-8"))
+    conservation["n"] = len(frame)
+    conservation["validation_sample_id"] = str(frame.iloc[0]["sample_id"])
+    conservation["max_score_recompute_absolute_error"] = float(
+        frame["score_recompute_absolute_error"].max()
+    )
+    conservation_path.write_text(
+        json.dumps(conservation, sort_keys=True), encoding="utf-8"
+    )
+    _sync_stdft_examples(generation, frame)
+    _refresh_generation_manifest(generation)
+
+
+def _sync_stdft_examples(generation: Path, frame: pd.DataFrame) -> None:
+    cohort_ids = set(frame["sample_id"].astype(str))
+    examples = generation / "stdft_examples"
+    for path in examples.glob("*.npz"):
+        with np.load(path, allow_pickle=False) as data:
+            sample_id = str(data["sample_id"].item())
+        if sample_id not in cohort_ids:
+            path.unlink()
+
+
+def _refresh_generation_manifest(generation: Path) -> None:
+    manifest_path = generation / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_paths = sorted(
+        path
+        for path in generation.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    )
+    manifest["artifacts"] = [
+        {
+            "path": str(path.relative_to(generation)).replace("\\", "/"),
+            "sha256": _sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+        for path in artifact_paths
+    ]
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
+def test_loaded_source_exposes_validated_cell_predictions_and_sample_relevance(
+    eng_loaded,
+):
+    predictions = eng_loaded.cell_predictions
+    relevance = eng_loaded.sample_relevance
+    for column in (
+        "model",
+        "source",
+        "target",
+        "layer",
+        "sample_id",
+        "y_true",
+        "score",
+        "prediction",
+        "threshold",
+    ):
+        assert column in predictions.columns
+    for column in (
+        "model",
+        "source",
+        "target",
+        "layer",
+        "sample_id",
+        "y_true",
+        "score",
+        "prediction",
+        "band_signed",
+        "band_abs_normalized",
+    ):
+        assert column in relevance.columns
+    assert len(predictions) == 12 * 40
+    assert len(relevance) == 12 * len(_COHORT)
+    assert not predictions.duplicated(_PER_SAMPLE_ORDER).any()
+    assert not relevance.duplicated(_PER_SAMPLE_ORDER).any()
+    assert predictions["threshold"].eq(0.5).all()
+    layer_one = relevance.loc[relevance["layer"] == 1].iloc[0]
+    assert len(layer_one["band_signed"]) == 8
+    assert len(layer_one["band_abs_normalized"]) == 8
+
+
+def test_report_tables_propagate_per_sample_frames_in_deterministic_order(eng_tables):
+    predictions = eng_tables.cell_predictions
+    relevance = eng_tables.sample_relevance
+    assert set(_PER_SAMPLE_ORDER) <= set(predictions.columns)
+    assert predictions.equals(
+        predictions.sort_values(_PER_SAMPLE_ORDER, kind="mergesort").reset_index(
+            drop=True
+        )
+    )
+    assert relevance.equals(
+        relevance.sort_values(_PER_SAMPLE_ORDER, kind="mergesort").reset_index(
+            drop=True
+        )
+    )
+
+
+def test_per_sample_loader_preserves_sample_ids_when_artifacts_are_shuffled(
+    tmp_path,
+):
+    root = write_scientific_result_root(tmp_path, shuffle=True)
+    loaded = load_report_source(validate_result_directory(root))
+    expected_prediction_ids = sorted(
+        _cell_artifacts(1, "eng", "eng")[0]["sample_id"].tolist()
+    )
+    observed = loaded.cell_predictions.loc[
+        (loaded.cell_predictions["layer"] == 1)
+        & (loaded.cell_predictions["source"] == "eng")
+        & (loaded.cell_predictions["target"] == "eng"),
+        "sample_id",
+    ].tolist()
+    assert observed == expected_prediction_ids
+    layer_one = loaded.sample_relevance.loc[loaded.sample_relevance["layer"] == 1]
+    assert layer_one["sample_id"].tolist() == [
+        sample_id for sample_id, _ in sorted(_COHORT, key=lambda item: item[0])
+    ]
+
+
+def test_loader_rejects_duplicate_prediction_sample_ids(tmp_path):
+    root = write_scientific_result_root(tmp_path)
+
+    def duplicate(frame):
+        frame.loc[0, "sample_id"] = frame.loc[1, "sample_id"]
+
+    _rewrite_predictions_parquet(root, "hubert_base", 2, "eng", "eng", duplicate)
+    with pytest.raises(ValueError, match="duplicate sample_id"):
+        load_report_source(validate_result_directory(root))
+
+
+def test_loader_rejects_nonfinite_prediction_scores(tmp_path):
+    root = write_scientific_result_root(tmp_path)
+
+    def corrupt(frame):
+        frame.loc[0, "score"] = float("nan")
+
+    _rewrite_predictions_parquet(root, "hubert_base", 2, "eng", "eng", corrupt)
+    with pytest.raises(ValueError, match="finite"):
+        load_report_source(validate_result_directory(root))
+
+
+def test_loader_rejects_xai_ids_missing_from_predictions(tmp_path):
+    root = write_scientific_result_root(tmp_path)
+
+    def add_orphan(frame):
+        orphan = frame.iloc[0].copy()
+        orphan["sample_id"] = "missing-from-predictions"
+        frame.loc[len(frame)] = orphan
+
+    _rewrite_sample_relevance_parquet(root, "hubert_base", 2, "eng", "eng", add_orphan)
+    with pytest.raises(ValueError, match="absent from predictions"):
+        load_report_source(validate_result_directory(root))
+
+
+def test_loader_rejects_class_mismatch_between_predictions_and_xai(tmp_path):
+    root = write_scientific_result_root(tmp_path)
+    cohort_id = _COHORT[0][0]
+
+    def flip(frame):
+        frame.loc[frame["sample_id"] == cohort_id, "y_true"] = 1
+
+    _rewrite_sample_relevance_parquet(root, "hubert_base", 2, "eng", "eng", flip)
+    with pytest.raises(ValueError, match="disagree on y_true"):
+        load_report_source(validate_result_directory(root))
+
+
+def test_build_report_tables_accepts_matching_xai_cohorts_across_models(tmp_path):
+    first = write_scientific_result_root(tmp_path, profile="hubert_base")
+    second = write_scientific_result_root(tmp_path, profile="wavlm_base")
+    tables = build_report_tables(
+        [
+            load_report_source(validate_result_directory(first)),
+            load_report_source(validate_result_directory(second)),
+        ]
+    )
+    assert set(tables.models) == {"hubert_base", "wavlm_base"}
+    assert len(tables.sample_relevance) == 2 * 12 * len(_COHORT)
+
+
+def test_build_report_tables_rejects_inconsistent_xai_cohort_across_models(
+    tmp_path,
+):
+    first = write_scientific_result_root(tmp_path, profile="hubert_base")
+    second = write_scientific_result_root(tmp_path, profile="wavlm_base")
+    hubert = load_report_source(validate_result_directory(first))
+    wavlm = load_report_source(validate_result_directory(second))
+    wavlm_relevance = wavlm.sample_relevance.copy()
+    mask = (
+        (wavlm_relevance["layer"] == 1)
+        & (wavlm_relevance["source"] == "eng")
+        & (wavlm_relevance["target"] == "eng")
+        & (wavlm_relevance["sample_id"] == "real-a")
+    )
+    wavlm_relevance.loc[mask, "sample_id"] = "fill-00"
+    wavlm_relevance.loc[mask, "y_true"] = 0
+    wavlm = dataclasses.replace(wavlm, sample_relevance=wavlm_relevance)
+    with pytest.raises(ValueError, match="pairing differs across models"):
+        build_report_tables([hubert, wavlm])
+
+
+def test_different_target_languages_may_use_different_xai_sample_ids(tmp_path):
+    root = write_scientific_result_root(tmp_path, languages=("eng", "por"))
+    loaded = load_report_source(validate_result_directory(root))
+    relevance = loaded.sample_relevance.copy()
+    por_mask = (
+        (relevance["layer"] == 1)
+        & (relevance["source"] == "eng")
+        & (relevance["target"] == "por")
+        & (relevance["sample_id"] == "real-a")
+    )
+    relevance.loc[por_mask, "sample_id"] = "por-target-only"
+    loaded = dataclasses.replace(loaded, sample_relevance=relevance)
+    tables = build_report_tables([loaded])
+    eng_ids = set(
+        tables.sample_relevance.loc[
+            (tables.sample_relevance["layer"] == 1)
+            & (tables.sample_relevance["target"] == "eng"),
+            "sample_id",
+        ]
+    )
+    por_ids = set(
+        tables.sample_relevance.loc[
+            (tables.sample_relevance["layer"] == 1)
+            & (tables.sample_relevance["target"] == "por"),
+            "sample_id",
+        ]
+    )
+    assert "por-target-only" in por_ids
+    assert eng_ids != por_ids

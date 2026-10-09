@@ -362,6 +362,7 @@ _TRANSITION_METRICS = (
     "temporal_entropy",
 )
 _LEAD_COLUMNS = ("model", "source", "target", "language")
+_PER_SAMPLE_KEYS = ("model", "source", "target", "layer", "sample_id")
 _EXPECTED_TRANSITIONS = frozenset((layer, layer + 1) for layer in range(1, 12))
 
 
@@ -398,6 +399,8 @@ class LoadedReportSource:
     stdft_payloads: Mapping[tuple, Mapping[str, np.ndarray]]
     probe_stability: pd.DataFrame
     layer_faithfulness: pd.DataFrame
+    cell_predictions: pd.DataFrame
+    sample_relevance: pd.DataFrame
     band_edges: tuple[BandEdges, ...]
 
     def __post_init__(self) -> None:
@@ -437,6 +440,8 @@ class ReportTables:
     omitted_comparisons: Mapping[str, str]
     probe_stability: pd.DataFrame
     layer_faithfulness: pd.DataFrame
+    cell_predictions: pd.DataFrame
+    sample_relevance: pd.DataFrame
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -632,15 +637,27 @@ def _check_persisted_band_counts(
         )
 
 
-def _check_metrics_against_predictions(
+def _validate_sample_id_column(frame: pd.DataFrame, context: str) -> None:
+    if "sample_id" not in frame.columns:
+        raise ValueError(f"{context}: cell predictions lack sample_id")
+    ids = frame["sample_id"].tolist()
+    if (
+        not ids
+        or any(not isinstance(value, str) or not value for value in ids)
+        or len(ids) != len(set(ids))
+    ):
+        raise ValueError(f"{context}: invalid or duplicate sample_id in predictions")
+
+
+def _read_and_validate_cell_predictions(
     path: Path, row: Mapping[str, object], expected_n: int, cell: str
-) -> None:
-    """Recompute count-based and rank-based metrics from the persisted scores."""
+) -> pd.DataFrame:
+    """Recompute count-based metrics from persisted scores and return per-sample rows."""
     try:
         frame = pd.read_parquet(path)
     except Exception as exc:
         raise ValueError(f"cell predictions are unreadable for {cell}") from exc
-    missing = {"y_true", "score", "prediction"} - set(frame.columns)
+    missing = {"sample_id", "y_true", "score", "prediction"} - set(frame.columns)
     if missing:
         raise ValueError(f"cell predictions lack columns {sorted(missing)} for {cell}")
     if len(frame) != expected_n:
@@ -648,6 +665,7 @@ def _check_metrics_against_predictions(
             f"aggregate n {expected_n} disagrees with persisted predictions "
             f"({len(frame)} rows) for {cell}"
         )
+    _validate_sample_id_column(frame, cell)
     y_true = frame["y_true"].to_numpy()
     prediction = frame["prediction"].to_numpy()
     score = frame["score"].to_numpy(dtype=np.float64)
@@ -662,7 +680,8 @@ def _check_metrics_against_predictions(
         )
     y_true = y_true.astype(np.int64)
     prediction = prediction.astype(np.int64)
-    if not np.array_equal(prediction, (score >= float(row["threshold"])).astype(np.int64)):
+    threshold = float(row["threshold"])
+    if not np.array_equal(prediction, (score >= threshold).astype(np.int64)):
         raise ValueError(
             f"persisted predictions disagree with the fixed threshold for {cell}"
         )
@@ -692,6 +711,71 @@ def _check_metrics_against_predictions(
         raise ValueError(
             f"cell metric roc_auc disagrees with persisted predictions for {cell}"
         )
+    return frame.assign(threshold=threshold)[
+        ["sample_id", "y_true", "score", "prediction", "threshold"]
+    ]
+
+
+def _check_metrics_against_predictions(
+    path: Path, row: Mapping[str, object], expected_n: int, cell: str
+) -> None:
+    _read_and_validate_cell_predictions(path, row, expected_n, cell)
+
+
+def _validate_prediction_xai_alignment(
+    context: str,
+    predictions: pd.DataFrame,
+    xai: pd.DataFrame,
+) -> None:
+    prediction_by_id = predictions.set_index("sample_id", drop=False)
+    missing = set(xai["sample_id"]) - set(prediction_by_id.index)
+    if missing:
+        raise ValueError(
+            f"{context}: sample_relevance sample_id values absent from predictions: "
+            f"{sorted(missing)}"
+        )
+    xai_y_true = xai.set_index("sample_id")["y_true"]
+    reference = prediction_by_id.loc[xai_y_true.index, "y_true"]
+    if not np.array_equal(
+        xai_y_true.to_numpy(dtype=np.int64),
+        reference.to_numpy(dtype=np.int64),
+    ):
+        raise ValueError(
+            f"{context}: predictions and sample_relevance disagree on y_true "
+            "for shared sample_id"
+        )
+
+
+def _xai_cohort_signature(frame: pd.DataFrame) -> tuple[tuple[str, int], ...]:
+    ordered = frame.sort_values("sample_id", kind="mergesort")
+    return tuple(
+        (str(row.sample_id), int(row.y_true))
+        for row in ordered.itertuples(index=False)
+    )
+
+
+def _check_paired_xai_across_models(sample_relevance: pd.DataFrame) -> None:
+    """Require identical XAI cohorts across models for the same source/target/layer."""
+    keys = ["source", "target", "layer"]
+    for _, group in sample_relevance.groupby(keys, sort=True):
+        reference: tuple[tuple[str, int], ...] | None = None
+        reference_model: str | None = None
+        for model, part in group.groupby("model", sort=True):
+            signature = _xai_cohort_signature(part)
+            if reference is None:
+                reference = signature
+                reference_model = str(model)
+                continue
+            if signature != reference:
+                src, tgt, layer = (
+                    str(part["source"].iloc[0]),
+                    str(part["target"].iloc[0]),
+                    int(part["layer"].iloc[0]),
+                )
+                raise ValueError(
+                    f"XAI cohort for pairing differs across models at layer {layer} "
+                    f"({src}->{tgt}): {reference_model!r} vs {model!r}"
+                )
 
 
 _MARKER_KEYS = frozenset(
@@ -914,7 +998,7 @@ def _load_layer_faithfulness_summaries(
 
 def _load_performance(
     source: ReportSource, paths: LayerwiseSuitePaths
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     profile = source.identity.profile
     languages = source.identity.languages
     frame = _read_csv(
@@ -937,6 +1021,7 @@ def _load_performance(
             "layerwise_performance.csv cell set is incomplete or unexpected"
         )
     rows: list[dict[str, object]] = []
+    prediction_frames: list[pd.DataFrame] = []
     for item in frame.sort_values(keys, kind="mergesort").itertuples(index=False):
         layer, src, tgt = int(item.layer), str(item.source), str(item.target)
         cell = f"{profile}/layer_{layer:02d}/{src}->{tgt}"
@@ -973,14 +1058,24 @@ def _load_performance(
             raise ValueError(
                 f"cell metrics accuracy disagrees with aggregate for {cell}"
             )
-        _check_metrics_against_predictions(
+        validated = _read_and_validate_cell_predictions(
             cell_dir / "predictions.parquet", row, int(item.n), cell
         )
+        prediction_frames.append(
+            validated.assign(layer=layer, source=src, target=tgt)
+        )
         rows.append(row)
-    return _ordered(
+    performance = _ordered(
         _identified(pd.DataFrame(rows), profile),
         ["model", "source", "target", "layer"],
     )
+    cell_predictions = _ordered(
+        _identified(pd.concat(prediction_frames, ignore_index=True), profile),
+        list(_PER_SAMPLE_KEYS),
+    )
+    if cell_predictions.duplicated(list(_PER_SAMPLE_KEYS)).any():
+        raise ValueError("duplicate per-sample prediction identity within source")
+    return performance, cell_predictions
 
 
 def _load_emergence(source: ReportSource) -> pd.DataFrame:
@@ -1312,6 +1407,16 @@ def _load_layer_xai_cell(
         ),
         "cohort": cohort_row,
         "conservation": conservation_row,
+        "sample_relevance": samples[
+            [
+                "sample_id",
+                "y_true",
+                "prediction",
+                "score",
+                "band_signed",
+                "band_abs_normalized",
+            ]
+        ].copy(),
         "stdft_rows": index_rows,
         "stdft_payloads": payloads,
     }
@@ -1390,13 +1495,13 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
     }
     _check_persisted_band_counts(source, band_edges)
 
-    performance = _load_performance(source, paths)
+    performance, cell_predictions = _load_performance(source, paths)
     probe_stability = _load_probe_stability_summary(source, paths)
     layer_faithfulness = _load_layer_faithfulness_summaries(source, paths)
     emergence = _load_emergence(source)
 
     band_frames, class_frames = [], []
-    cohort_rows, conservation_rows, stdft_rows = [], [], []
+    cohort_rows, conservation_rows, stdft_rows, sample_relevance_rows = [], [], [], []
     payloads: dict[tuple, dict[str, np.ndarray]] = {}
     reference_cohorts: dict[str, tuple[int, str, tuple]] = {}
     for (_, layer, src, tgt), generation in sorted(source.layer_xai_generations.items()):
@@ -1408,6 +1513,16 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
             generation=generation,
             band_edges=band_edges[tgt],
         )
+        context = f"{profile}/layer_{layer:02d}/{src}->{tgt}"
+        prediction_subset = cell_predictions.loc[
+            (cell_predictions["layer"] == layer)
+            & (cell_predictions["source"] == src)
+            & (cell_predictions["target"] == tgt),
+            ["sample_id", "y_true", "score", "prediction", "threshold"],
+        ]
+        _validate_prediction_xai_alignment(
+            context, prediction_subset, cell["sample_relevance"]
+        )
         _check_fixed_cohort(reference_cohorts, tgt, layer, src, cell["cohort_ids"])
         band_frames.append(cell["band"])
         class_frames.append(cell["byclass"])
@@ -1415,6 +1530,10 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
         cohort_rows.append({**identity, **cell["cohort"]})
         conservation_rows.append({**identity, **cell["conservation"]})
         stdft_rows.extend({**identity, **row} for row in cell["stdft_rows"])
+        sample_relevance_rows.extend(
+            {"layer": layer, **identity, **row.to_dict()}
+            for _, row in cell["sample_relevance"].iterrows()
+        )
         payloads.update(cell["stdft_payloads"])
 
     transition_frames = [
@@ -1458,6 +1577,11 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
         },
         probe_stability=probe_stability,
         layer_faithfulness=layer_faithfulness,
+        cell_predictions=cell_predictions,
+        sample_relevance=_ordered(
+            _identified(pd.DataFrame(sample_relevance_rows), profile),
+            list(_PER_SAMPLE_KEYS),
+        ),
         band_edges=tuple(band_edges[language] for language in languages),
     )
 
@@ -1648,6 +1772,15 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     if performance.duplicated(["model", "source", "target", "layer"]).any():
         raise ValueError("duplicate model/language cells across report sources")
 
+    cell_predictions = merged("cell_predictions", list(_PER_SAMPLE_KEYS))
+    if cell_predictions.duplicated(list(_PER_SAMPLE_KEYS)).any():
+        raise ValueError("duplicate per-sample prediction identity across report sources")
+    sample_relevance = merged("sample_relevance", list(_PER_SAMPLE_KEYS))
+    if sample_relevance.duplicated(list(_PER_SAMPLE_KEYS)).any():
+        raise ValueError("duplicate per-sample XAI identity across report sources")
+    if len(models := tuple(sorted(set(performance["model"])))) > 1:
+        _check_paired_xai_across_models(sample_relevance)
+
     band_edges, provenance = _band_edge_tables(
         [edge for item in loaded for edge in item.band_edges]
     )
@@ -1685,7 +1818,6 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         pd.concat([item.transitions for item in loaded], ignore_index=True)
     )
 
-    models = tuple(sorted(set(performance["model"])))
     present = set(performance["source"]) | set(performance["target"])
     languages = tuple(language for language in LANGUAGE_ORDER if language in present)
     payloads: dict[tuple, Mapping[str, np.ndarray]] = {}
@@ -1726,6 +1858,8 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         )
         if any(not item.layer_faithfulness.empty for item in loaded)
         else pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS)),
+        cell_predictions=cell_predictions,
+        sample_relevance=sample_relevance,
     )
 
 
