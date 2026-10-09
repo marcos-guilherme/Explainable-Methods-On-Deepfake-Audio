@@ -524,8 +524,13 @@ The generator is read-only and needs no GPU: it only reads persisted results,
 validates their immutable generations, writes solely inside `--output`, and
 never loads an encoder or imports `torch`/`transformers`. Output is
 deterministic, and `report_manifest.json` records the consumed artifacts and
-generated files with relative paths and SHA-256 hashes. The first edition is a
-single-model, single-language case study (HuBERT Base, English) and makes no
-cross-model or cross-language claim; inapplicable comparisons are omitted. See
+generated files with relative paths and SHA-256 hashes. The report adds an
+executive summary, conclusion, per-model train-language × evaluation-language
+ROC-AUC/MCC heatmaps, `transfer_selected_layers.csv`, and
+`xai_performance_association.csv`. Each heatmap cell selects the layer with
+maximum ROC-AUC and reports MCC from that same layer. Single-model or
+single-language inputs remain scoped as case studies; off-diagonal cells, when
+present, are described as transfer under corpus/language shift without causal
+language claims. See
 [scripts/README.md](scripts/README.md#relatório-layer-wise-atualizável) for
 details.

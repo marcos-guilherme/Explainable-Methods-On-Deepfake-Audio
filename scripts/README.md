@@ -278,6 +278,13 @@ trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
 bundle LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
+O relatório inclui resumo executivo e conclusão; mapas treino
+$\times$ avaliação de ROC-AUC e MCC por modelo; e a associação descritiva entre
+ROC-AUC e concentração espectral da relevância. Em cada célula dos mapas, a
+camada é selecionada pela maior ROC-AUC, e o MCC mostrado vem dessa mesma
+camada. As tabelas `transfer_selected_layers.csv` e
+`xai_performance_association.csv` persistem essas reduções.
+
 Na VM, informe cada diretório de resultado explicitamente (a opção `--result`
 pode ser repetida; nenhum diretório é varrido por padrão e identidades
 modelo/idioma/escopo duplicadas são rejeitadas):
@@ -309,8 +316,9 @@ diretório não vazio sem bundle anterior. Nunca carrega encoder, não importa
 mesmos artefatos: `report_manifest.json` registra, com caminhos relativos e
 SHA-256, os artefatos consumidos e os arquivos gerados.
 
-**Limitação atual.** A primeira edição é um estudo de caso de modelo único e
-idioma único (HuBERT Base em inglês) e não faz afirmações entre modelos ou entre
-idiomas. Comparações sem sentido para o número disponível de modelos/idiomas
-(acordo entre encoders, mudança entre idiomas, diagonal versus fora da diagonal
-e divergência espectral) são omitidas e listadas como espaços futuros.
+Com um único modelo ou idioma, o texto mantém o escopo de estudo de caso e não
+inventa comparações. Quando células 3$\times$3 estão presentes, resultados fora
+da diagonal são descritos como transferência sob mudança de corpus/idioma, sem
+interpretação causal. A associação XAI$\leftrightarrow$desempenho usa as 12
+camadas por célula e é marcada como indisponível quando os dados necessários
+faltam.

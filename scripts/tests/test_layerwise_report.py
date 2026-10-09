@@ -420,9 +420,10 @@ def test_validation_counts_only_npz_files_not_directories(tmp_path):
 
 _COHORT = (("real-a", 0), ("real-b", 0), ("spoof-a", 1), ("spoof-b", 1))
 _TRACE_SAMPLES = ("real-a", "spoof-a")
-_SEVEN_FAMILIES = (
+_EIGHT_FAMILIES = (
     "performance_by_layer",
     "fixed_threshold_by_layer",
+    "transfer_performance_heatmaps",
     "dft_relevance_heatmap",
     "class_relevance_by_layer",
     "decision_reorganization_by_layer",
@@ -1538,7 +1539,7 @@ def test_loader_attaches_stdft_examples_sorted_by_layer_class_then_sample(
 def test_single_model_and_language_declare_only_the_seven_figure_families(
     eng_tables,
 ):
-    assert eng_tables.planned_figures == _SEVEN_FAMILIES
+    assert eng_tables.planned_figures == _EIGHT_FAMILIES
     assert not set(_COMPARISON_FAMILIES) & set(eng_tables.planned_figures)
     assert set(eng_tables.omitted_comparisons) == set(_COMPARISON_FAMILIES)
     assert eng_tables.omitted_comparisons["encoder_agreement"] == "single_model"
@@ -1550,7 +1551,7 @@ def test_single_model_and_language_declare_only_the_seven_figure_families(
         assert eng_tables.omitted_comparisons[name] == "single_language"
 
 
-def test_render_creates_pdf_and_png_for_exactly_the_seven_families(
+def test_render_creates_pdf_and_png_for_exactly_the_eight_families(
     eng_tables, tmp_path
 ):
     figures_dir = tmp_path / "figures"
@@ -1558,13 +1559,13 @@ def test_render_creates_pdf_and_png_for_exactly_the_seven_families(
 
     expected = {
         f"{name}.{suffix}"
-        for name in _SEVEN_FAMILIES
+        for name in _EIGHT_FAMILIES
         for suffix in ("pdf", "png")
     }
     assert {path.name for path in figures_dir.iterdir()} == expected
     for path in figures_dir.iterdir():
         assert path.stat().st_size > 0
-    assert tuple(record.name for record in records) == _SEVEN_FAMILIES
+    assert tuple(record.name for record in records) == _EIGHT_FAMILIES
     for record in records:
         assert set(record.files) == {f"{record.name}.pdf", f"{record.name}.png"}
         for field in ("title", "caption", "metric", "units", "transformation"):
@@ -1590,7 +1591,7 @@ def test_render_is_byte_deterministic(eng_tables, tmp_path):
     second = tmp_path / "second"
     render_report_figures(eng_tables, first)
     render_report_figures(eng_tables, second)
-    for name in _SEVEN_FAMILIES:
+    for name in _EIGHT_FAMILIES:
         for suffix in ("pdf", "png"):
             assert (first / f"{name}.{suffix}").read_bytes() == (
                 second / f"{name}.{suffix}"
@@ -1670,8 +1671,8 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
     ):
         assert tables.omitted_comparisons[name] == "not_in_first_edition"
     records = render_report_figures(tables, tmp_path / "figs")
-    assert tuple(record.name for record in records) == _SEVEN_FAMILIES
-    assert len(list((tmp_path / "figs").iterdir())) == 14
+    assert tuple(record.name for record in records) == _EIGHT_FAMILIES
+    assert len(list((tmp_path / "figs").iterdir())) == 16
 
 
 def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
@@ -1685,7 +1686,7 @@ def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
     )
     assert tables.models == ("hubert_base", "wavlm_base")
     assert tables.omitted_comparisons["encoder_agreement"] == "not_in_first_edition"
-    assert tables.planned_figures == _SEVEN_FAMILIES
+    assert tables.planned_figures == _EIGHT_FAMILIES
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
 
@@ -1696,6 +1697,7 @@ def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
 _REPO = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO / "scripts"
 _SECTION_TITLES = (
+    "Resumo executivo",
     "Escopo e inventário dos experimentos",
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
@@ -1705,6 +1707,7 @@ _SECTION_TITLES = (
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
     "Limitações atuais e próximos espaços de comparação",
+    "Conclusão",
 )
 _BUNDLE_TABLES = (
     "performance_by_layer",
@@ -1880,7 +1883,7 @@ def test_manifest_json_is_canonical_utf8_without_machine_paths(
 def test_bundle_contains_the_portable_layout(eng_bundle):
     files = set(_bundle_files(eng_bundle))
     assert {"report.tex", "report_manifest.json", "build_local.ps1"} <= files
-    for name in _SEVEN_FAMILIES:
+    for name in _EIGHT_FAMILIES:
         assert f"figures/{name}.pdf" in files
         assert f"figures/{name}.png" in files
     for name in _BUNDLE_TABLES:
@@ -1908,6 +1911,44 @@ def test_bundle_performance_table_matches_the_loaded_values(
     )
     best = expected.loc[expected["roc_auc"].idxmax()]
     assert f"{best['roc_auc']:.3f}".replace(".", ",") in tex
+
+
+def test_bundle_persists_transfer_reduction_and_xai_association_tables(
+    eng_bundle,
+):
+    transfer = pd.read_csv(eng_bundle / "tables" / "transfer_selected_layers.csv")
+    assert list(transfer.columns) == [
+        "model",
+        "source",
+        "target",
+        "selected_layer",
+        "roc_auc",
+        "mcc",
+    ]
+    association = pd.read_csv(
+        eng_bundle / "tables" / "xai_performance_association.csv"
+    )
+    assert {
+        "model",
+        "source",
+        "target",
+        "n_layers",
+        "concentration_metric",
+        "association_method",
+        "rho",
+        "status",
+    } == set(association.columns)
+    assert set(association["n_layers"]) == {12}
+    assert "figures/transfer_performance_heatmaps.pdf" in _bundle_files(eng_bundle)
+    assert "figures/transfer_performance_heatmaps.png" in _bundle_files(eng_bundle)
+
+
+def test_transfer_heatmap_caption_states_shared_layer_reduction(eng_figures):
+    record = next(
+        item for item in eng_figures if item.name == "transfer_performance_heatmaps"
+    )
+    assert "ROC-AUC máxima" in record.transformation
+    assert "mesma camada selecionada" in record.transformation
 
 
 def test_bundle_is_byte_deterministic_across_regeneration_and_locations(
@@ -1995,7 +2036,7 @@ def test_multi_source_bundle_is_independent_of_source_order(
     assert "HuBERT Base" in tex and "WavLM Base" in tex
     assert "WavLM Base+" not in tex
     assert "não estão disponíveis" in tex
-    assert len(_sections(tex)) == 9
+    assert _sections(tex) == list(_SECTION_TITLES)
 
 
 # --- scientific text ---
@@ -2044,14 +2085,14 @@ def test_tex_includes_every_generated_figure_and_table_that_exists(
     eng_bundle, eng_tex
 ):
     figures = re.findall(r"\\includegraphics\[[^\]]*\]\{([^}]*)\}", eng_tex)
-    assert sorted(Path(item).stem for item in figures) == sorted(_SEVEN_FAMILIES)
+    assert sorted(Path(item).stem for item in figures) == sorted(_EIGHT_FAMILIES)
     for item in figures:
         assert item.startswith("figures/") and (eng_bundle / item).is_file()
     inputs = re.findall(r"\\input\{([^}]*)\}", eng_tex)
     assert {Path(item).stem for item in inputs} >= set(_BUNDLE_TABLES)
     for item in inputs:
         assert (eng_bundle / item).is_file(), item
-    for name in _SEVEN_FAMILIES:
+    for name in _EIGHT_FAMILIES:
         assert rf"\label{{fig:{name}}}" in eng_tex
 
 
@@ -2071,6 +2112,118 @@ def test_tex_scientific_statements_follow_the_loaded_values(
     baseline = tmp_path / "baseline.tex"
     write_report_tex(baseline, eng_tables, eng_figures, [eng_loaded])
     assert "a maior ROC-AUC (0,999) ocorre na camada 7" not in _read_text(baseline)
+
+
+def test_transfer_reduction_selects_layer_by_roc_auc_and_reuses_its_mcc(
+    eng_tables,
+):
+    performance = eng_tables.performance.copy()
+    performance.loc[:, "roc_auc"] = 0.60
+    performance.loc[:, "mcc"] = 0.10
+    performance.loc[performance["layer"] == 4, ["roc_auc", "mcc"]] = [0.91, 0.22]
+    performance.loc[performance["layer"] == 9, ["roc_auc", "mcc"]] = [0.88, 0.97]
+
+    selected = report_module.build_transfer_selection(performance)
+
+    assert list(selected.columns) == [
+        "model",
+        "source",
+        "target",
+        "selected_layer",
+        "roc_auc",
+        "mcc",
+    ]
+    row = selected.iloc[0]
+    assert int(row["selected_layer"]) == 4
+    assert row["roc_auc"] == pytest.approx(0.91)
+    assert row["mcc"] == pytest.approx(0.22)
+
+
+def test_xai_performance_association_uses_twelve_layers_and_marks_gaps_unavailable(
+    eng_tables,
+):
+    relevance = eng_tables.band_relevance.copy()
+    absolute = relevance["measure"] == "absolute_normalized"
+    relevance.loc[absolute, "mean"] = relevance.loc[absolute, "layer"] / 12
+    available = report_module.build_xai_performance_associations(
+        eng_tables.performance, relevance
+    )
+    row = available.iloc[0]
+    assert int(row["n_layers"]) == 12
+    assert row["concentration_metric"] == "maximum_mean_band_mass"
+    assert row["association_method"] == "spearman_rank_correlation"
+    assert row["status"] == "available"
+    assert np.isfinite(row["rho"])
+
+    incomplete = report_module.build_xai_performance_associations(
+        eng_tables.performance[eng_tables.performance["layer"] != 12], relevance
+    )
+    row = incomplete.iloc[0]
+    assert int(row["n_layers"]) == 11
+    assert row["status"] == "unavailable_requires_12_layers"
+    assert pd.isna(row["rho"])
+
+
+def test_report_opens_with_summary_closes_with_conclusion_and_separates_transfer(
+    eng_tex,
+):
+    sections = _sections(eng_tex)
+    assert sections[0] == "Resumo executivo"
+    assert sections[-1] == "Conclusão"
+    assert "Associação descritiva entre XAI e desempenho" in eng_tex
+    assert "n=12" in eng_tex
+    assert "sem interpretação causal" in eng_tex
+    assert r"\subsection{Ranking sem limiar e calibração do limiar}" in eng_tex
+    assert "ROC-AUC" in eng_tex and "MCC, TPR e FPR" in eng_tex
+
+
+def test_consolidated_scope_does_not_claim_comparisons_are_unavailable(
+    eng_tables, eng_loaded, eng_figures, tmp_path
+):
+    languages = ("eng", "por", "zho")
+
+    def expand(frame):
+        copies = []
+        for source in languages:
+            for target in languages:
+                copy = frame.copy()
+                copy["source"] = source
+                copy["target"] = target
+                if "language" in copy:
+                    copy["language"] = target
+                copies.append(copy)
+        return pd.concat(copies, ignore_index=True)
+
+    tables = dataclasses.replace(
+        eng_tables,
+        languages=languages,
+        performance=expand(eng_tables.performance),
+        band_relevance=expand(eng_tables.band_relevance),
+        transfer_selection=report_module.build_transfer_selection(
+            expand(eng_tables.performance)
+        ),
+        xai_performance_association=report_module.build_xai_performance_associations(
+            expand(eng_tables.performance), expand(eng_tables.band_relevance)
+        ),
+    )
+    path = tmp_path / "report.tex"
+    figures = [
+        item
+        for item in eng_figures
+        if item.name
+        in {
+            "performance_by_layer",
+            "fixed_threshold_by_layer",
+            "transfer_performance_heatmaps",
+        }
+    ]
+    write_report_tex(path, tables, figures, [eng_loaded])
+    tex = _read_text(path)
+
+    assert "afirmações comparativas entre modelos ou entre idiomas não estão disponíveis" not in tex
+    assert "transferência sob mudança de corpus/idioma" in tex
+    assert "causado pelo idioma" not in tex
+    assert "não identificam um efeito causal do idioma" in tex
 
 
 def test_tex_omits_a_section_when_its_figure_is_unavailable(
@@ -2911,7 +3064,7 @@ def bands24_captured(bands24_tables, tmp_path_factory):
 
 def test_figures_contain_no_english_visible_text(eng_captured):
     records, captured = eng_captured
-    assert set(captured) == set(_SEVEN_FAMILIES)
+    assert set(captured) == set(_EIGHT_FAMILIES)
     for name, entry in captured.items():
         assert entry["texts"], name
         for text in entry["texts"]:

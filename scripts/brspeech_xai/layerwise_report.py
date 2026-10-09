@@ -254,6 +254,7 @@ def validate_result_directory(root: Path) -> ReportSource:
 FIGURE_FAMILIES: tuple[str, ...] = (
     "performance_by_layer",
     "fixed_threshold_by_layer",
+    "transfer_performance_heatmaps",
     "dft_relevance_heatmap",
     "class_relevance_by_layer",
     "decision_reorganization_by_layer",
@@ -425,6 +426,8 @@ class ReportTables:
     stdft_payloads: Mapping[tuple, Mapping[str, np.ndarray]]
     band_edges: pd.DataFrame
     band_edge_provenance: pd.DataFrame
+    transfer_selection: pd.DataFrame
+    xai_performance_association: pd.DataFrame
     planned_figures: tuple[str, ...]
     omitted_comparisons: Mapping[str, str]
 
@@ -1404,6 +1407,92 @@ def _omitted_comparisons(
     }
 
 
+def build_transfer_selection(performance: pd.DataFrame) -> pd.DataFrame:
+    """Select one layer per model/source/target by ROC-AUC only.
+
+    MCC is copied from that same selected row; it is never maximized
+    independently. Ties in ROC-AUC resolve to the earliest layer.
+    """
+    columns = ["model", "source", "target", "selected_layer", "roc_auc", "mcc"]
+    required = {"model", "source", "target", "layer", "roc_auc", "mcc"}
+    if not required <= set(performance.columns):
+        raise ValueError("performance lacks columns required for transfer reduction")
+    ranked = performance.sort_values(
+        ["model", "source", "target", "roc_auc", "layer"],
+        ascending=[True, True, True, False, True],
+        kind="mergesort",
+    )
+    selected = ranked.groupby(
+        ["model", "source", "target"], sort=True, as_index=False
+    ).first()
+    selected = selected.rename(columns={"layer": "selected_layer"})
+    return selected.loc[:, columns].reset_index(drop=True)
+
+
+def build_xai_performance_associations(
+    performance: pd.DataFrame, band_relevance: pd.DataFrame
+) -> pd.DataFrame:
+    """Describe layer-wise ROC-AUC association with spectral concentration.
+
+    Concentration is the maximum, across frequency bands, of the cohort mean
+    absolute-normalized band mass. Spearman's rho is reported only when all
+    twelve encoder layers are available and both series vary.
+    """
+    keys = ["model", "source", "target"]
+    selected = band_relevance[
+        band_relevance["measure"] == "absolute_normalized"
+    ]
+    concentration = (
+        selected.groupby([*keys, "layer"], sort=True)["mean"]
+        .max()
+        .rename("spectral_concentration")
+        .reset_index()
+    )
+    joined = performance[[*keys, "layer", "roc_auc"]].merge(
+        concentration, on=[*keys, "layer"], how="inner", validate="one_to_one"
+    )
+    identities = (
+        performance[keys].drop_duplicates().sort_values(keys).itertuples(
+            index=False, name=None
+        )
+    )
+    rows: list[dict[str, object]] = []
+    for identity in identities:
+        group = joined
+        for key, value in zip(keys, identity):
+            group = group[group[key] == value]
+        group = group.sort_values("layer")
+        layers = tuple(int(value) for value in group["layer"])
+        row: dict[str, object] = {
+            **dict(zip(keys, identity)),
+            "n_layers": len(layers),
+            "concentration_metric": "maximum_mean_band_mass",
+            "association_method": "spearman_rank_correlation",
+            "rho": np.nan,
+            "status": "unavailable_requires_12_layers",
+        }
+        values = group[["roc_auc", "spectral_concentration"]].to_numpy(
+            dtype=np.float64
+        )
+        if layers == tuple(range(1, 13)) and np.isfinite(values).all():
+            ranks = group[["roc_auc", "spectral_concentration"]].rank(
+                method="average"
+            )
+            if all(ranks[column].nunique() > 1 for column in ranks):
+                row["rho"] = float(
+                    np.corrcoef(ranks["roc_auc"], ranks["spectral_concentration"])[
+                        0, 1
+                    ]
+                )
+                row["status"] = "available"
+            else:
+                row["status"] = "unavailable_constant_series"
+        elif len(layers) == 12:
+            row["status"] = "unavailable_invalid_or_duplicate_layers"
+        rows.append(row)
+    return _ordered(pd.DataFrame(rows), keys)
+
+
 def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     """Merge loaded sources into deterministic, identity-labelled report tables."""
     loaded = list(sources)
@@ -1491,6 +1580,10 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         stdft_payloads=payloads,
         band_edges=band_edges,
         band_edge_provenance=provenance,
+        transfer_selection=build_transfer_selection(performance),
+        xai_performance_association=build_xai_performance_associations(
+            performance, band_relevance
+        ),
         planned_figures=FIGURE_FAMILIES,
         omitted_comparisons=_omitted_comparisons(models, languages),
     )
@@ -1820,6 +1913,103 @@ def _figure_fixed_threshold(plt, tables, figures_dir):
         metric="acurácia, MCC, TPR e FPR no limiar fixo calibrado na origem (classe positiva = sintético)",
         units="frações (0\u20131), exceto MCC (adimensional, \u22121 a 1); TPR sobre os sintéticos, FPR sobre os reais",
         transformation="predições duras a partir do escore do probe \u2265 limiar fixo no conjunto de teste do alvo",
+    )
+    fig.suptitle(record.title, fontsize=9)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_transfer_heatmaps(plt, tables, figures_dir):
+    name = "transfer_performance_heatmaps"
+    models = tables.models
+    languages = tables.languages
+    fig, axes = plt.subplots(
+        len(models),
+        2,
+        figsize=(_FIGURE_WIDTH, 2.75 * len(models) + 0.45),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    frame = tables.transfer_selection
+    images = {}
+    for row_index, model in enumerate(models):
+        model_rows = frame[frame["model"] == model]
+        for column_index, (metric, title, limits, cmap) in enumerate(
+            (
+                ("roc_auc", "ROC-AUC na camada selecionada", (0.0, 1.0), "viridis"),
+                ("mcc", "MCC na mesma camada", (-1.0, 1.0), "coolwarm"),
+            )
+        ):
+            ax = axes[row_index, column_index]
+            matrix = (
+                model_rows.pivot(index="source", columns="target", values=metric)
+                .reindex(index=languages, columns=languages)
+                .to_numpy(dtype=np.float64)
+            )
+            image = ax.imshow(
+                matrix,
+                vmin=limits[0],
+                vmax=limits[1],
+                cmap=cmap,
+                aspect="equal",
+            )
+            images[metric] = image
+            ax.set_xticks(range(len(languages)))
+            ax.set_xticklabels(
+                [_language_name(item).capitalize() for item in languages],
+                rotation=30,
+                ha="right",
+            )
+            ax.set_yticks(range(len(languages)))
+            ax.set_yticklabels(
+                [_language_name(item).capitalize() for item in languages]
+            )
+            ax.set_xlabel("Idioma de avaliação")
+            ax.set_ylabel("Idioma de treino")
+            ax.set_title(
+                f"{_model_name(model)} — {title}",
+                fontsize=8,
+            )
+            for source_index in range(len(languages)):
+                for target_index in range(len(languages)):
+                    value = matrix[source_index, target_index]
+                    if np.isfinite(value):
+                        ax.text(
+                            target_index,
+                            source_index,
+                            f"{value:.2f}",
+                            ha="center",
+                            va="center",
+                            fontsize=7,
+                            color=(
+                                "white"
+                                if metric == "roc_auc" and value < 0.45
+                                else "black"
+                            ),
+                        )
+    for metric, image in images.items():
+        column = 0 if metric == "roc_auc" else 1
+        fig.colorbar(
+            image,
+            ax=axes[:, column].tolist(),
+            shrink=0.8,
+            label="ROC-AUC" if metric == "roc_auc" else "MCC",
+        )
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Transferência por idioma de treino e avaliação",
+        description=(
+            "Para cada célula treino→avaliação, a camada é escolhida pela maior "
+            "ROC-AUC. O painel de MCC reutiliza essa mesma camada."
+        ),
+        metric="ROC-AUC e MCC na camada selecionada por ROC-AUC",
+        units="ROC-AUC (0–1) e MCC (−1 a 1), adimensionais",
+        transformation=(
+            "em cada célula origem→alvo, selecionar a camada de ROC-AUC máxima; "
+            "mostrar ROC-AUC e MCC dessa mesma camada selecionada, sem maximizar "
+            "o MCC independentemente"
+        ),
     )
     fig.suptitle(record.title, fontsize=9)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
@@ -2441,6 +2631,7 @@ def _figure_conservation(plt, tables, figures_dir):
 _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
+    "transfer_performance_heatmaps": _figure_transfer_heatmaps,
     "dft_relevance_heatmap": _figure_heatmap,
     "class_relevance_by_layer": _figure_class_relevance,
     "decision_reorganization_by_layer": _figure_reorganization,
@@ -2452,7 +2643,7 @@ _FIGURE_BUILDERS = {
 def render_report_figures(
     tables: ReportTables, figures_dir: str | Path
 ) -> tuple[FigureRecord, ...]:
-    """Emit PDF and PNG for the seven first-edition figure families."""
+    """Emit deterministic PDF and PNG files for every planned figure family."""
     if not isinstance(tables, ReportTables):
         raise TypeError("tables must be a ReportTables instance")
     import matplotlib as mpl
@@ -2541,6 +2732,7 @@ _OMISSION_REASONS: Mapping[str, str] = MappingProxyType(
     }
 )
 _SECTION_TITLES_PT: tuple[str, ...] = (
+    "Resumo executivo",
     "Escopo e inventário dos experimentos",
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
@@ -2550,6 +2742,7 @@ _SECTION_TITLES_PT: tuple[str, ...] = (
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
     "Limitações atuais e próximos espaços de comparação",
+    "Conclusão",
 )
 _NOT_AVAILABLE = "n/d"
 _FIT_WIDTH_OPEN = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%"
@@ -2578,6 +2771,8 @@ if (-not (Test-Path "report.pdf")) {{
 """
 _TABLE_CSVS: tuple[tuple[str, str], ...] = (
     ("performance_by_layer", "performance"),
+    ("transfer_selected_layers", "transfer_selection"),
+    ("xai_performance_association", "xai_performance_association"),
     ("emergence_layers", "emergence"),
     ("dft_band_relevance", "band_relevance"),
     ("class_relevance", "class_relevance"),
@@ -2798,6 +2993,13 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "de amostras sintéticas detectadas e FPR a fração de amostras reais "
             "marcadas como sintéticas."
         )
+    elif record.name == "transfer_performance_heatmaps":
+        body = (
+            "Mapa idioma de treino $\\times$ idioma de avaliação, por modelo. "
+            "Em cada célula, a camada selecionada é exclusivamente a de maior "
+            "ROC-AUC; são mostrados a ROC-AUC e o MCC dessa mesma camada, sem "
+            "maximizar o MCC separadamente. Valores aparecem dentro das células."
+        )
     elif record.name == "dft_relevance_heatmap":
         body = (
             "Média sobre a coorte fixa da relevância AttnLRP absoluta "
@@ -2874,6 +3076,41 @@ def _conservation_caption(tables: ReportTables) -> str:
     )
 
 
+def _executive_summary_section(tables: ReportTables) -> list[str]:
+    selected = tables.transfer_selection
+    best = selected.loc[selected["roc_auc"].idxmax()]
+    off_diagonal = selected[selected["source"] != selected["target"]]
+    scope = (
+        "um estudo de caso diagonal, sem comparação de transferência"
+        if off_diagonal.empty
+        else (
+            f"{len(off_diagonal)} células fora da diagonal, interpretadas como "
+            "transferência sob mudança de corpus/idioma"
+        )
+    )
+    available = int(
+        (tables.xai_performance_association["status"] == "available").sum()
+    )
+    return [
+        rf"\section{{{_SECTION_TITLES_PT[0]}}}",
+        r"\label{sec:resumo}",
+        f"O bundle reúne {len(tables.models)} modelo(s), "
+        f"{len(tables.languages)} idioma(s) e {len(selected)} combinações de "
+        f"treino e avaliação; contém {scope}.",
+        "",
+        f"A maior ROC-AUC após a redução por célula é {_num(best['roc_auc'])}, "
+        f"na camada {int(best['selected_layer'])} de "
+        f"{_cell_tex((best['model'], best['source'], best['target']))}; o MCC "
+        f"reportado ({_num(best['mcc'])}) vem dessa mesma camada. A redução "
+        "seleciona exclusivamente pela ROC-AUC e nunca maximiza o MCC em separado.",
+        "",
+        f"A associação XAI$\\leftrightarrow$desempenho está disponível em "
+        f"{available} de {len(tables.xai_performance_association)} célula(s); "
+        "ela é descritiva, baseada em 12 camadas e sem interpretação causal.",
+        "",
+    ]
+
+
 def _inventory_section(
     tables: ReportTables, sources: Sequence[LoadedReportSource]
 ) -> list[str]:
@@ -2895,7 +3132,7 @@ def _inventory_section(
         )
     case_study = len(tables.models) == 1 and len(tables.languages) == 1
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[0]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[1]}}}",
         r"\label{sec:escopo}",
         "Este relatório é gerado de forma determinística a partir de "
         "artefatos persistidos de execuções concluídas. A geração é somente "
@@ -2908,19 +3145,28 @@ def _inventory_section(
             f"Esta edição é um estudo de caso de modelo único "
             f"({escape_latex(_model_name(tables.models[0]))}) e idioma único "
             f"({escape_latex(_language_name(tables.languages[0]))}). "
+            "Portanto, afirmações comparativas entre modelos ou entre idiomas "
+            "não estão disponíveis nesta edição."
         )
     else:
+        availability = []
+        if len(tables.models) == 1:
+            availability.append("comparações entre modelos não estão disponíveis")
+        if len(tables.languages) == 1:
+            availability.append("comparações entre idiomas não estão disponíveis")
+        qualifier = (
+            " " + _join_pt(availability).capitalize() + "."
+            if availability
+            else ""
+        )
         lines.append(
             f"Esta edição reúne {len(tables.models)} modelo(s) "
             f"({escape_latex(_join_pt([_model_name(m) for m in tables.models]))}) "
             f"e {len(tables.languages)} idioma(s) "
             f"({escape_latex(_join_pt([_language_name(x) for x in tables.languages]))}), "
-            "cada série apresentada separadamente. "
+            "com sínteses comparativas por célula de treino e avaliação."
+            + qualifier
         )
-    lines[-1] += (
-        "Portanto, afirmações comparativas entre modelos ou entre idiomas não "
-        "estão disponíveis nesta edição."
-    )
     lines.append("")
     if rows:
         lines += [
@@ -3022,7 +3268,7 @@ def _protocol_section(
         else []
     )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[1]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[2]}}}",
         r"\label{sec:protocolo}",
         *counts_intro,
         *_itemize(items),
@@ -3040,12 +3286,16 @@ def _protocol_section(
 def _performance_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    names = ("performance_by_layer", "fixed_threshold_by_layer")
+    names = (
+        "performance_by_layer",
+        "fixed_threshold_by_layer",
+        "transfer_performance_heatmaps",
+    )
     present = [name for name in names if name in figures]
     if not present:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[2]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[3]}}}",
         r"\label{sec:desempenho}",
     ]
     for cell in _cells(tables):
@@ -3066,6 +3316,46 @@ def _performance_section(
         ]
     for name in present:
         lines += _figure_block(figures[name], tables)
+    selected = tables.transfer_selection
+    off_diagonal = selected[selected["source"] != selected["target"]]
+    selected_metrics = tables.performance.merge(
+        selected[["model", "source", "target", "selected_layer"]],
+        on=["model", "source", "target"],
+        how="inner",
+        validate="many_to_one",
+    )
+    selected_metrics = selected_metrics[
+        selected_metrics["layer"] == selected_metrics["selected_layer"]
+    ]
+    off_metrics = selected_metrics[
+        selected_metrics["source"] != selected_metrics["target"]
+    ]
+    lines += [
+        r"\subsection{Ranking sem limiar e calibração do limiar}",
+        "ROC-AUC mede a ordenação dos escores sem escolher um limiar; MCC, TPR e FPR "
+        "medem o comportamento no limiar calibrado na origem. Por isso, uma "
+        "ROC-AUC preservada não implica MCC, TPR ou FPR preservados.",
+        "",
+    ]
+    if off_diagonal.empty:
+        lines += [
+            "Há somente avaliação diagonal neste bundle; não há célula fora da "
+            "diagonal para descrever transferência.",
+            "",
+        ]
+    else:
+        lines += [
+            "As células fora da diagonal são descritas como transferência sob "
+            "mudança de corpus/idioma, sem atribuir efeito causal ao idioma. "
+            f"Nelas, a ROC-AUC selecionada varia de {_num(off_diagonal['roc_auc'].min())} "
+            f"a {_num(off_diagonal['roc_auc'].max())}, enquanto o MCC da mesma "
+            f"camada varia de {_num(off_diagonal['mcc'].min())} a "
+            f"{_num(off_diagonal['mcc'].max())}, a TPR de "
+            f"{_num(off_metrics['tpr'].min())} a {_num(off_metrics['tpr'].max())} "
+            f"e a FPR de {_num(off_metrics['fpr'].min())} a "
+            f"{_num(off_metrics['fpr'].max())}.",
+            "",
+        ]
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
     return lines
 
@@ -3074,7 +3364,7 @@ def _emergence_section(tables: ReportTables) -> list[str]:
     if tables.emergence.empty:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[3]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[4]}}}",
         r"\label{sec:emergencia}",
         "Os valores de início (onset) e consolidação são os persistidos pelo "
         "agregador do experimento, sem recálculo neste relatório.",
@@ -3113,7 +3403,7 @@ def _relevance_section(
     if not present:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[4]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[5]}}}",
         r"\label{sec:relevancia}",
     ]
     overall_all = tables.band_relevance[
@@ -3152,6 +3442,33 @@ def _relevance_section(
         lines += [sentence, ""]
     for name in present:
         lines += _figure_block(figures[name], tables)
+    lines += [
+        r"\subsection{Associação descritiva entre XAI e desempenho}",
+        "A concentração espectral de cada camada é definida como a maior massa "
+        "média entre as bandas de relevância absoluta normalizada. Para cada "
+        "modelo e célula treino$\\rightarrow$avaliação, calcula-se a correlação "
+        "de postos de Spearman entre essa concentração e a ROC-AUC nas 12 "
+        "camadas.",
+        "",
+    ]
+    for row in tables.xai_performance_association.itertuples(index=False):
+        cell = (row.model, row.source, row.target)
+        if row.status == "available":
+            text = (
+                f"Para {_cell_tex(cell)}, $n={int(row.n_layers)}$ e "
+                f"$\\rho={_signed(row.rho)}$."
+            )
+        else:
+            text = (
+                f"Para {_cell_tex(cell)}, a associação está indisponível "
+                f"({escape_latex(row.status)}; n={int(row.n_layers)})."
+            )
+        lines += [text, ""]
+    lines += [
+        "Esta análise é descritiva, usa apenas n=12 camadas por célula quando "
+        "disponível e não sustenta inferência nem interpretação causal.",
+        "",
+    ]
     return lines
 
 
@@ -3161,7 +3478,7 @@ def _reorganization_section(
     if "decision_reorganization_by_layer" not in figures:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[5]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[6]}}}",
         r"\label{sec:reorganizacao}",
     ]
     for cell in _cells(tables):
@@ -3203,7 +3520,7 @@ def _stdft_section(
     if "stdft_examples" not in figures:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[6]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[7]}}}",
         r"\label{sec:stdft}",
     ]
     for cell in _cells(tables):
@@ -3248,7 +3565,7 @@ def _conservation_section(
             f"camadas, limite {_sci(limit)} ({status})."
         )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[7]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[8]}}}",
         r"\label{sec:conservacao}",
         "As verificações cobrem populações diferentes e obedecem a limites "
         f"próprios: três usam a tolerância de conservação ({tolerance}) e o "
@@ -3290,13 +3607,52 @@ def _limitations_section(tables: ReportTables) -> list[str]:
         else []
     )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[8]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[9]}}}",
         r"\label{sec:limitacoes}",
         "Limitações desta edição:",
         "",
         *_itemize(limitations),
         *slots_intro,
         *_itemize(slots),
+    ]
+
+
+def _conclusion_section(tables: ReportTables) -> list[str]:
+    selected = tables.transfer_selection
+    off_diagonal = selected[selected["source"] != selected["target"]]
+    if off_diagonal.empty:
+        transfer = (
+            "Como o bundle contém apenas a diagonal, os resultados sustentam "
+            "somente a descrição do caso carregado, não uma conclusão de transferência."
+        )
+    else:
+        transfer = (
+            "As células fora da diagonal documentam transferência sob mudança "
+            "de corpus/idioma; diferenças de ROC-AUC e das métricas no limiar "
+            "não identificam um efeito causal do idioma."
+        )
+    available = tables.xai_performance_association[
+        tables.xai_performance_association["status"] == "available"
+    ]
+    association = (
+        "A associação entre concentração espectral e ROC-AUC permaneceu "
+        "indisponível onde faltaram 12 camadas válidas."
+        if available.empty
+        else (
+            "As associações XAI$\\leftrightarrow$desempenho são resumos "
+            "descritivos de n=12 e não permitem interpretação causal."
+        )
+    )
+    return [
+        rf"\section{{{_SECTION_TITLES_PT[10]}}}",
+        r"\label{sec:conclusao}",
+        "O relatório separa discriminação sem limiar de comportamento no limiar "
+        "fixo e mantém ROC-AUC e MCC vinculados à mesma camada selecionada.",
+        "",
+        transfer,
+        "",
+        association,
+        "",
     ]
 
 
@@ -3335,6 +3691,7 @@ def write_report_tex(
         "",
     ]
     sections = (
+        _executive_summary_section(tables),
         _inventory_section(tables, sources),
         _protocol_section(tables, sources),
         _performance_section(tables, available),
@@ -3344,6 +3701,7 @@ def write_report_tex(
         _stdft_section(tables, available),
         _conservation_section(tables, available),
         _limitations_section(tables),
+        _conclusion_section(tables),
     )
     for section in sections:
         lines += section
