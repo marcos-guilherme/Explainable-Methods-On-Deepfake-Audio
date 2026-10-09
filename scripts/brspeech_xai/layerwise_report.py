@@ -270,6 +270,17 @@ COMPARISON_FAMILIES: tuple[str, ...] = (
     "diagonal_vs_offdiagonal",
     "spectral_divergence",
 )
+_GROUP_LABELS_PT: Mapping[str, str] = MappingProxyType(
+    {"all": "todos", "real": "real", "synthetic": "sintético"}
+)
+
+
+def _planned_figures(omitted_comparisons: Mapping[str, str]) -> tuple[str, ...]:
+    """Base figure families plus comparison figures whose tables are complete."""
+    delivered = tuple(
+        name for name in COMPARISON_FAMILIES if name not in omitted_comparisons
+    )
+    return FIGURE_FAMILIES + delivered
 # Fixed, non-negotiable bootstrap contract shared by every comparison builder.
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 42
@@ -2949,8 +2960,10 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         xai_performance_association=build_xai_performance_associations(
             performance, band_relevance
         ),
-        planned_figures=FIGURE_FAMILIES,
-        omitted_comparisons=_omitted_comparisons(comparison_completeness_map),
+        omitted_comparisons=(
+            omitted := _omitted_comparisons(comparison_completeness_map)
+        ),
+        planned_figures=_planned_figures(omitted),
         probe_stability=merged(
             "probe_stability",
             ["model", "source", "target", "layer"],
@@ -4012,6 +4025,337 @@ def _figure_conservation(plt, tables, figures_dir):
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
+_COMPARISON_BAND_TRANSFORMATION = (
+    "mediana sobre células treino→avaliação por camada; faixa sombreada entre "
+    "quartis 25 e 75 % das células agregadas; intervalos de bootstrap da tabela "
+    "completa permanecem no CSV e entram no resumo TeX (omissões de IC quando "
+    "status ≠ ok são contabilizadas, não ocultadas)"
+)
+_PERF_ENCODER_METRICS: tuple[tuple[str, str, str], ...] = (
+    ("score_spearman", "Spearman do score", "ρ"),
+    ("prediction_agreement", "Acordo de decisão", "fração"),
+    ("cohen_kappa", "Kappa de Cohen", "κ"),
+)
+_XAI_ENCODER_METRICS: tuple[tuple[str, str, str], ...] = (
+    ("relevance_cosine_similarity", "Similaridade cosseno", "cosseno"),
+    ("relevance_jensen_shannon_distance", "Distância JS", "bits"),
+)
+
+
+def _layer_axis_dynamic(ax, layers: Sequence[int]) -> None:
+    ticks = sorted({int(value) for value in layers})
+    if not ticks:
+        return
+    ax.set_xticks(ticks)
+    ax.set_xlim(min(ticks) - 0.4, max(ticks) + 0.4)
+
+
+def _median_iqr_by_layer(frame: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    grouped = frame.groupby([*keys, "layer"], sort=True)
+    for index, group in grouped:
+        if not isinstance(index, tuple):
+            index = (index,)
+        layer = int(index[-1])
+        prefix = index[:-1]
+        values = group["estimate"].to_numpy(dtype=np.float64)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        rows.append(
+            {
+                **dict(zip(keys, prefix)),
+                "layer": layer,
+                "median": float(np.median(values)),
+                "q25": float(np.quantile(values, 0.25)),
+                "q75": float(np.quantile(values, 0.75)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _plot_median_band(ax, summary: pd.DataFrame, *, label: str | None = None) -> None:
+    ordered = summary.sort_values("layer")
+    layers = ordered["layer"].to_numpy(dtype=int)
+    ax.plot(layers, ordered["median"], marker="o", markersize=2.5, linewidth=1.0, label=label)
+    ax.fill_between(layers, ordered["q25"], ordered["q75"], alpha=0.2)
+    _layer_axis_dynamic(ax, layers)
+
+
+def _pair_short(model_a: str, model_b: str) -> str:
+    return f"{model_a}|{model_b}"
+
+
+def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
+    name = "encoder_agreement"
+    frame = tables.encoder_agreement
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    pairs = sorted(
+        {
+            (str(row.model_a), str(row.model_b))
+            for row in frame[["model_a", "model_b"]].drop_duplicates().itertuples(
+                index=False
+            )
+        }
+    )
+    n_pairs = len(pairs)
+    n_cols = max(len(_PERF_ENCODER_METRICS), len(_XAI_ENCODER_METRICS))
+    fig, axes = plt.subplots(
+        2 * n_pairs,
+        n_cols,
+        figsize=(_FIGURE_WIDTH, 2.1 * 2 * n_pairs + 0.6),
+        squeeze=False,
+    )
+    layers = sorted({int(value) for value in frame["layer"]})
+    for pair_index, (model_a, model_b) in enumerate(pairs):
+        pair_frame = frame[
+            (frame["model_a"] == model_a) & (frame["model_b"] == model_b)
+        ]
+        for _block_index, (metrics, row_block) in enumerate(
+            ((_PERF_ENCODER_METRICS, 0), (_XAI_ENCODER_METRICS, 1))
+        ):
+            for metric_index, (metric, title, ylabel) in enumerate(metrics):
+                ax = axes[2 * pair_index + row_block, metric_index]
+                metric_frame = pair_frame[pair_frame["metric"] == metric]
+                if metric_frame.empty:
+                    ax.set_visible(False)
+                    continue
+                summary = _median_iqr_by_layer(
+                    metric_frame, ("model_a", "model_b")
+                )
+                _plot_median_band(ax, summary)
+                if pair_index == 0:
+                    ax.set_title(title, fontsize=8)
+                if metric_index == 0:
+                    ax.set_ylabel(f"{_pair_short(model_a, model_b)}\n{ylabel}", fontsize=7)
+                else:
+                    ax.set_ylabel(ylabel, fontsize=7)
+    for ax in axes[-1]:
+        ax.set_xlabel(_LAYER_AXIS_LABEL)
+    fig.legend(
+        [f"Par {a}|{b}" for a, b in pairs],
+        loc="upper center",
+        ncol=min(3, n_pairs),
+        fontsize=7,
+        frameon=False,
+    )
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Acordo entre encoders por camada",
+        description=(
+            "Pares de modelos com curvas separadas para acordos de desempenho "
+            "(Spearman do score, fração de decisões iguais e kappa) e para "
+            "explicações (similaridade cosseno e distância JS em escalas distintas). "
+            f"Cada painel agrega células treino→avaliação transparentemente."
+        ),
+        metric="acordo entre encoders (desempenho e explicação)",
+        units="ρ, fração, κ, cosseno e bits em eixos rotulados separadamente",
+        transformation=_COMPARISON_BAND_TRANSFORMATION,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
+    name = "language_shift"
+    frame = tables.language_shift
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    models = sorted(set(frame["model"]))
+    sources = sorted(set(frame["source"]))
+    n_rows = len(models)
+    n_cols = len(sources)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(_FIGURE_WIDTH, 2.0 * n_rows + 0.6),
+        squeeze=False,
+        sharex=True,
+    )
+    for row, model in enumerate(models):
+        for column, source in enumerate(sources):
+            ax = axes[row, column]
+            subset = frame[(frame["model"] == model) & (frame["source"] == source)]
+            for (target_a, target_b), pair_frame in subset.groupby(
+                ["target_a", "target_b"], sort=True
+            ):
+                for group in ("all", "real", "synthetic"):
+                    group_frame = pair_frame[pair_frame["group"] == group]
+                    if group_frame.empty:
+                        continue
+                    summary = _median_iqr_by_layer(
+                        group_frame,
+                        ("model", "source", "target_a", "target_b", "group"),
+                    )
+                    _plot_median_band(
+                        ax,
+                        summary,
+                        label=(
+                            f"{target_a}↔{target_b} · "
+                            f"{_GROUP_LABELS_PT.get(group, group)}"
+                        ),
+                    )
+            if row == 0:
+                ax.set_title(f"Probe fixo · {source}", fontsize=8)
+            if column == 0:
+                ax.set_ylabel(f"{model}\nJS (bits)", fontsize=7)
+            ax.axhline(0.0, color="0.7", linewidth=0.6, linestyle=":")
+    for ax in axes[-1]:
+        ax.set_xlabel(_LAYER_AXIS_LABEL)
+    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Mudança de relevância entre idiomas-alvo",
+        description=(
+            "Distância de Jensen–Shannon entre distribuições de relevância sob o "
+            "mesmo probe fixo e idioma de treino, comparando pares de idiomas-alvo "
+            "ao longo das camadas."
+        ),
+        metric="distância JS entre idiomas-alvo",
+        units="bits (logaritmo base 2)",
+        transformation=_COMPARISON_BAND_TRANSFORMATION,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path):
+    name = "diagonal_vs_offdiagonal"
+    frame = tables.diagonal_vs_offdiagonal
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    models = sorted(set(frame["model"]))
+    metrics = (
+        ("delta_roc_auc", "Δ ROC-AUC (fora − diag.)", "adimensional"),
+        ("delta_mcc", "Δ MCC (fora − diag.)", "adimensional"),
+    )
+    fig, axes = plt.subplots(
+        len(models),
+        len(metrics),
+        figsize=(_FIGURE_WIDTH, 2.2 * len(models) + 0.6),
+        squeeze=False,
+        sharex=True,
+    )
+    for row, model in enumerate(models):
+        model_frame = frame[frame["model"] == model]
+        for column, (metric, title, ylabel) in enumerate(metrics):
+            ax = axes[row, column]
+            metric_frame = model_frame[model_frame["metric"] == metric]
+            for (source, target), group in metric_frame.groupby(
+                ["source", "target"], sort=True
+            ):
+                summary = _median_iqr_by_layer(group, ("model", "source", "target"))
+                _plot_median_band(
+                    ax,
+                    summary,
+                    label=f"{source}→{target}",
+                )
+            ax.axhline(0.0, color="0.45", linewidth=0.8)
+            if row == 0:
+                ax.set_title(title, fontsize=8)
+            if column == 0:
+                ax.set_ylabel(f"{model}\n{ylabel}", fontsize=7)
+            else:
+                ax.set_ylabel(ylabel, fontsize=7)
+    for ax in axes[-1]:
+        ax.set_xlabel(_LAYER_AXIS_LABEL)
+    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Diagonal versus transferência fora da diagonal",
+        description=(
+            "Diferença (fora da diagonal menos diagonal) de ROC-AUC e MCC sobre "
+            "o mesmo conjunto de teste, por camada, com referência em zero."
+        ),
+        metric="Δ desempenho off-diagonal − diagonal",
+        units="ROC-AUC e MCC adimensionais",
+        transformation=_COMPARISON_BAND_TRANSFORMATION,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_spectral_divergence(plt, tables: ReportTables, figures_dir: Path):
+    name = "spectral_divergence"
+    frame = tables.spectral_divergence
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    models = sorted(set(frame["model"]))
+    pairs = sorted(
+        {
+            (str(row.language_a), str(row.language_b))
+            for row in frame[["language_a", "language_b"]].drop_duplicates().itertuples(
+                index=False
+            )
+        }
+    )
+    n_cols = len(pairs)
+    fig, axes = plt.subplots(
+        len(models),
+        n_cols,
+        figsize=(_FIGURE_WIDTH, 2.0 * len(models) + 0.6),
+        squeeze=False,
+        sharex=True,
+    )
+    axes = np.atleast_2d(axes)
+    for row, model in enumerate(models):
+        model_frame = frame[frame["model"] == model]
+        for column, (language_a, language_b) in enumerate(pairs):
+            ax = axes[row, column]
+            pair_frame = model_frame[
+                (model_frame["language_a"] == language_a)
+                & (model_frame["language_b"] == language_b)
+            ]
+            for group in ("all", "real", "synthetic"):
+                group_frame = pair_frame[pair_frame["group"] == group]
+                if group_frame.empty:
+                    continue
+                summary = _median_iqr_by_layer(
+                    group_frame,
+                    ("model", "language_a", "language_b", "group"),
+                )
+                _plot_median_band(
+                    ax,
+                    summary,
+                    label=_GROUP_LABELS_PT.get(group, group),
+                )
+            if row == 0:
+                ax.set_title(f"{language_a}↔{language_b} (diag.)", fontsize=8)
+            if column == 0:
+                ax.set_ylabel(f"{model}\nWasserstein (Hz)", fontsize=7)
+            else:
+                ax.set_ylabel("Wasserstein (Hz)", fontsize=7)
+    for ax in axes[-1]:
+        ax.set_xlabel(_LAYER_AXIS_LABEL)
+    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Divergência espectral entre idiomas (pares diagonais)",
+        description=(
+            "Distância de Wasserstein entre espectros de relevância em Hz, "
+            "comparando pares de idiomas na diagonal treino=avaliação."
+        ),
+        metric="Wasserstein entre distribuições espectrais",
+        units="Hz (suporte nos centros de banda registrados)",
+        transformation=_COMPARISON_BAND_TRANSFORMATION,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
 _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
@@ -4021,6 +4365,10 @@ _FIGURE_BUILDERS = {
     "decision_reorganization_by_layer": _figure_reorganization,
     "stdft_examples": _figure_stdft,
     "conservation_diagnostics": _figure_conservation,
+    "encoder_agreement": _figure_encoder_agreement,
+    "language_shift": _figure_language_shift,
+    "diagonal_vs_offdiagonal": _figure_diagonal_vs_offdiagonal,
+    "spectral_divergence": _figure_spectral_divergence,
 }
 
 
@@ -4112,10 +4460,10 @@ _OMISSION_REASONS: Mapping[str, str] = MappingProxyType(
     {
         "single_model": "indisponível porque há apenas um modelo",
         "single_language": "indisponível porque há apenas um idioma",
-        "not_in_first_edition": "ainda não gerado nesta edição",
         "unavailable_incomplete_table": "tabela de comparação incompleta nesta edição",
     }
 )
+_COMPARISON_SECTION_TITLE = "Comparações entre modelos e idiomas"
 _SECTION_TITLES_PT: tuple[str, ...] = (
     "Resumo executivo",
     "Escopo e inventário dos experimentos",
@@ -5020,6 +5368,27 @@ def _conservation_section(
     ]
 
 
+def _comparisons_section(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    names = [name for name in COMPARISON_FAMILIES if name in figures]
+    if not names:
+        return []
+    lines = [
+        rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
+        r"\label{sec:comparacoes}",
+        "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
+        "Cada figura mostra a mediana por camada e a faixa interquartil entre "
+        "células agregadas; intervalos bootstrap, contagens de status e detalhe "
+        "por célula permanecem nos CSV e nos resumos tabulares abaixo.",
+        "",
+    ]
+    for name in names:
+        lines += _figure_block(figures[name], tables)
+        lines += [rf"\input{{tables/{name}.tex}}", ""]
+    return lines
+
+
 def _limitations_section(tables: ReportTables) -> list[str]:
     slots = [
         f"{_COMPARISON_NAMES[name]}: "
@@ -5160,6 +5529,7 @@ def write_report_tex(
         _reorganization_section(tables, available),
         _stdft_section(tables, available),
         _conservation_section(tables, available),
+        _comparisons_section(tables, available),
         _limitations_section(tables),
         _conclusion_section(tables),
     )
@@ -5656,6 +6026,186 @@ def _conservation_tex(tables: ReportTables) -> str:
     )
 
 
+def _comparison_status_summary(frame: pd.DataFrame) -> str:
+    counts = frame.groupby("status", sort=True).size()
+    return "; ".join(f"{status}: {int(count)}" for status, count in counts.items())
+
+
+def _comparison_compact_table(
+    caption: str,
+    label: str,
+    headers: Sequence[str],
+    body: Sequence[Sequence[object]],
+) -> str:
+    if not body:
+        return ""
+    return "\n".join(
+        [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
+            rf"\caption{{{caption}}}",
+            rf"\label{{{label}}}",
+            _FIT_WIDTH_OPEN,
+            rf"\begin{{tabular}}{{{'l' * len(headers)}}}",
+            r"\toprule",
+            _row(headers),
+            r"\midrule",
+            *(_row(row) for row in body),
+            r"\bottomrule",
+            r"\end{tabular}}",
+            r"\end{table}",
+            "",
+        ]
+    )
+
+
+def _encoder_agreement_tex(tables: ReportTables) -> str:
+    frame = tables.encoder_agreement
+    if frame.empty:
+        return ""
+    body = []
+    for keys, group in frame.groupby(["model_a", "model_b", "metric"], sort=True):
+        model_a, model_b, metric = keys
+        estimates = group["estimate"].to_numpy(dtype=np.float64)
+        estimates = estimates[np.isfinite(estimates)]
+        body.append(
+            [
+                escape_latex(f"{model_a}|{model_b}"),
+                escape_latex(str(metric)),
+                int(len(group)),
+                _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
+                (
+                    f"{_num(float(np.min(estimates)))}--{_num(float(np.max(estimates)))}"
+                    if estimates.size
+                    else _NOT_AVAILABLE
+                ),
+                escape_latex(_comparison_status_summary(group)),
+            ]
+        )
+    return _comparison_compact_table(
+        "Resumo do acordo entre encoders: mediana e extensão por par de modelos "
+        "e métrica. Detalhe completo em \\texttt{encoder\\_agreement.csv}.",
+        "tab:encoder-agreement-summary",
+        ["Par", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
+        body,
+    )
+
+
+def _language_shift_tex(tables: ReportTables) -> str:
+    frame = tables.language_shift
+    if frame.empty:
+        return ""
+    body = []
+    for keys, group in frame.groupby(
+        ["model", "source", "target_a", "target_b", "group"], sort=True
+    ):
+        model, source, target_a, target_b, group_name = keys
+        estimates = group["estimate"].to_numpy(dtype=np.float64)
+        estimates = estimates[np.isfinite(estimates)]
+        body.append(
+            [
+                escape_latex(_model_name(str(model))),
+                escape_latex(f"{source}→{target_a}|{target_b}"),
+                escape_latex(_GROUP_LABELS_PT.get(str(group_name), str(group_name))),
+                int(len(group)),
+                _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
+                (
+                    f"{_num(float(np.min(estimates)))}--{_num(float(np.max(estimates)))}"
+                    if estimates.size
+                    else _NOT_AVAILABLE
+                ),
+                escape_latex(_comparison_status_summary(group)),
+            ]
+        )
+    return _comparison_compact_table(
+        "Resumo da mudança de relevância entre idiomas-alvo (JS). Detalhe completo "
+        "em \\texttt{language\\_shift.csv}.",
+        "tab:language-shift-summary",
+        ["Modelo", "Treino / pares-alvo", "Grupo", "Camadas", "Mediana", "Faixa", "Status"],
+        body,
+    )
+
+
+def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
+    frame = tables.diagonal_vs_offdiagonal
+    if frame.empty:
+        return ""
+    body = []
+    for keys, group in frame.groupby(["model", "source", "target", "metric"], sort=True):
+        model, source, target, metric = keys
+        estimates = group["estimate"].to_numpy(dtype=np.float64)
+        estimates = estimates[np.isfinite(estimates)]
+        body.append(
+            [
+                escape_latex(_model_name(str(model))),
+                escape_latex(f"{source}→{target}"),
+                escape_latex(str(metric)),
+                int(len(group)),
+                _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
+                (
+                    f"{_num(float(np.min(estimates)))}--{_num(float(np.max(estimates)))}"
+                    if estimates.size
+                    else _NOT_AVAILABLE
+                ),
+                escape_latex(_comparison_status_summary(group)),
+            ]
+        )
+    return _comparison_compact_table(
+        "Resumo diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e $\\Delta$ MCC). "
+        "Detalhe completo em \\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
+        "tab:diagonal-off-summary",
+        ["Modelo", "Transferência", "Métrica", "Camadas", "Mediana", "Faixa", "Status"],
+        body,
+    )
+
+
+def _spectral_divergence_tex(tables: ReportTables) -> str:
+    frame = tables.spectral_divergence
+    if frame.empty:
+        return ""
+    body = []
+    for keys, group in frame.groupby(
+        ["model", "language_a", "language_b", "group"], sort=True
+    ):
+        model, language_a, language_b, group_name = keys
+        estimates = group["estimate"].to_numpy(dtype=np.float64)
+        estimates = estimates[np.isfinite(estimates)]
+        body.append(
+            [
+                escape_latex(_model_name(str(model))),
+                escape_latex(f"{language_a}|{language_b}"),
+                escape_latex(_GROUP_LABELS_PT.get(str(group_name), str(group_name))),
+                int(len(group)),
+                _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
+                (
+                    f"{_num(float(np.min(estimates)))}--{_num(float(np.max(estimates)))}"
+                    if estimates.size
+                    else _NOT_AVAILABLE
+                ),
+                escape_latex(_comparison_status_summary(group)),
+            ]
+        )
+    return _comparison_compact_table(
+        "Resumo da divergência espectral (Wasserstein em Hz) entre pares "
+        "diagonais de idioma. Detalhe completo em \\texttt{spectral\\_divergence.csv}.",
+        "tab:spectral-divergence-summary",
+        ["Modelo", "Par de idiomas", "Grupo", "Camadas", "Mediana (Hz)", "Faixa (Hz)", "Status"],
+        body,
+    )
+
+
+_COMPARISON_TEX_BUILDERS: Mapping[str, object] = MappingProxyType(
+    {
+        "encoder_agreement": _encoder_agreement_tex,
+        "language_shift": _language_shift_tex,
+        "diagonal_vs_offdiagonal": _diagonal_vs_offdiagonal_tex,
+        "spectral_divergence": _spectral_divergence_tex,
+    }
+)
+
+
 def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[str, ...]:
     """Write the derived CSV tables and LaTeX table fragments; return file names."""
     if not isinstance(tables, ReportTables):
@@ -5698,6 +6248,17 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
             lineterminator="\n",
         )
         written.append("layer_faithfulness_summary.csv")
+    for name in COMPARISON_FAMILIES:
+        if name not in tables.planned_figures:
+            continue
+        frame = getattr(tables, name)
+        frame.to_csv(tables_dir / f"{name}.csv", index=False, lineterminator="\n")
+        written.append(f"{name}.csv")
+        builder = _COMPARISON_TEX_BUILDERS[name]
+        text = builder(tables)
+        if text:
+            _write_tex(tables_dir / f"{name}.tex", text)
+            written.append(f"{name}.tex")
     return tuple(sorted(written))
 
 

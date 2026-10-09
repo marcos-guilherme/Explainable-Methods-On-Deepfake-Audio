@@ -1695,11 +1695,16 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
     for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
         assert not getattr(tables, name).empty
     records = render_report_figures(tables, tmp_path / "figs")
-    assert tuple(record.name for record in records) == _EIGHT_FAMILIES
-    assert len(list((tmp_path / "figs").iterdir())) == 16
+    expected = _EIGHT_FAMILIES + (
+        "language_shift",
+        "diagonal_vs_offdiagonal",
+        "spectral_divergence",
+    )
+    assert tuple(record.name for record in records) == expected
+    assert len(list((tmp_path / "figs").iterdir())) == len(expected) * 2
 
 
-def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
+def test_multiple_models_add_encoder_agreement_without_language_figures(tmp_path):
     first = write_scientific_result_root(tmp_path, profile="hubert_base")
     second = write_scientific_result_root(tmp_path, profile="wavlm_base")
     tables = build_report_tables(
@@ -1715,7 +1720,8 @@ def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
     assert not tables.encoder_agreement.empty
     for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
         assert tables.omitted_comparisons[name] == "single_language"
-    assert tables.planned_figures == _EIGHT_FAMILIES
+        assert name not in tables.planned_figures
+    assert tables.planned_figures == _EIGHT_FAMILIES + ("encoder_agreement",)
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
 
@@ -4147,6 +4153,253 @@ def test_report_fidelity_and_stability_use_compact_tables_and_cautious_prose(
         encoding="utf-8"
     )
     assert stability_tex.count(r"\begin{table}") == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (comparisons): figures, CSVs and compact TeX summaries
+# ---------------------------------------------------------------------------
+
+_TWELVE_FAMILIES = _EIGHT_FAMILIES + _COMPARISON_FAMILIES
+
+
+def _build_full_comparison_tables(tmp_path: Path):
+    base = tmp_path / "comparison_case"
+    first = write_scientific_result_root(
+        base, profile="hubert_base", languages=("eng", "por")
+    )
+    second = write_scientific_result_root(
+        base, profile="wavlm_base", languages=("eng", "por")
+    )
+    return build_report_tables(
+        [
+            load_report_source(validate_result_directory(first)),
+            load_report_source(validate_result_directory(second)),
+        ]
+    )
+
+
+def _png_is_nonblank(path: Path) -> bool:
+    import matplotlib.pyplot as plt
+
+    data = plt.imread(path)
+    if data.ndim == 3:
+        data = data[..., :3].mean(axis=-1)
+    return float(np.std(data)) > 0.01 and float(data.max() - data.min()) > 0.02
+
+
+@pytest.fixture(scope="module")
+def full_comparison_tables(tmp_path_factory):
+    return _build_full_comparison_tables(tmp_path_factory.mktemp("full_cmp"))
+
+
+def test_planned_figures_add_comparisons_only_when_complete(full_comparison_tables):
+    tables = full_comparison_tables
+    assert tables.omitted_comparisons == {}
+    assert tables.planned_figures == _TWELVE_FAMILIES
+    assert set(_COMPARISON_FAMILIES) <= set(tables.planned_figures)
+
+
+def test_single_model_keeps_eight_figure_families_without_dangling_comparisons(
+    eng_tables,
+):
+    assert eng_tables.planned_figures == _EIGHT_FAMILIES
+    assert set(_COMPARISON_FAMILIES).isdisjoint(eng_tables.planned_figures)
+
+
+def test_render_emits_eight_new_comparison_artifacts(full_comparison_tables, tmp_path):
+    figures_dir = tmp_path / "figures"
+    records = render_report_figures(full_comparison_tables, figures_dir)
+    names = {path.name for path in figures_dir.iterdir()}
+    expected = {
+        f"{name}.{suffix}"
+        for name in _COMPARISON_FAMILIES
+        for suffix in ("pdf", "png")
+    }
+    assert expected <= names
+    assert tuple(record.name for record in records) == _TWELVE_FAMILIES
+    for name in _COMPARISON_FAMILIES:
+        for suffix in ("pdf", "png"):
+            path = figures_dir / f"{name}.{suffix}"
+            assert path.stat().st_size > 0
+            assert _png_is_nonblank(path) if suffix == "png" else path.read_bytes().startswith(
+                b"%PDF"
+            )
+
+
+@pytest.mark.parametrize("family", _COMPARISON_FAMILIES)
+def test_comparison_figures_use_portuguese_axis_labels(
+    full_comparison_tables, tmp_path, family
+):
+    records, captured = _capture_figures(full_comparison_tables, tmp_path / family)
+    assert family in captured
+    joined = "\n".join(captured[family]["texts"])
+    assert "Camada" in joined
+    assert _ENGLISH_VISIBLE_TEXT.search(joined) is None, joined
+    record = next(item for item in records if item.name == family)
+    assert _ENGLISH_VISIBLE_TEXT.search(record.caption) is None
+
+
+def test_encoder_agreement_figure_separates_performance_and_explanation_scales(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    ylabels: list[str] = []
+
+    original = plt.Axes.set_ylabel
+
+    def spy_ylabel(self, text, *args, **kwargs):
+        ylabels.append(str(text))
+        return original(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "set_ylabel", spy_ylabel)
+    render_report_figures(full_comparison_tables, tmp_path / "enc")
+    perf = [item for item in ylabels if "ρ" in item or "fração" in item or "κ" in item]
+    xai = [item for item in ylabels if "cosseno" in item or "bits" in item]
+    assert len(perf) >= 3
+    assert len(xai) >= 2
+    assert not any("bits" in item for item in perf)
+    assert not any("ρ" in item for item in xai)
+
+
+def test_diagonal_figure_includes_zero_reference_and_transfer_labels(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    axhline_calls: list[float] = []
+
+    import matplotlib.pyplot as plt
+
+    original = plt.Axes.axhline
+
+    def spy(self, y, *args, **kwargs):
+        axhline_calls.append(float(y))
+        return original(self, y, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "axhline", spy)
+    records, captured = _capture_figures(
+        full_comparison_tables, tmp_path / "diag"
+    )
+    assert 0.0 in axhline_calls
+    joined = "\n".join(captured["diagonal_vs_offdiagonal"]["texts"])
+    assert "Δ" in joined or "delta" in joined.lower() or "ROC-AUC" in joined
+
+
+def test_spectral_divergence_figure_uses_hz_axis(
+    full_comparison_tables, tmp_path
+):
+    _, captured = _capture_figures(full_comparison_tables, tmp_path / "spec")
+    joined = "\n".join(captured["spectral_divergence"]["texts"])
+    assert "Hz" in joined
+
+
+def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(
+    full_comparison_tables, tmp_path
+):
+    written = write_report_tables(full_comparison_tables, tmp_path / "tables")
+    names = {Path(item).name for item in written}
+    for family in _COMPARISON_FAMILIES:
+        assert f"{family}.csv" in names
+        assert f"{family}.tex" in names
+        csv_frame = pd.read_csv(tmp_path / "tables" / f"{family}.csv")
+        source_frame = getattr(full_comparison_tables, family)
+        pd.testing.assert_frame_equal(
+            csv_frame.reset_index(drop=True),
+            source_frame.reset_index(drop=True),
+            check_dtype=False,
+        )
+        tex = (tmp_path / "tables" / f"{family}.tex").read_text(encoding="utf-8")
+        assert r"\begin{tabular}" in tex
+        assert "Detalhe completo" in tex or "detalhe completo" in tex
+        assert family.replace("_", r"\_") in tex or family in tex
+
+
+def test_comparison_summary_tex_column_counts_are_consistent(
+    full_comparison_tables, tmp_path
+):
+    write_report_tables(full_comparison_tables, tmp_path / "tables")
+    for family in _COMPARISON_FAMILIES:
+        tex = (tmp_path / "tables" / f"{family}.tex").read_text(encoding="utf-8")
+        header = tex.split(r"\midrule", 1)[0]
+        columns = header.count("&") + 1
+        for row in tex.split(r"\midrule", 1)[1].split(r"\bottomrule")[0].strip().splitlines():
+            stripped = row.strip()
+            if not stripped or stripped.startswith("%"):
+                continue
+            assert stripped.count("&") + 1 == columns, (family, stripped)
+
+
+def test_full_comparison_bundle_manifest_lists_twelve_families_in_order(
+    full_comparison_tables, tmp_path
+):
+    roots = []
+    base = tmp_path / "roots"
+    for profile in ("hubert_base", "wavlm_base"):
+        roots.append(
+            write_scientific_result_root(
+                base, profile=profile, languages=("eng", "por")
+            )
+        )
+    output = tmp_path / "bundle"
+    generate_report_bundle(roots, output)
+    manifest = json.loads(_read_text(output / "report_manifest.json"))
+    figure_paths = [
+        item["path"]
+        for item in manifest["generated_files"]
+        if item["path"].startswith("figures/")
+    ]
+    stems = [Path(item).stem for item in figure_paths]
+    assert stems == sorted(stems)
+    for name in _TWELVE_FAMILIES:
+        assert f"figures/{name}.pdf" in figure_paths
+        assert f"figures/{name}.png" in figure_paths
+    tex = _read_text(output / "report.tex")
+    for name in _COMPARISON_FAMILIES:
+        assert rf"\label{{fig:{name}}}" in tex
+    assert "Espaços de comparação reservados" not in tex
+
+
+def test_tex_omits_unavailable_comparison_figures_without_dangling_labels(
+    eng_tables, eng_loaded, eng_figures, tmp_path
+):
+    write_report_tex(
+        tmp_path / "report.tex", eng_tables, eng_figures, [eng_loaded]
+    )
+    tex = _read_text(tmp_path / "report.tex")
+    for name in _COMPARISON_FAMILIES:
+        assert name not in tex
+        assert rf"\label{{fig:{name}}}" not in tex
+
+
+def test_multiple_languages_add_language_comparison_figures(tmp_path):
+    root = write_scientific_result_root(tmp_path, languages=("eng", "por"))
+    tables = build_report_tables(
+        [load_report_source(validate_result_directory(root))]
+    )
+    assert tables.omitted_comparisons == {"encoder_agreement": "single_model"}
+    expected = _EIGHT_FAMILIES + (
+        "language_shift",
+        "diagonal_vs_offdiagonal",
+        "spectral_divergence",
+    )
+    assert tables.planned_figures == expected
+    records = render_report_figures(tables, tmp_path / "figs")
+    assert tuple(record.name for record in records) == expected
+
+
+def test_multiple_models_add_encoder_agreement_figure(tmp_path):
+    first = write_scientific_result_root(tmp_path, profile="hubert_base")
+    second = write_scientific_result_root(tmp_path, profile="wavlm_base")
+    tables = build_report_tables(
+        [
+            load_report_source(validate_result_directory(second)),
+            load_report_source(validate_result_directory(first)),
+        ]
+    )
+    assert "encoder_agreement" in tables.planned_figures
+    assert "encoder_agreement" not in tables.omitted_comparisons
+    for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
+        assert name not in tables.planned_figures
+        assert tables.omitted_comparisons[name] == "single_language"
 
 
 # ---------------------------------------------------------------------------
