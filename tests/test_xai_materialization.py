@@ -378,6 +378,175 @@ def test_tar_inventory_resolves_requested_refs_only(tmp_path: Path):
     assert "../unsafe.wav" in inventory.rejected_unsafe_members
 
 
+def test_preflight_inventories_one_physical_tar_only_once(
+    tmp_path: Path, monkeypatch
+):
+    archive = tmp_path / "aishell.tgz"
+    _write_tar(
+        archive,
+        [
+            ("train/wav/spk1/train.wav", b"train"),
+            ("test/wav/spk2/test.wav", b"test"),
+        ],
+    )
+    layout = XaiLayout(tmp_path / "out")
+
+    def selected(native_split: str, original_ref: str) -> SelectedCandidate:
+        return _selected(
+            SelectionCandidate(
+                candidate_id=f"{native_split}-utt",
+                language="zho",
+                label=0,
+                corpus="AISHELL-3",
+                native_split=native_split,
+                original_ref=original_ref,
+                local_source_path=None,
+                speaker_id=f"{native_split}-speaker",
+                group_id=None,
+                attack_id=None,
+                metadata_source="fixture",
+                materialization_mode="extract_archive",
+            )
+        )
+
+    specs = {
+        ("AISHELL-3", native_split): ArchiveSpec(
+            "AISHELL-3", native_split, "tar", (archive,)
+        )
+        for native_split in ("train", "test")
+    }
+    import jmds_prepare.pipelines.xai_materialization as materialization_module
+
+    original_inventory = materialization_module.inventory_archive_spec
+    calls = 0
+
+    def counted_inventory(spec, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_inventory(spec, **kwargs)
+
+    monkeypatch.setattr(
+        materialization_module, "inventory_archive_spec", counted_inventory
+    )
+    report = preflight_materialization(
+        [
+            selected("train", "train/wav/spk1/train.wav"),
+            selected("test", "test/wav/spk2/test.wav"),
+        ],
+        layout,
+        specs,
+    )
+
+    assert calls == 1
+    assert (
+        report.archive_inventories[("AISHELL-3", "train")]
+        is report.archive_inventories[("AISHELL-3", "test")]
+    )
+
+
+def test_tar_extraction_streams_forward_without_random_member_lookups(
+    tmp_path: Path, monkeypatch
+):
+    archive = tmp_path / "aishell.tgz"
+    with tarfile.open(archive, "w:gz") as output:
+        for name, content in (
+            ("train/wav/spk1/first.wav", b"first"),
+            ("train/wav/spk2/ignored.wav", b"ignored"),
+            ("test/wav/spk3/last.wav", b"last"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            output.addfile(info, io.BytesIO(content))
+
+    def reject_random_lookup(*_args, **_kwargs):
+        raise AssertionError("compressed TAR extraction must stream forward")
+
+    monkeypatch.setattr(tarfile.TarFile, "getmember", reject_random_lookup)
+    import jmds_prepare.pipelines.xai_materialization as materialization_module
+
+    extracted = materialization_module._extract_tar_members_batch(
+        archive,
+        ["test/wav/spk3/last.wav", "train/wav/spk1/first.wav"],
+        tmp_path / "staging",
+    )
+
+    assert extracted["train/wav/spk1/first.wav"].read_bytes() == b"first"
+    assert extracted["test/wav/spk3/last.wav"].read_bytes() == b"last"
+    assert not (tmp_path / "staging" / "train/wav/spk2/ignored.wav").exists()
+
+
+def test_materialization_extracts_shared_tar_for_all_splits_in_one_pass(
+    tmp_path: Path, monkeypatch
+):
+    first_wav = tmp_path / "first.wav"
+    last_wav = tmp_path / "last.wav"
+    _write_wav(first_wav, sample_rate=8_000, value=0.2)
+    _write_wav(last_wav, sample_rate=8_000, value=0.3)
+    archive = tmp_path / "aishell.tgz"
+    with tarfile.open(archive, "w:gz") as output:
+        for name, source in (
+            ("train/wav/spk1/first.wav", first_wav),
+            ("test/wav/spk2/last.wav", last_wav),
+        ):
+            content = source.read_bytes()
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            output.addfile(info, io.BytesIO(content))
+
+    def selected(
+        native_split: str, original_ref: str, rank: int
+    ) -> SelectedCandidate:
+        return _selected(
+            SelectionCandidate(
+                candidate_id=f"{native_split}-utt",
+                language="zho",
+                label=0,
+                corpus="AISHELL-3",
+                native_split=native_split,
+                original_ref=original_ref,
+                local_source_path=None,
+                speaker_id=f"{native_split}-speaker",
+                group_id=None,
+                attack_id=None,
+                metadata_source="fixture",
+                materialization_mode="extract_archive",
+            ),
+            rank=rank,
+        )
+
+    specs = {
+        ("AISHELL-3", native_split): ArchiveSpec(
+            "AISHELL-3", native_split, "tar", (archive,)
+        )
+        for native_split in ("train", "test")
+    }
+    import jmds_prepare.pipelines.xai_materialization as materialization_module
+
+    original_extract = materialization_module._extract_tar_members_batch
+    calls = 0
+
+    def counted_extract(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(
+        materialization_module, "_extract_tar_members_batch", counted_extract
+    )
+    samples = materialize_selected(
+        [
+            selected("train", "train/wav/spk1/first.wav", 0),
+            selected("test", "test/wav/spk2/last.wav", 1),
+        ],
+        XaiLayout(tmp_path / "out"),
+        specs,
+        sample_rate=16_000,
+    )
+
+    assert len(samples) == 2
+    assert calls == 1
+
+
 def test_tar_preflight_rejects_duplicate_before_cache(tmp_path: Path):
     archive = tmp_path / "coraa.tar"
     _write_tar(

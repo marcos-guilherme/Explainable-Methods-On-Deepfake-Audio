@@ -372,7 +372,7 @@ See [docs/data-framework.md](docs/data-framework.md) for architecture details.
 
 The VM suite studies where the detector decision emerges by layer and how it
 changes across English, Portuguese and Mandarin. It evaluates all 12
-Transformer blocks of HuBERT Base, WavLM Base+ and Wav2Vec2 Base. The primary
+Transformer blocks of HuBERT Base, WavLM Base and Wav2Vec2 Base. The primary
 explanation path is AttnLRP → DFT-LRP/STDFT-LRP; the existing H1/H2/H3 analysis
 is an optional layer-12 diagonal audit and is disabled by default.
 
@@ -399,8 +399,8 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --dry-run
 ```
 
-Repeat it with `--profiles wavlm_base_plus` and the output
-`/mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full`, and with
+Repeat it with `--profiles wavlm_base` and the output
+`/mnt/results/wavlm_base__eng-por-zho__layerwise_xai__full`, and with
 `--profiles wav2vec2_base` and the output
 `/mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full`. Inspect each
 `execution_plan.json` for config/manifest hashes, disk-space formula, the
@@ -435,8 +435,8 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles wavlm_base_plus \
-  --output /mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full \
+  --profiles wavlm_base \
+  --output /mnt/results/wavlm_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25
 
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
@@ -481,7 +481,7 @@ Every result directory that feeds the layer-wise report is named
 <model>__<languages>__layerwise_xai__<scope>
 ```
 
-where `<model>` is the encoder profile (`hubert_base`, `wavlm_base_plus`,
+where `<model>` is the encoder profile (`hubert_base`, `wavlm_base`,
 `wav2vec2_base`), `<languages>` are ISO 639-3 codes in canonical order joined
 by `-` and `<scope>` is `pilot` or `full`. The suite accepts any non-empty subset
 of English, Portuguese and Mandarin, so the report accepts all seven
@@ -489,7 +489,7 @@ combinations: `eng`, `por`, `zho`, `eng-por`, `eng-zho`, `por-zho` and
 `eng-por-zho`. The report reads one model per directory, which is why the
 commands above run each profile in its own convention-named directory
 (`hubert_base__eng-por-zho__layerwise_xai__full`,
-`wavlm_base_plus__eng-por-zho__layerwise_xai__full` and
+`wavlm_base__eng-por-zho__layerwise_xai__full` and
 `wav2vec2_base__eng-por-zho__layerwise_xai__full`).
 
 The HuBERT example below, `hubert_base__eng__layerwise_xai__full`, is the

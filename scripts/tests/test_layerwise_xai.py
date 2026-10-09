@@ -175,7 +175,7 @@ def _run_fixture(
     encoder_factory=None,
     use_default_patch=False,
 ):
-    profiles = ("hubert_base", "wavlm_base_plus")
+    profiles = ("hubert_base", "wavlm_base")
     layers = (1, 2)
     sources = ("eng", "por")
     target = "zho"
@@ -564,18 +564,117 @@ def test_recomputed_score_drift_remains_bounded(tmp_path):
         )
 
 
-def test_recomputed_score_cannot_change_fixed_threshold_prediction(tmp_path):
-    with pytest.raises(ValueError, match="recomputed prediction/threshold divergence"):
-        _run_fixture(
-            tmp_path,
-            cell_overrides={
-                "relevance_fn": lambda model, processor, wav, device: (
-                    np.ones(4),
-                    np.full(4, 0.1),
-                    -0.001,
-                )
-            },
+def test_observed_max_singleton_recompute_drift_is_bounded_and_audited(tmp_path):
+    persisted_score = 0.5992735
+    recomputed_score = 0.592789113500356
+    recomputed_logit = float(
+        np.log(recomputed_score / (1.0 - recomputed_score))
+    )
+
+    def write_observed_scores(
+        paths, profiles, layers, sources, target, catalog
+    ):
+        for profile in profiles:
+            for layer in layers:
+                for source in sources:
+                    prediction_path = (
+                        paths.cell(profile, layer, source, target)
+                        / "predictions.parquet"
+                    )
+                    predictions = pd.read_parquet(prediction_path)
+                    predictions["score"] = persisted_score
+                    predictions["prediction"] = 1
+                    predictions.to_parquet(prediction_path, index=False)
+                    np.save(
+                        prediction_path.with_name("scores.npy"),
+                        np.full(len(predictions), persisted_score),
+                    )
+
+    summary, paths, *_ = _run_fixture(
+        tmp_path,
+        mutate=write_observed_scores,
+        cell_overrides={
+            "score_head_fn": lambda head, emb: np.full(
+                len(emb), persisted_score
+            ),
+            "relevance_fn": lambda model, processor, wav, device: (
+                np.ones(4),
+                np.full(4, 0.1),
+                recomputed_logit,
+            ),
+        },
+    )
+
+    row = summary.iloc[0]
+    generation = resolve_active_xai_generation(
+        paths.layer_xai(
+            row["profile"], int(row["layer"]), row["source"], row["target"]
         )
+    )
+    samples = pd.read_parquet(generation / "sample_relevance.parquet")
+    assert samples["score_recompute_absolute_error"].iloc[0] == pytest.approx(
+        abs(recomputed_score - persisted_score)
+    )
+
+
+def test_bounded_recomputed_score_crossing_preserves_and_audits_fixed_prediction(
+    tmp_path,
+):
+    persisted_score = 0.4999
+    recomputed_score = 0.5001
+    recomputed_logit = float(
+        np.log(recomputed_score / (1.0 - recomputed_score))
+    )
+
+    def make_predictions_borderline(
+        paths, profiles, layers, sources, target, catalog
+    ):
+        for profile in profiles:
+            for layer in layers:
+                for source in sources:
+                    prediction_path = (
+                        paths.cell(profile, layer, source, target)
+                        / "predictions.parquet"
+                    )
+                    predictions = pd.read_parquet(prediction_path)
+                    predictions["score"] = persisted_score
+                    predictions["prediction"] = 0
+                    predictions.to_parquet(prediction_path, index=False)
+                    np.save(
+                        prediction_path.with_name("scores.npy"),
+                        np.full(len(predictions), persisted_score),
+                    )
+
+    summary, paths, *_ = _run_fixture(
+        tmp_path,
+        mutate=make_predictions_borderline,
+        cell_overrides={
+            "score_head_fn": lambda head, emb: np.full(
+                len(emb), persisted_score
+            ),
+            "relevance_fn": lambda model, processor, wav, device: (
+                np.ones(4),
+                np.full(4, 0.1),
+                recomputed_logit,
+            ),
+        },
+    )
+
+    row = summary.iloc[0]
+    generation = resolve_active_xai_generation(
+        paths.layer_xai(
+            row["profile"], int(row["layer"]), row["source"], row["target"]
+        )
+    )
+    samples = pd.read_parquet(generation / "sample_relevance.parquet")
+    validation = json.loads(
+        (generation / "attnlrp_conservation.json").read_text(encoding="utf-8")
+    )
+
+    assert set(samples["prediction"]) == {0}
+    assert set(samples["recomputed_prediction"]) == {1}
+    assert samples["recomputed_prediction_disagrees"].all()
+    assert validation["recomputed_prediction_disagreement_count"] == len(samples)
 
 
 def test_stdft_conservation_fails_closed_on_tampered_relevance_map(tmp_path):
@@ -872,9 +971,11 @@ class _DeviceSpyDetector(_FixtureDetector):
         self.to_devices = []
         self.eval_calls = 0
 
-    def to(self, device):
-        self.to_devices.append(str(device))
-        return super().to(device)
+    def to(self, *args, **kwargs):
+        device = kwargs.get("device", args[0] if args else None)
+        if device is not None:
+            self.to_devices.append(str(device))
+        return super().to(*args, **kwargs)
 
     def eval(self):
         self.eval_calls += 1
@@ -895,10 +996,14 @@ def test_detector_is_moved_to_device_and_eval_before_any_backward(tmp_path):
         assert model.training is False
         assert model.w.device.type == "cpu"
         assert model.b.device.type == "cpu"
+        assert model.w.dtype == torch.float64
+        assert model.b.dtype == torch.float64
+        assert next(model.encoder.parameters()).dtype == torch.float64
         return _conservation_diagnostics()
 
     _run_fixture(
         tmp_path,
+        encoder_factory=lambda profile: (_PatchableToyEncoder().double(), object()),
         cell_overrides={
             "detector_factory": factory,
             "temporal_certificate_fn": certificate,

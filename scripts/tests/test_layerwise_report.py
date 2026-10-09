@@ -24,6 +24,7 @@ from brspeech_xai.layerwise_report import (
     ExperimentIdentity,
     LoadedReportSource,
     ReportSource,
+    abbreviate_sample_id,
     build_conservation_series,
     build_report_manifest,
     build_report_tables,
@@ -214,9 +215,9 @@ def test_parse_result_dir_name_accepts_every_non_empty_language_subset(
     segment, languages, scope
 ):
     identity = parse_result_dir_name(
-        Path(f"wavlm_base_plus__{segment}__layerwise_xai__{scope}")
+        Path(f"wavlm_base__{segment}__layerwise_xai__{scope}")
     )
-    assert identity.profile == "wavlm_base_plus"
+    assert identity.profile == "wavlm_base"
     assert identity.languages == languages
     assert identity.scope == scope
 
@@ -298,7 +299,7 @@ def test_report_bundle_is_generated_for_an_eng_zho_result(tmp_path):
 def test_validation_rejects_plan_profile_mismatch(tmp_path):
     root = write_minimal_result_root(
         tmp_path,
-        plan_profile="wavlm_base_plus",
+        plan_profile="wavlm_base",
     )
     with pytest.raises(ValueError, match="profile"):
         validate_result_directory(root)
@@ -1675,17 +1676,17 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
 
 def test_multiple_models_do_not_declare_encoder_agreement_figure(tmp_path):
     first = write_scientific_result_root(tmp_path, profile="hubert_base")
-    second = write_scientific_result_root(tmp_path, profile="wavlm_base_plus")
+    second = write_scientific_result_root(tmp_path, profile="wavlm_base")
     tables = build_report_tables(
         [
             load_report_source(validate_result_directory(second)),
             load_report_source(validate_result_directory(first)),
         ]
     )
-    assert tables.models == ("hubert_base", "wavlm_base_plus")
+    assert tables.models == ("hubert_base", "wavlm_base")
     assert tables.omitted_comparisons["encoder_agreement"] == "not_in_first_edition"
     assert tables.planned_figures == _SEVEN_FAMILIES
-    assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base_plus"}
+    assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
 
 # ---------------------------------------------------------------------------
@@ -1700,7 +1701,7 @@ _SECTION_TITLES = (
     "Desempenho ao longo das camadas",
     "Emergência estimada da decisão do detector",
     "Relevância em frequência ao longo das camadas",
-    "Reorganização da decisão final entre camadas consecutivas",
+    "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
     "Limitações atuais e próximos espaços de comparação",
@@ -1711,7 +1712,7 @@ _BUNDLE_TABLES = (
     "conservation_by_layer",
 )
 _REQUIRED_PACKAGES = (
-    r"\usepackage[brazil]{babel}",
+    r"\usepackage[brazilian]{babel}",
     r"\usepackage{booktabs}",
     r"\usepackage{graphicx}",
     r"\usepackage{float}",
@@ -1759,7 +1760,7 @@ def two_model_roots(tmp_path_factory):
     base = tmp_path_factory.mktemp("two_models")
     return (
         write_scientific_result_root(base, profile="hubert_base"),
-        write_scientific_result_root(base, profile="wavlm_base_plus"),
+        write_scientific_result_root(base, profile="wavlm_base"),
     )
 
 
@@ -1987,11 +1988,12 @@ def test_multi_source_bundle_is_independent_of_source_order(
     manifest = json.loads(_read_text(forward / "report_manifest.json"))
     assert [item["profile"] for item in manifest["sources"]] == [
         "hubert_base",
-        "wavlm_base_plus",
+        "wavlm_base",
     ]
     tex = _read_text(forward / "report.tex")
     assert "Estudo de caso" not in tex
-    assert "HuBERT Base" in tex and "WavLM Base+" in tex
+    assert "HuBERT Base" in tex and "WavLM Base" in tex
+    assert "WavLM Base+" not in tex
     assert "não estão disponíveis" in tex
     assert len(_sections(tex)) == 9
 
@@ -2096,7 +2098,7 @@ def test_tex_escapes_text_that_comes_from_the_result_artifacts(
 
     write_report_tex(path, hostile, eng_figures, [eng_loaded])
 
-    tex = _read_text(path)
+    tex = _read_text(path).replace(r"\allowbreak{}", "")
     assert r"real\_a\&50\%" in tex
     assert "real_a&50%" not in tex
     assert r"\texttt{hubert\_base}" in tex
@@ -2104,6 +2106,7 @@ def test_tex_escapes_text_that_comes_from_the_result_artifacts(
 
 
 def test_tex_states_each_conservation_scope_and_limit(eng_tex):
+    eng_tex = eng_tex.replace(r"\allowbreak{}", "")
     for needle in (
         "uma única amostra",
         "bias_zeroed_model_rule_check".replace("_", r"\_"),
@@ -2327,7 +2330,7 @@ def test_official_docs_separate_the_hubert_eng_case_study_from_trilingual_runs(
 
 _CANONICAL_FULL_OUTPUTS = (
     "hubert_base__eng-por-zho__layerwise_xai__full",
-    "wavlm_base_plus__eng-por-zho__layerwise_xai__full",
+    "wavlm_base__eng-por-zho__layerwise_xai__full",
     "wav2vec2_base__eng-por-zho__layerwise_xai__full",
 )
 
@@ -2338,7 +2341,7 @@ def test_official_docs_run_each_profile_in_its_own_canonical_output(relative):
 
     assert "layerwise-suite" not in text
     assert not re.search(
-        r"--profiles\s+hubert_base\s+wavlm_base_plus|--profiles\s+\S+\s+\S+\s+wav2vec2_base",
+        r"--profiles\s+hubert_base\s+wavlm_base|--profiles\s+\S+\s+\S+\s+wav2vec2_base",
         text,
     )
     for name in _CANONICAL_FULL_OUTPUTS:
@@ -2349,14 +2352,14 @@ def test_official_docs_run_each_profile_in_its_own_canonical_output(relative):
     )
     assert full_runs == [
         ("hubert_base", _CANONICAL_FULL_OUTPUTS[0]),
-        ("wavlm_base_plus", _CANONICAL_FULL_OUTPUTS[1]),
+        ("wavlm_base", _CANONICAL_FULL_OUTPUTS[1]),
         ("wav2vec2_base", _CANONICAL_FULL_OUTPUTS[2]),
     ]
     for output in re.findall(r"--output (/mnt/results/\S+)", text):
         directory = output.rsplit("/", 1)[1]
         if directory != "layerwise_xai_report":
             assert re.fullmatch(
-                r"(hubert_base|wavlm_base_plus|wav2vec2_base)__"
+                r"(hubert_base|wavlm_base|wav2vec2_base)__"
                 r"(eng|por|zho|eng-por|eng-zho|por-zho|eng-por-zho)__layerwise_xai__"
                 r"(pilot|full)",
                 directory,
@@ -2610,7 +2613,7 @@ def test_tex_neutralises_unsupported_characters_from_the_artifacts(
 
     write_report_tex(path, hostile, eng_figures, [eng_loaded])
 
-    tex = _read_text(path)
+    tex = _read_text(path).replace(r"\allowbreak{}", "")
     assert _pdflatex_safe(tex)
     assert r"[U+771F]\_a[U+1F4A5]" in tex
 
@@ -2751,11 +2754,11 @@ def test_captions_state_the_model_once(eng_tex, two_model_roots, tmp_path):
     generate_report_bundle([first, second], output)
     tex = _read_text(output / "report.tex")
     for caption in _captions(tex):
-        for model in (r"\texttt{hubert\_base}", r"\texttt{wavlm\_base\_plus}"):
+        for model in (r"\texttt{hubert\_base}", r"\texttt{wavlm\_base}"):
             assert caption.count(model) <= 1, caption
     performance = next(c for c in _captions(tex) if "ROC-AUC (sem limiar" in c)
     assert r"\texttt{hubert\_base}" in performance
-    assert r"\texttt{wavlm\_base\_plus}" in performance
+    assert r"\texttt{wavlm\_base}" in performance
 
 
 # --- M4: Portuguese for emergence values that were not identified ---
@@ -2956,6 +2959,51 @@ def test_stdft_titles_name_the_class_in_portuguese(eng_captured):
     assert not any("synthetic" in t for t in titles)
 
 
+def test_stdft_uses_one_symmetric_log_scale_for_all_panels(
+    eng_tables, tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import SymLogNorm
+
+    payloads = {}
+    for key, payload in eng_tables.stdft_payloads.items():
+        relevance = np.geomspace(
+            1e-5, 0.1, payload["relevance"].size, dtype=np.float64
+        )
+        relevance[::2] *= -1.0
+        relevance = relevance.reshape(payload["relevance"].shape)
+        relevance.flat[0] = 46.0
+        payloads[key] = {**payload, "relevance": relevance}
+    skewed_tables = replace(eng_tables, stdft_payloads=payloads)
+
+    captured = {}
+
+    def capture(fig, name, figures_dir):
+        fig.canvas.draw()
+        meshes = [axis.collections[0] for axis in fig.axes[:6]]
+        captured["norms"] = [mesh.norm for mesh in meshes]
+        captured["colorbar_ticks"] = [
+            label.get_text() for label in fig.axes[-1].get_yticklabels()
+        ]
+        captured["title_box"] = fig._suptitle.get_window_extent(fig._get_renderer())
+        captured["figure_box"] = fig.bbox
+        plt.close(fig)
+        return (f"figures/{name}.png",)
+
+    monkeypatch.setattr(report_module, "_save_report_figure", capture)
+    record = report_module._figure_stdft(plt, skewed_tables, tmp_path)
+
+    assert len(captured["norms"]) == 6
+    assert all(isinstance(norm, SymLogNorm) for norm in captured["norms"])
+    assert len({id(norm) for norm in captured["norms"]}) == 1
+    assert captured["norms"][0].linthresh > 0
+    assert len(captured["colorbar_ticks"]) <= 7
+    assert captured["title_box"].y1 <= captured["figure_box"].y1
+    assert "escala simétrica não linear comum" in record.units
+
+
 def test_conservation_series_labels_are_portuguese(eng_tables):
     series = build_conservation_series(eng_tables)
     for column in ("scope", "limit_label", "value_label"):
@@ -3026,6 +3074,127 @@ def test_bundle_with_24_bands_compiles_a_portuguese_tex(bands24_root, tmp_path):
     generate_report_bundle([bands24_root], output)
     tex = _read_text(output / "report.tex")
     assert "24 bandas mel" in tex
+
+
+def test_trilingual_three_model_figures_facet_models_without_collapsing_axes(
+    eng_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+    import warnings
+
+    models = ("hubert_base", "wav2vec2_base", "wavlm_base")
+    languages = ("eng", "por", "zho")
+
+    def expand(frame):
+        copies = []
+        for model in models:
+            for source in languages:
+                for target in languages:
+                    copy = frame.copy()
+                    copy["model"] = model
+                    copy["source"] = source
+                    copy["target"] = target
+                    if "language" in copy:
+                        copy["language"] = target
+                    copies.append(copy)
+        return pd.concat(copies, ignore_index=True)
+
+    tables = dataclasses.replace(
+        eng_tables,
+        models=models,
+        languages=languages,
+        performance=expand(eng_tables.performance),
+        band_relevance=expand(eng_tables.band_relevance),
+        class_relevance=expand(eng_tables.class_relevance),
+        transitions=expand(eng_tables.transitions),
+    )
+    captured = {}
+
+    def capture(fig, name, figures_dir):
+        with warnings.catch_warnings(record=True) as observed:
+            warnings.simplefilter("always")
+            fig.canvas.draw()
+        renderer = fig._get_renderer()
+        assert not any(
+            "collapsed to zero" in str(item.message) for item in observed
+        )
+        captured[name] = {
+            "axes": [
+                axis
+                for axis in fig.axes
+                if axis.get_visible()
+                and (axis.lines or axis.images)
+            ],
+            "figure_legend_labels": [
+                text.get_text()
+                for legend in fig.legends
+                for text in legend.get_texts()
+            ],
+            "axis_xlabels": [
+                axis.get_xlabel()
+                for axis in fig.axes
+                if axis.get_visible()
+            ],
+            "figure_xlabel": (
+                fig._supxlabel.get_text()
+                if fig._supxlabel is not None
+                else ""
+            ),
+            "figure_xlabel_box": (
+                fig._supxlabel.get_window_extent(renderer)
+                if fig._supxlabel is not None
+                else None
+            ),
+            "legend_boxes": [
+                legend.get_window_extent(renderer) for legend in fig.legends
+            ],
+            "xtick_boxes": [
+                label.get_window_extent(renderer)
+                for axis in fig.axes
+                if axis.get_visible()
+                for label in axis.get_xticklabels()
+                if label.get_visible() and label.get_text()
+            ],
+        }
+        plt.close(fig)
+        return (f"{name}.pdf", f"{name}.png")
+
+    monkeypatch.setattr(report_module, "_save_report_figure", capture)
+    report_module._figure_performance(plt, tables, tmp_path)
+    report_module._figure_fixed_threshold(plt, tables, tmp_path)
+    report_module._figure_heatmap(plt, tables, tmp_path)
+    report_module._figure_class_relevance(plt, tables, tmp_path)
+    report_module._figure_reorganization(plt, tables, tmp_path)
+
+    assert len(captured["performance_by_layer"]["axes"]) == 6
+    assert len(captured["fixed_threshold_by_layer"]["axes"]) == 12
+    assert len(captured["decision_reorganization_by_layer"]["axes"]) == 6
+    for name in (
+        "performance_by_layer",
+        "fixed_threshold_by_layer",
+        "decision_reorganization_by_layer",
+    ):
+        assert len(captured[name]["figure_legend_labels"]) == 9
+        widths = [axis.get_position().width for axis in captured[name]["axes"]]
+        heights = [axis.get_position().height for axis in captured[name]["axes"]]
+        assert min(widths) >= 0.14, (name, widths)
+        assert min(heights) >= 0.12, (name, heights)
+        assert not any(captured[name]["axis_xlabels"])
+        assert captured[name]["figure_xlabel"]
+        xlabel_box = captured[name]["figure_xlabel_box"]
+        assert all(
+            xlabel_box.y0 >= legend_box.y1
+            for legend_box in captured[name]["legend_boxes"]
+        ), name
+        assert xlabel_box.y1 <= min(
+            box.y0 for box in captured[name]["xtick_boxes"]
+        ), name
+
+    assert len(captured["dft_relevance_heatmap"]["axes"]) == 9
+    assert len(captured["class_relevance_by_layer"]["axes"]) == 9
+    for name in ("dft_relevance_heatmap", "class_relevance_by_layer"):
+        assert not any(captured[name]["axis_xlabels"])
+        assert captured[name]["figure_xlabel"]
 
 
 # --- (3) band configuration fails closed and early ---
@@ -3264,10 +3433,222 @@ def test_protocol_escapes_a_range_of_band_counts(tmp_path):
     base = tmp_path / "mixed"
     base.mkdir()
     first = write_scientific_result_root(base, profile="hubert_base", n_bands=8)
-    second = write_scientific_result_root(base, profile="wavlm_base_plus", n_bands=24)
+    second = write_scientific_result_root(base, profile="wavlm_base", n_bands=24)
     output = tmp_path / "report"
     generate_report_bundle([first, second], output)
     tex = _read_text(output / "report.tex")
     assert "8--24 bandas mel" in tex
     assert "\u2013" not in tex
     assert _pdflatex_safe(tex)
+
+
+# --- turn 6: readable sample IDs, tables that fit the page, babel, titles ---
+
+_LONG_COHORT = (
+    ("eng-test-bonafide-asvspoof2024-d_0002785525-963a18614df5", 0),
+    ("eng-test-bonafide-asvspoof2024-d_0002785526-77b0c3a1e9d2", 0),
+    ("eng-test-spoof-asvspoof2024-d_0003785525-5c1e0f77ab34", 1),
+    ("eng-test-spoof-asvspoof2024-d_0003785526-0d9e4b21c6f8", 1),
+)
+_LONG_IDS = tuple(sample_id for sample_id, _ in _LONG_COHORT)
+_MAX_DISPLAYED_ID = 24
+_MAX_TITLE_LINE = 28
+
+
+def test_abbreviate_sample_id_leaves_short_ids_unchanged():
+    assert abbreviate_sample_id("real-a") == "real-a"
+    exact = "x" * _MAX_DISPLAYED_ID
+    assert abbreviate_sample_id(exact) == exact
+
+
+def test_abbreviate_sample_id_keeps_prefix_and_suffix_within_the_limit():
+    long_id = _LONG_IDS[0]
+    short = abbreviate_sample_id(long_id)
+    assert len(short) == _MAX_DISPLAYED_ID
+    assert short.startswith(long_id[:12]) and short.endswith(long_id[-11:])
+    assert "\u2026" in short
+    assert abbreviate_sample_id(long_id) == short
+    assert abbreviate_sample_id(long_id, 10) == long_id[:5] + "\u2026" + long_id[-4:]
+    with pytest.raises(ValueError):
+        abbreviate_sample_id(long_id, 4)
+
+
+def test_display_sample_ids_stay_distinct_even_when_ends_collide():
+    first = "prefix-AAAAAAAAAAAA-first-middle-suffix-ZZZZZZZZZZZ"
+    second = "prefix-AAAAAAAAAAAA-other-middle-suffix-ZZZZZZZZZZZ"
+    mapping = report_module._display_sample_ids([first, second, first])
+    assert set(mapping) == {first, second}
+    assert mapping[first] != mapping[second]
+    assert report_module._display_sample_ids([]) == {}
+
+
+@pytest.fixture(scope="module")
+def long_id_root(tmp_path_factory):
+    overrides = {layer: _LONG_COHORT for layer in range(1, 13)}
+    return write_scientific_result_root(
+        tmp_path_factory.mktemp("long_ids"), cohort_overrides=overrides
+    )
+
+
+@pytest.fixture(scope="module")
+def long_id_tables(long_id_root):
+    return build_report_tables(
+        [load_report_source(validate_result_directory(long_id_root))]
+    )
+
+
+@pytest.fixture(scope="module")
+def long_id_captured(long_id_tables, tmp_path_factory):
+    return _capture_figures(
+        long_id_tables, tmp_path_factory.mktemp("captured_long")
+    )
+
+
+@pytest.fixture(scope="module")
+def long_id_bundle(long_id_root, tmp_path_factory):
+    output = tmp_path_factory.mktemp("bundle_long") / "layerwise_xai_report"
+    generate_report_bundle([long_id_root], output)
+    return output
+
+
+def test_stdft_panel_titles_use_a_short_id_that_fits_the_panel(long_id_captured):
+    _, captured = long_id_captured
+    panel_titles = [
+        text for text in captured["stdft_examples"]["texts"] if "camada" in text and "\n" in text
+    ]
+    assert len(panel_titles) == 6
+    for title in panel_titles:
+        for line in title.split("\n"):
+            assert len(line) <= _MAX_TITLE_LINE, title
+        shown_id = title.split("\n")[1]
+        assert "\u2026" in shown_id
+        assert not any(shown_id == full for full in _LONG_IDS)
+        assert any(
+            shown_id.startswith(full[:12]) and shown_id.endswith(full[-11:])
+            for full in _LONG_IDS
+        ), title
+    titles_by_id = {title.split("\n")[1] for title in panel_titles}
+    assert len(titles_by_id) == 2
+
+
+def test_no_figure_text_carries_a_full_long_sample_id(long_id_captured):
+    _, captured = long_id_captured
+    for name, entry in captured.items():
+        for text in entry["texts"]:
+            for full in _LONG_IDS:
+                assert full not in text, (name, text)
+
+
+def test_conservation_series_scope_uses_the_abbreviated_validation_id(
+    long_id_tables,
+):
+    series = build_conservation_series(long_id_tables)
+    scopes = "\n".join(map(str, series["scope"]))
+    assert _LONG_IDS[0] not in scopes
+    assert abbreviate_sample_id(_LONG_IDS[0]) in scopes
+
+
+def test_full_sample_ids_remain_in_the_provenance_tables(
+    long_id_tables, long_id_bundle
+):
+    assert set(long_id_tables.conservation["validation_sample_id"]) == {
+        _LONG_IDS[0]
+    }
+    assert set(long_id_tables.stdft_examples["sample_id"]) <= set(_LONG_IDS)
+    conservation = pd.read_csv(long_id_bundle / "tables" / "conservation_by_layer.csv")
+    assert set(conservation["validation_sample_id"]) == {_LONG_IDS[0]}
+    stdft = pd.read_csv(long_id_bundle / "tables" / "stdft_examples.csv")
+    assert set(stdft["sample_id"]) == set(_LONG_IDS)
+    manifest_text = _read_text(long_id_bundle / "report_manifest.json")
+    assert "\u2026" not in manifest_text
+
+
+def test_tex_narrative_shows_only_the_short_id_and_points_to_the_csv(
+    long_id_bundle,
+):
+    tex = _read_text(long_id_bundle / "report.tex").replace(r"\allowbreak{}", "")
+    for full in _LONG_IDS:
+        assert full not in tex
+        assert full.replace("_", r"\_") not in tex
+    short = abbreviate_sample_id(_LONG_IDS[0]).replace("\u2026", r"\ldots{}")
+    assert short.replace("_", r"\_") in tex
+    assert "identificadores completos" in tex
+    assert r"tables/conservation\_by\_layer.csv" in tex
+    assert r"tables/stdft\_examples.csv" in tex
+    assert _pdflatex_safe(tex)
+
+
+def test_short_ids_need_no_abbreviation_note(eng_tex):
+    assert "identificadores completos" not in eng_tex
+    assert "\u2026" not in eng_tex
+
+
+def _table_block(tex: str, label: str) -> str:
+    match = re.search(
+        r"\\begin\{table\}.*?\\label\{" + re.escape(label) + r"[^}]*\}.*?\\end\{table\}",
+        tex,
+        re.DOTALL,
+    )
+    assert match, label
+    return match.group(0)
+
+
+@pytest.mark.parametrize("label", ["tab:inventario", "tab:performance-"])
+def test_wide_tables_are_constrained_to_the_text_width(
+    eng_tex, eng_bundle, label
+):
+    source = (
+        eng_tex
+        if label == "tab:inventario"
+        else _read_text(eng_bundle / "tables" / "performance_by_layer.tex")
+    )
+    block = _table_block(source, label)
+    assert r"\small" in block
+    assert re.search(r"\\setlength\{\\tabcolsep\}\{[0-9.]+pt\}", block)
+    assert r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%" in block
+    assert block.index(r"\resizebox") < block.index(r"\begin{tabular}")
+    assert r"\end{tabular}}" in block
+
+
+def test_inventory_header_is_compact(eng_tex):
+    block = _table_block(eng_tex, "tab:inventario")
+    header = next(line for line in block.splitlines() if "Camadas" in line)
+    cells = [cell.strip() for cell in header.rstrip("\\ ").split("&")]
+    assert "Hash da config." in cells
+    assert max(len(cell) for cell in cells) <= 18
+    assert "12 primeiros" not in header
+    assert "12 primeiros caracteres" in block
+
+
+def test_section_title_is_short_and_babel_is_brazilian(eng_tex):
+    assert "Reorganização da decisão entre camadas" in _sections(eng_tex)
+    assert "consecutivas" not in "".join(_sections(eng_tex))
+    assert max(len(title) for title in _sections(eng_tex)) <= 56
+    assert r"\usepackage[brazilian]{babel}" in eng_tex
+    assert "[brazil]" not in eng_tex
+
+
+_PDFLATEX = shutil.which("pdflatex")
+
+
+@pytest.mark.skipif(_PDFLATEX is None, reason="pdflatex is not installed")
+def test_long_id_bundle_compiles_without_significant_overfull_boxes(
+    long_id_bundle, tmp_path
+):
+    workdir = tmp_path / "compile"
+    shutil.copytree(long_id_bundle, workdir)
+    completed = subprocess.run(
+        [_PDFLATEX, "-interaction=nonstopmode", "-halt-on-error", "report.tex"],
+        cwd=workdir,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=600,
+    )
+    log = (workdir / "report.log").read_bytes().decode("utf-8", "replace")
+    assert completed.returncode == 0, log[-2000:]
+    assert (workdir / "report.pdf").is_file()
+    overfull = [
+        float(value)
+        for value in re.findall(r"Overfull \\hbox \(([0-9.]+)pt too wide", log)
+    ]
+    assert [value for value in overfull if value >= 1.0] == [], overfull

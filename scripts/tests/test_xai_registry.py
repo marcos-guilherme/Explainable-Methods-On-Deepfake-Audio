@@ -10,14 +10,19 @@ from brspeech_xai.xai_registry import (
 
 def test_initial_registry_has_three_layerwise_encoders():
     assert get_encoder_spec("hubert_base").checkpoint == "facebook/hubert-base-ls960"
-    assert get_encoder_spec("wavlm_base_plus").n_transformer_layers == 12
+    assert get_encoder_spec("wavlm_base").n_transformer_layers == 12
     assert get_encoder_spec("wav2vec2_base").family == "wav2vec2"
+    assert get_encoder_spec("hubert_base").xai_dtype == "float32"
+    assert get_encoder_spec("wavlm_base").xai_dtype == "float32"
+    assert get_encoder_spec("wav2vec2_base").xai_dtype == "float64"
 
 
 def test_encoder_profiles_have_exact_checkpoints():
     assert get_encoder_spec("hubert_base").checkpoint == "facebook/hubert-base-ls960"
-    assert get_encoder_spec("wavlm_base_plus").checkpoint == "microsoft/wavlm-base-plus"
+    assert get_encoder_spec("wavlm_base").checkpoint == "microsoft/wavlm-base"
     assert get_encoder_spec("wav2vec2_base").checkpoint == "facebook/wav2vec2-base-960h"
+    with pytest.raises(ValueError, match="not registered"):
+        get_encoder_spec("wavlm_base_plus")
 
 
 def test_encoder_profiles_share_layerwise_capabilities():
@@ -30,7 +35,7 @@ def test_encoder_profiles_share_layerwise_capabilities():
             "layer_relevance_hooks",
         }
     )
-    for profile_id in ("hubert_base", "wavlm_base_plus", "wav2vec2_base"):
+    for profile_id in ("hubert_base", "wavlm_base", "wav2vec2_base"):
         spec = get_encoder_spec(profile_id)
         assert spec.layer_indices == tuple(range(1, 13))
         assert spec.capabilities == expected
@@ -50,7 +55,7 @@ def test_primary_methods_are_required_and_dependency_ordered():
 
 def test_resolve_experiment_topologically_sorts_requested_methods():
     resolved = resolve_experiment(
-        "wavlm_base_plus",
+        "wavlm_base",
         ["dft_lrp_frequency", "layerwise_linear_probe", "attnlrp_time"],
     )
     assert [method.method_id for method in resolved.methods] == [
@@ -94,6 +99,7 @@ def test_registry_rejects_missing_capability(monkeypatch):
                 layer_indices=hubert.layer_indices,
                 capabilities=reduced_capabilities,
                 attention_rule=hubert.attention_rule,
+                xai_dtype=hubert.xai_dtype,
             )
         },
     )

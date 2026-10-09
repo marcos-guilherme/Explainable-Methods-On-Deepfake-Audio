@@ -27,6 +27,7 @@ class EncoderExperimentSpec:
     layer_indices: tuple[int, ...]
     capabilities: frozenset[str]
     attention_rule: str
+    xai_dtype: str
 
 
 @dataclass(frozen=True)
@@ -56,10 +57,28 @@ def _build_registries() -> None:
         return
 
     layer_indices = tuple(range(1, 13))
-    for profile_id, checkpoint, family, attention_rule in (
-        ("hubert_base", "facebook/hubert-base-ls960", "hubert", "cp_lrp"),
-        ("wavlm_base_plus", "microsoft/wavlm-base-plus", "wavlm", "cp_lrp"),
-        ("wav2vec2_base", "facebook/wav2vec2-base-960h", "wav2vec2", "cp_lrp"),
+    for profile_id, checkpoint, family, attention_rule, xai_dtype in (
+        (
+            "hubert_base",
+            "facebook/hubert-base-ls960",
+            "hubert",
+            "cp_lrp",
+            "float32",
+        ),
+        (
+            "wavlm_base",
+            "microsoft/wavlm-base",
+            "wavlm",
+            "cp_lrp",
+            "float32",
+        ),
+        (
+            "wav2vec2_base",
+            "facebook/wav2vec2-base-960h",
+            "wav2vec2",
+            "cp_lrp",
+            "float64",
+        ),
     ):
         _register_encoder(
             EncoderExperimentSpec(
@@ -71,6 +90,7 @@ def _build_registries() -> None:
                 layer_indices=layer_indices,
                 capabilities=_LAYERWISE_CAPABILITIES,
                 attention_rule=attention_rule,
+                xai_dtype=xai_dtype,
             )
         )
 

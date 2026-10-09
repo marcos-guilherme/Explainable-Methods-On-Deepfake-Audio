@@ -355,7 +355,7 @@ def test_embedding_cache_key_is_canonical_and_sensitive():
     assert first == second
     assert len(first) == 64
     for field, changed in (
-        ("profile_id", "wavlm_base_plus"),
+        ("profile_id", "wavlm_base"),
         ("checkpoint", "other/checkpoint"),
         ("manifest_sha256", "b" * 64),
         ("language", "por"),
@@ -487,7 +487,7 @@ def test_embedding_cache_rejects_duplicate_or_reordered_sample_ids(tmp_path):
     [
         ("schema_version", 999),
         ("cache_key", "b" * 64),
-        ("profile", "wavlm_base_plus"),
+        ("profile", "wavlm_base"),
         ("checkpoint", "other/checkpoint"),
         ("manifest_sha256", "b" * 64),
         ("language", "por"),

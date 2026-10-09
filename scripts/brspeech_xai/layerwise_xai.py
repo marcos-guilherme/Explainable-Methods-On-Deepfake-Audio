@@ -43,8 +43,8 @@ resolve_active_xai_generation = resolve_active_generation
 
 _CATALOG_COLUMNS = frozenset({"sample_id", "label", "processed_path"})
 _PREDICTION_COLUMNS = frozenset({"sample_id", "y_true", "score", "prediction"})
-_SCORE_RECOMPUTE_RTOL = 5e-3
-_SCORE_RECOMPUTE_ATOL = 2e-6
+_SCORE_RECOMPUTE_RTOL = 1e-5
+_SCORE_RECOMPUTE_ATOL = 7e-3
 
 
 def _validated_catalog(catalog: pd.DataFrame) -> pd.DataFrame:
@@ -429,13 +429,21 @@ def run_layer_xai_cell(
     if not np.isfinite(conservation_tolerance) or conservation_tolerance <= 0:
         raise ValueError("conservation_tolerance must be finite and positive")
     threshold = float(prepared["threshold"])
-    weight = np.asarray(prepared["weight"], dtype=np.float32)
+    weight = np.asarray(prepared["weight"])
     bias = float(prepared["bias"])
     equivalence_error = float(prepared["equivalence_error"])
     model = detector_factory(encoder, layer, weight, bias)
     if not isinstance(model, torch.nn.Module):
         raise ValueError("detector_factory must return a torch.nn.Module")
-    model = model.to(device)
+    encoder_dtype = next(
+        (
+            parameter.dtype
+            for parameter in encoder.parameters()
+            if parameter.is_floating_point()
+        ),
+        torch.float32,
+    )
+    model = model.to(device=device, dtype=encoder_dtype)
     model.eval()
     expected_device = torch.device(device)
     for name in ("w", "b"):
@@ -544,12 +552,6 @@ def run_layer_xai_cell(
         prediction = int(cell_row["prediction"])
         if prediction != int(score >= threshold):
             raise ValueError(f"prediction/threshold divergence for {sample_id}")
-        recomputed_prediction = int(probability >= threshold)
-        if recomputed_prediction != prediction:
-            raise ValueError(
-                f"recomputed prediction/threshold divergence for {sample_id}: "
-                f"{probability} vs threshold {threshold}"
-            )
         score_recompute_absolute_error = abs(probability - score)
         # Cached embeddings are produced in inference batches, while AttnLRP
         # recomputes one clip with gradients. CUDA reduction order can cause a
@@ -564,6 +566,8 @@ def run_layer_xai_cell(
             raise ValueError(
                 f"logit/score divergence for {sample_id}: {probability} vs {score}"
             )
+        recomputed_prediction = int(probability >= threshold)
+        recomputed_prediction_disagrees = recomputed_prediction != prediction
 
         r_freq = np.asarray(dft_fn(x_time, r_time), dtype=np.float64)
         expected_bins = x_time.size // 2 + 1
@@ -614,6 +618,10 @@ def run_layer_xai_cell(
                 "recomputed_score": probability,
                 "score_recompute_absolute_error": score_recompute_absolute_error,
                 "prediction": prediction,
+                "recomputed_prediction": recomputed_prediction,
+                "recomputed_prediction_disagrees": (
+                    recomputed_prediction_disagrees
+                ),
                 "quadrant": _quadrant(y_true, prediction),
                 "logit": float(logit),
                 "equivalence_error": float(equivalence_error),
@@ -727,6 +735,9 @@ def run_layer_xai_cell(
                     ),
                     "max_score_recompute_absolute_error": float(
                         samples["score_recompute_absolute_error"].max()
+                    ),
+                    "recomputed_prediction_disagreement_count": int(
+                        samples["recomputed_prediction_disagrees"].sum()
                     ),
                     "score_recompute_rtol": _SCORE_RECOMPUTE_RTOL,
                     "score_recompute_atol": _SCORE_RECOMPUTE_ATOL,

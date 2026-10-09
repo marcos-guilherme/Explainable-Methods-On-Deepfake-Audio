@@ -79,7 +79,7 @@ make test    # docker compose run --rm deepfake python -m pytest scripts/tests -
 
 A suíte compara onde a decisão de detecção emerge ao longo das camadas e como
 essa trajetória muda entre inglês, português e mandarim. O protocolo principal
-usa três encoders de 12 blocos Transformer — HuBERT Base, WavLM Base+ e
+usa três encoders de 12 blocos Transformer — HuBERT Base, WavLM Base e
 Wav2Vec2 Base — com probes por camada e AttnLRP → DFT-LRP/STDFT-LRP. A auditoria
 clássica H1/H2/H3 é opcional, limitada às diagonais da camada 12 e desligada por
 padrão.
@@ -146,8 +146,8 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --dry-run
 ```
 
-Repita com `--profiles wavlm_base_plus` e o output
-`/mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full`, e com
+Repita com `--profiles wavlm_base` e o output
+`/mnt/results/wavlm_base__eng-por-zho__layerwise_xai__full`, e com
 `--profiles wav2vec2_base` e o output
 `/mnt/results/wav2vec2_base__eng-por-zho__layerwise_xai__full`.
 
@@ -192,8 +192,8 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
   --eng-config scripts/configs/xai-eng-local.yaml \
   --por-config scripts/configs/xai-por-local.yaml \
   --zho-config scripts/configs/xai-zho-local.yaml \
-  --profiles wavlm_base_plus \
-  --output /mnt/results/wavlm_base_plus__eng-por-zho__layerwise_xai__full \
+  --profiles wavlm_base \
+  --output /mnt/results/wavlm_base__eng-por-zho__layerwise_xai__full \
   --xai-per-class 25
 
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
@@ -242,7 +242,7 @@ Todo diretório de resultado que alimenta o relatório layer-wise segue
 <model>__<languages>__layerwise_xai__<scope>
 ```
 
-- `<model>`: perfil do encoder, por exemplo `hubert_base`, `wavlm_base_plus` ou
+- `<model>`: perfil do encoder, por exemplo `hubert_base`, `wavlm_base` ou
   `wav2vec2_base`;
 - `<languages>`: códigos ISO 639-3 na ordem canônica `eng`, `por`, `zho`,
   unidos por `-`. A suíte aceita qualquer subconjunto não vazio de inglês,
@@ -252,7 +252,7 @@ Todo diretório de resultado que alimenta o relatório layer-wise segue
 - `<scope>`: `pilot` ou `full`.
 
 Exemplos: `hubert_base__eng__layerwise_xai__full`,
-`wavlm_base_plus__eng__layerwise_xai__full` e
+`wavlm_base__eng__layerwise_xai__full` e
 `hubert_base__eng-por-zho__layerwise_xai__pilot`. O nome é passado em
 `--output` ao executar a suíte; um diretório já concluído pode ser renomeado
 inteiro, sem alterar seu conteúdo.
@@ -260,7 +260,7 @@ inteiro, sem alterar seu conteúdo.
 O relatório lê **um modelo por diretório**, e é por isso que os comandos acima
 executam cada perfil em seu próprio diretório:
 `hubert_base__eng-por-zho__layerwise_xai__full`,
-`wavlm_base_plus__eng-por-zho__layerwise_xai__full` e
+`wavlm_base__eng-por-zho__layerwise_xai__full` e
 `wav2vec2_base__eng-por-zho__layerwise_xai__full`.
 
 O exemplo HuBERT `hubert_base__eng__layerwise_xai__full` usado abaixo é o estudo

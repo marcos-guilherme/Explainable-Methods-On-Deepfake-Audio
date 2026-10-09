@@ -209,7 +209,7 @@ def test_summary_derives_group_order_independent_bootstrap_seeds_from_identity()
         for layer in (1, 2):
             rows.append(
                 {
-                    "profile": "wavlm_base_plus",
+                    "profile": "wavlm_base",
                     "layer": layer,
                     "source": source,
                     "target": target,

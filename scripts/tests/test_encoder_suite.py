@@ -202,7 +202,7 @@ def test_layerwise_config_validates_all_fields():
     config = LayerwiseXaiConfig()
     assert config.profiles == (
         "hubert_base",
-        "wavlm_base_plus",
+        "wavlm_base",
         "wav2vec2_base",
     )
     for kwargs in (
@@ -285,7 +285,7 @@ def test_dry_run_writes_complete_plan_without_calling_factories(tmp_path):
     factories, tracker = _factories()
     result = _run(
         tmp_path,
-        profiles=("hubert_base", "wavlm_base_plus", "wav2vec2_base"),
+        profiles=("hubert_base", "wavlm_base", "wav2vec2_base"),
         dry_run=True,
         factories=factories,
     )
@@ -740,7 +740,7 @@ def test_cohort_is_suite_level_and_created_once_per_target(tmp_path):
     factories, tracker = _factories()
     _run(
         tmp_path,
-        profiles=("hubert_base", "wavlm_base_plus"),
+        profiles=("hubert_base", "wavlm_base"),
         factories=factories,
     )
     cohorts = [stage for stage in tracker["stages"] if ":cohort:" in stage]
@@ -1152,7 +1152,7 @@ def test_relevance_agreement_joins_by_complete_identity_not_position():
     samples = pd.concat(
         [
             _relevance_samples("hubert_base", ("s0", "s1", "s2", "s3")),
-            _relevance_samples("wavlm_base_plus", ("s3", "s1", "s0", "s2")),
+            _relevance_samples("wavlm_base", ("s3", "s1", "s0", "s2")),
         ],
         ignore_index=True,
     )
@@ -1192,11 +1192,11 @@ def test_relevance_agreement_fails_closed_on_invalid_pairing(failure):
     from brspeech_xai.suite_aggregation import encoder_relevance_agreement
 
     left = _relevance_samples("hubert_base")
-    right = _relevance_samples("wavlm_base_plus", ("s3", "s1", "s0", "s2"))
+    right = _relevance_samples("wavlm_base", ("s3", "s1", "s0", "s2"))
     edges = {
         "eng": {
             "hubert_base": np.asarray([0.0, 100.0, 200.0, 300.0]),
-            "wavlm_base_plus": np.asarray([0.0, 100.0, 200.0, 300.0]),
+            "wavlm_base": np.asarray([0.0, 100.0, 200.0, 300.0]),
         }
     }
     if failure == "duplicate":
@@ -1204,7 +1204,7 @@ def test_relevance_agreement_fails_closed_on_invalid_pairing(failure):
     elif failure == "missing":
         right = right.iloc[:-1].copy()
     elif failure == "edges":
-        edges["eng"]["wavlm_base_plus"] = np.asarray(
+        edges["eng"]["wavlm_base"] = np.asarray(
             [0.0, 50.0, 200.0, 300.0]
         )
     elif failure == "zero_mass":
@@ -1373,7 +1373,7 @@ def test_agreement_rejects_single_sample_class_instead_of_inflating_bins():
     samples = pd.concat(
         [
             _relevance_samples("hubert_base").query("sample_id != 's3'"),
-            _relevance_samples("wavlm_base_plus").query("sample_id != 's3'"),
+            _relevance_samples("wavlm_base").query("sample_id != 's3'"),
         ],
         ignore_index=True,
     )
@@ -2127,7 +2127,7 @@ def test_cross_encoder_agreement_allows_prediction_disagreement():
     from brspeech_xai.suite_aggregation import encoder_relevance_agreement
 
     left = _relevance_samples("hubert_base")
-    right = _relevance_samples("wavlm_base_plus")
+    right = _relevance_samples("wavlm_base")
     right.loc[right["sample_id"].isin(["s1", "s2"]), "prediction"] = [1, 0]
 
     result = encoder_relevance_agreement(

@@ -49,6 +49,22 @@ def test_port_logistic_head_reproduces_oriented_binary_scores_without_mutation()
                 np.testing.assert_array_equal(getattr(current, name), getattr(original, name))
 
 
+def test_port_logistic_head_preserves_requested_float64_precision():
+    head, x = _fit_logistic()
+
+    w, b = port_logistic_head(head, spoof_label=1, dtype=np.float64)
+
+    assert w.dtype == np.float64
+    assert np.asarray(b).dtype == np.float64
+    np.testing.assert_allclose(
+        x @ w + b,
+        head.decision_function(x),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert verify_score_equivalence(head, x, w, b) <= 1e-12
+
+
 def test_port_logistic_head_negates_logit_when_spoof_is_classes_zero():
     head, x = _fit_logistic(labels=(-1, 1))
 
@@ -281,6 +297,26 @@ def test_relevance_for_clip_returns_effective_input_relevance_and_clears_grads()
     assert model.encoder.forward_calls[-1][0] is not None
 
 
+def test_relevance_for_clip_matches_double_precision_detector_dtype():
+    model = SSLDetectorAD(
+        _TinyEncoder(hidden_dim=2),
+        1,
+        np.array([0.7, -0.2]),
+        0.1,
+    ).double()
+
+    x_time, r_time, logit = relevance_for_clip(
+        model,
+        _Processor([[0.25, -0.5, 0.75]]),
+        np.array([0.25, -0.5, 0.75]),
+        "cpu",
+    )
+
+    assert x_time.dtype == np.float64
+    assert r_time.dtype == np.float64
+    assert np.isfinite(logit)
+
+
 @pytest.mark.parametrize(
     "wav",
     [np.array([]), np.array([[1.0]]), np.array([np.nan])],
@@ -354,6 +390,34 @@ def test_conservation_certificate_uses_mixed_absolute_relative_bound(
     )
     assert diagnostics.bound == pytest.approx(5e-3 + 1e-3 * 0.1)
     assert diagnostics.accepted is accepted
+
+
+def test_default_conservation_bound_accepts_observed_small_logit_error(
+    monkeypatch,
+):
+    encoder = _HomogeneousEncoder()
+    model = SSLDetectorAD(encoder, 1, np.array([1.25]), 0.4)
+    monkeypatch.setattr(
+        lrp_detector,
+        "relevance_for_clip",
+        lambda *args: (
+            np.ones(1, dtype=np.float32),
+            np.asarray([0.22783050751587645], dtype=np.float64),
+            0.636154,
+        ),
+    )
+
+    diagnostics = conservation_certificate(
+        model,
+        _Processor([[1.0]]),
+        [np.array([1.0])],
+        "cpu",
+        b=0.4,
+    )
+
+    assert diagnostics.absolute_error == pytest.approx(0.008323492484123562)
+    assert diagnostics.absolute_tolerance == pytest.approx(0.015)
+    assert diagnostics.accepted
 
 
 def test_conservation_certificate_restores_bias_after_exception():

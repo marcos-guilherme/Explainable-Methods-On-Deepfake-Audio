@@ -23,7 +23,7 @@ from brspeech_xai.layerwise_paths import (
 
 
 TEST_LAYERS = (1, 2, 3)
-TEST_PROFILES = ("hubert_base", "wavlm_base_plus", "wav2vec2_base")
+TEST_PROFILES = ("hubert_base", "wavlm_base", "wav2vec2_base")
 
 
 def _write_smoke_input(root: Path, language: str) -> Path:

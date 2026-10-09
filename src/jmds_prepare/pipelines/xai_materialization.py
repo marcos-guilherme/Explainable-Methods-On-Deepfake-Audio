@@ -30,6 +30,7 @@ _IDENTITY_DIGEST_LENGTH = 12
 _MAX_SAMPLE_ID_LENGTH = 200
 ArchiveSpecKey = tuple[str, str]
 ExtractedPathKey = tuple[str, str, str]
+ArchiveStorageIdentity = tuple[ArchiveKind, tuple[Path, ...]]
 
 # CORAA train materialization requires UnRAR (or UnRAR.exe) and all five
 # multi-volume parts from the pinned CORAA v1.1 catalog:
@@ -214,23 +215,34 @@ def preflight_materialization(
     """Validate every selected candidate before any cache write occurs."""
     issues: list[str] = []
     inventories: dict[ArchiveSpecKey, ArchiveInventory] = {}
+    inventories_by_storage: dict[ArchiveStorageIdentity, ArchiveInventory] = {}
+    visited_storage: set[ArchiveStorageIdentity] = set()
 
-    for key in _required_archive_keys(selected):
+    for key in sorted(_required_archive_keys(selected)):
         spec = archive_specs.get(key)
         if spec is None:
             issues.append(f"Missing ArchiveSpec for {key[0]}/{key[1]}")
             continue
+        storage_identity = _archive_storage_identity(spec)
+        if storage_identity in visited_storage:
+            inventory = inventories_by_storage.get(storage_identity)
+            if inventory is not None:
+                inventories[key] = inventory
+            continue
+        visited_storage.add(storage_identity)
         try:
             _validate_archive_volumes(spec)
         except PreflightError as exc:
             issues.append(str(exc))
             continue
         try:
-            inventories[key] = inventory_archive_spec(
+            inventory = inventory_archive_spec(
                 spec,
                 archive_runner=archive_runner,
                 unrar_executable=unrar_executable,
             )
+            inventories[key] = inventory
+            inventories_by_storage[storage_identity] = inventory
         except PreflightError as exc:
             issues.append(str(exc))
         except (OSError, subprocess.SubprocessError, tarfile.TarError, zipfile.BadZipFile) as exc:
@@ -512,23 +524,30 @@ def _batch_extract_archives(
     archive_runner: SubprocessRunner,
     unrar_executable: str,
 ) -> dict[ExtractedPathKey, Path]:
-    grouped_refs: dict[ArchiveSpecKey, list[str]] = {}
+    grouped_refs: dict[
+        ArchiveStorageIdentity, list[tuple[ArchiveSpecKey, str]]
+    ] = {}
     for item in ordered:
         candidate = item.candidate
         if candidate.materialization_mode != "extract_archive":
             continue
         key = (candidate.corpus, candidate.native_split)
-        grouped_refs.setdefault(key, []).append(candidate.original_ref)
+        storage_identity = _archive_storage_identity(archive_specs[key])
+        grouped_refs.setdefault(storage_identity, []).append(
+            (key, candidate.original_ref)
+        )
 
     extracted: dict[ExtractedPathKey, Path] = {}
-    for key, refs in grouped_refs.items():
-        spec = archive_specs[key]
-        inventory = report.archive_inventories[key]
+    for keyed_refs in grouped_refs.values():
+        representative_key = keyed_refs[0][0]
+        spec = archive_specs[representative_key]
+        inventory = report.archive_inventories[representative_key]
+        refs = list(dict.fromkeys(ref for _, ref in keyed_refs))
         staging_root = (
             run_staging
             / "archives"
-            / slugify_token(key[0])
-            / slugify_token(key[1])
+            / slugify_token(representative_key[0])
+            / slugify_token(spec.archive_path.stem)
         )
         batch = _extract_archive_batch(
             spec,
@@ -538,7 +557,8 @@ def _batch_extract_archives(
             archive_runner=archive_runner,
             unrar_executable=unrar_executable,
         )
-        for ref, path in batch.items():
+        for key, ref in keyed_refs:
+            path = batch[ref]
             extracted[(key[0], key[1], ref)] = path
     return extracted
 
@@ -710,10 +730,13 @@ def _extract_tar_members_batch(
     if not missing:
         return destinations
 
-    with tarfile.open(archive_path, mode="r:*") as archive:
-        for member_name in missing:
-            member = archive.getmember(member_name)
-            if not member.isreg() or _is_unsafe_member_path(member.name):
+    pending = set(missing)
+    with tarfile.open(archive_path, mode="r|*") as archive:
+        for member in archive:
+            member_name = member.name
+            if member_name not in pending:
+                continue
+            if not member.isreg() or _is_unsafe_member_path(member_name):
                 raise ArchiveResolutionError(
                     f"Unsafe or non-regular member: {member_name}"
                 )
@@ -735,6 +758,9 @@ def _extract_tar_members_batch(
             finally:
                 if temporary_path is not None:
                     temporary_path.unlink(missing_ok=True)
+            pending.remove(member_name)
+            if not pending:
+                break
 
     for member_name in member_names:
         destination = destinations[member_name]
@@ -1062,6 +1088,13 @@ def _required_archive_keys(selected: Sequence[SelectedCandidate]) -> set[Archive
         for item in selected
         if item.candidate.materialization_mode == "extract_archive"
     }
+
+
+def _archive_storage_identity(spec: ArchiveSpec) -> ArchiveStorageIdentity:
+    return (
+        spec.kind,
+        tuple(path.resolve() for path in spec.volume_paths),
+    )
 
 
 def _canonical_materialization_order(

@@ -89,6 +89,14 @@ def stop_gradient(x: torch.Tensor) -> torch.Tensor:
     return x.detach()
 
 
+def _preserve_forward_value(
+    reference: torch.Tensor,
+    custom_gradient: torch.Tensor,
+) -> torch.Tensor:
+    """Use the exact reference value while keeping the custom backward graph."""
+    return reference.detach() + (custom_gradient - custom_gradient.detach())
+
+
 class _ScaleGradient(Function):
     """Escala SÓ o backward por ``factor`` (>0), mantendo o forward idêntico.
 
@@ -143,6 +151,11 @@ def _identity_layer_norm_forward(self, x: torch.Tensor) -> torch.Tensor:
         y = y * self.weight
     if self.bias is not None:
         y = y + self.bias
+    original_forward = getattr(self, "_attnlrp_original_forward", None)
+    if original_forward is not None:
+        with torch.no_grad():
+            reference = original_forward(x)
+        y = _preserve_forward_value(reference, y)
     return y
 
 
@@ -166,6 +179,11 @@ def _identity_group_norm_forward(self, x: torch.Tensor) -> torch.Tensor:
     if self.affine:
         shape = (1, c) + (1,) * (x.dim() - 2)
         y = y * self.weight.view(shape) + self.bias.view(shape)
+    original_forward = getattr(self, "_attnlrp_original_forward", None)
+    if original_forward is not None:
+        with torch.no_grad():
+            reference = original_forward(x)
+        y = _preserve_forward_value(reference, y)
     return y
 
 
@@ -202,6 +220,18 @@ def _attention_forward_cp(self, hidden_states, key_value_states=None, attention_
         attn_weights = attn_weights + attention_mask
     attn_weights = torch.softmax(attn_weights, dim=-1)
     out, weights = _finish_attention(self, input_shape, attn_weights, value)
+    original_forward = getattr(self, "_attnlrp_original_forward", None)
+    if original_forward is not None:
+        with torch.no_grad():
+            reference = original_forward(
+                hidden_states,
+                key_value_states=key_value_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+        out = _preserve_forward_value(reference[0], out)
+        weights = reference[1]
     return out, weights, None
 
 
@@ -219,6 +249,18 @@ def _attention_forward_uniform(self, hidden_states, key_value_states=None, atten
         attn_weights = attn_weights + attention_mask
     attn_weights = torch.softmax(attn_weights, dim=-1)
     out, weights = _finish_attention(self, input_shape, attn_weights, value)
+    original_forward = getattr(self, "_attnlrp_original_forward", None)
+    if original_forward is not None:
+        with torch.no_grad():
+            reference = original_forward(
+                hidden_states,
+                key_value_states=key_value_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+        out = _preserve_forward_value(reference[0], out)
+        weights = reference[1]
     return out, weights, None
 
 
@@ -268,7 +310,21 @@ def _attention_forward_cp_wavlm(self, hidden_states, attention_mask=None, positi
     attn = torch.softmax(attn, dim=-1)
     out = torch.matmul(attn, v).permute(0, 2, 1, 3).reshape(bsz, tgt_len, self.embed_dim)
     out = torch.nn.functional.linear(out, self.out_proj.weight, self.out_proj.bias)
-    return out, (attn if output_attentions else None), position_bias
+    weights = attn if output_attentions else None
+    original_forward = getattr(self, "_attnlrp_original_forward", None)
+    if original_forward is not None:
+        with torch.no_grad():
+            reference = original_forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_bias=position_bias,
+                output_attentions=output_attentions,
+                index=index,
+            )
+        out = _preserve_forward_value(reference[0], out)
+        weights = reference[1]
+        position_bias = reference[2]
+    return out, weights, position_bias
 
 
 def _in_feature_extractor(name: str) -> bool:
@@ -358,6 +414,8 @@ def patch_ssl_encoder_for_attnlrp(model: torch.nn.Module,
 
     counts = dict.fromkeys(_PATCH_CATEGORIES, 0)
     for name, module, category in _attnlrp_modules(model):
+        if type(module).forward is not torch.nn.Module.forward:
+            module._attnlrp_original_forward = module.forward
         if category == "layer_norm":
             module._lrp_norm_stab = _kappa_for(name)
             module.forward = types.MethodType(_identity_layer_norm_forward, module)

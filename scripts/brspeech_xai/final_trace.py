@@ -21,6 +21,25 @@ from .lrp_detector import SSLDetectorAD, apply_head_to_hidden, port_logistic_hea
 from .xai_registry import get_encoder_spec
 
 
+def _xai_torch_dtype(spec: object) -> torch.dtype:
+    dtype_name = str(getattr(spec, "xai_dtype", "float32"))
+    try:
+        return {"float32": torch.float32, "float64": torch.float64}[dtype_name]
+    except KeyError as exc:
+        raise ValueError(f"unsupported XAI dtype: {dtype_name!r}") from exc
+
+
+def _port_head_for_dtype(
+    port_head_fn: Callable,
+    head: object,
+    xai_dtype: torch.dtype,
+) -> tuple[np.ndarray, float]:
+    if port_head_fn is port_logistic_head:
+        numpy_dtype = np.float64 if xai_dtype == torch.float64 else np.float32
+        return port_head_fn(head, dtype=numpy_dtype)
+    return port_head_fn(head)
+
+
 @dataclass(frozen=True)
 class FinalDecisionTrace:
     """Métricas de uma amostra para a decisão definida pela head final."""
@@ -435,19 +454,22 @@ def run_final_decision_trace_cell(
     spec = encoder_spec_fn(profile)
     capabilities = frozenset(getattr(spec, "capabilities", ()))
     attention_rule = str(getattr(spec, "attention_rule", ""))
+    xai_dtype = _xai_torch_dtype(spec)
     ensure_ssl_encoder_attnlrp(
         encoder,
         attention_rule=attention_rule,
         capabilities=capabilities,
         patch_fn=patch_encoder_fn,
     )
-    encoder.to(device)
+    encoder.to(device=device, dtype=xai_dtype)
     encoder.eval()
     head = head_loader(paths.probe(profile, expected_layers, source))
-    weight, bias = port_head_fn(head)
+    weight, bias = _port_head_for_dtype(
+        port_head_fn, head, xai_dtype
+    )
     model = SSLDetectorAD(
         encoder, expected_layers, np.asarray(weight), float(bias)
-    ).to(device)
+    ).to(device=device, dtype=xai_dtype)
     model.eval()
 
     traces: list[FinalDecisionTrace] = []
@@ -477,7 +499,9 @@ def run_final_decision_trace_cell(
         )
         if not isinstance(processed, Mapping) or "input_values" not in processed:
             raise ValueError("processor must return input_values")
-        input_values = torch.as_tensor(processed["input_values"]).to(device)
+        input_values = torch.as_tensor(processed["input_values"]).to(
+            device=device, dtype=xai_dtype
+        )
         attention_mask = processed.get("attention_mask")
         if attention_mask is not None:
             attention_mask = torch.as_tensor(attention_mask).to(device)
@@ -592,6 +616,7 @@ def run_final_decision_trace(
         spec = encoder_spec_fn(profile)
         capabilities = frozenset(getattr(spec, "capabilities", ()))
         attention_rule = str(getattr(spec, "attention_rule", ""))
+        xai_dtype = _xai_torch_dtype(spec)
         encoder, processor = encoder_factory(profile)
         if not isinstance(encoder, torch.nn.Module):
             raise ValueError("encoder_factory must return a torch encoder")
@@ -601,16 +626,18 @@ def run_final_decision_trace(
             capabilities=capabilities,
             patch_fn=patch_encoder_fn,
         )
-        encoder.to(device)
+        encoder.to(device=device, dtype=xai_dtype)
         encoder.eval()
 
         profile_traces: list[FinalDecisionTrace] = []
         for source in sources:
             head = head_loader(paths.probe(profile, expected_layers, source))
-            weight, bias = port_head_fn(head)
+            weight, bias = _port_head_for_dtype(
+                port_head_fn, head, xai_dtype
+            )
             model = SSLDetectorAD(
                 encoder, expected_layers, np.asarray(weight), float(bias)
-            ).to(device)
+            ).to(device=device, dtype=xai_dtype)
             model.eval()
             for target in targets:
                 for row in persisted_cohorts[target].itertuples(index=False):
@@ -641,7 +668,9 @@ def run_final_decision_trace(
                     )
                     if not isinstance(processed, Mapping) or "input_values" not in processed:
                         raise ValueError("processor must return input_values")
-                    input_values = torch.as_tensor(processed["input_values"]).to(device)
+                    input_values = torch.as_tensor(processed["input_values"]).to(
+                        device=device, dtype=xai_dtype
+                    )
                     attention_mask = processed.get("attention_mask")
                     if attention_mask is not None:
                         attention_mask = torch.as_tensor(attention_mask).to(device)

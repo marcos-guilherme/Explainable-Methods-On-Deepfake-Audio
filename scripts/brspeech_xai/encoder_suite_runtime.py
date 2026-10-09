@@ -335,6 +335,19 @@ class ProductionStageAdapter:
         from .xai_registry import get_encoder_spec
 
         spec = get_encoder_spec(profile)
+        import torch
+
+        xai_dtypes = {
+            "float32": torch.float32,
+            "float64": torch.float64,
+        }
+        try:
+            xai_dtype = xai_dtypes[spec.xai_dtype]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported XAI dtype for {profile}: {spec.xai_dtype!r}"
+            ) from exc
+        encoder._model.to(device=encoder.device, dtype=xai_dtype)
         ensure_ssl_encoder_attnlrp(
             encoder._model,
             attention_rule=spec.attention_rule,
@@ -353,6 +366,14 @@ class ProductionStageAdapter:
             target_catalog,
             tuple(cohort["sample_id"]),
         )
+        port_logistic_head = __import__(
+            "brspeech_xai.lrp_detector", fromlist=["port_logistic_head"]
+        ).port_logistic_head
+        verify_score_equivalence = __import__(
+            "brspeech_xai.lrp_detector", fromlist=["verify_score_equivalence"]
+        ).verify_score_equivalence
+        head_dtype = np.float64 if xai_dtype == torch.float64 else np.float32
+        equivalence_atol = 2e-5 if xai_dtype == torch.float64 else 1e-6
         prepared = _prepare_cell(
             profile=profile,
             layer=layer,
@@ -367,12 +388,18 @@ class ProductionStageAdapter:
             threshold_loader=__import__(
                 "brspeech_xai.layerwise_xai", fromlist=["_load_threshold"]
             )._load_threshold,
-            port_head_fn=__import__(
-                "brspeech_xai.lrp_detector", fromlist=["port_logistic_head"]
-            ).port_logistic_head,
-            verify_equivalence_fn=__import__(
-                "brspeech_xai.lrp_detector", fromlist=["verify_score_equivalence"]
-            ).verify_score_equivalence,
+            port_head_fn=lambda head: port_logistic_head(
+                head, dtype=head_dtype
+            ),
+            verify_equivalence_fn=lambda head, embeddings, weight, bias: (
+                verify_score_equivalence(
+                    head,
+                    embeddings,
+                    weight,
+                    bias,
+                    atol=equivalence_atol,
+                )
+            ),
             score_head_fn=__import__(
                 "brspeech_xai.adaptation", fromlist=["score_head"]
             ).score_head,

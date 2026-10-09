@@ -1521,8 +1521,63 @@ def _cells(tables: ReportTables) -> tuple[tuple[str, str, str], ...]:
     return tuple(frame.itertuples(index=False, name=None))
 
 
+SAMPLE_ID_DISPLAY_LENGTH = 24
+
+
+def abbreviate_sample_id(sample_id: object, max_length: int = SAMPLE_ID_DISPLAY_LENGTH) -> str:
+    """Short, deterministic display form that keeps the start and the end.
+
+    IDs up to `max_length` characters are returned unchanged. Longer ones keep
+    the first and last characters around a single ellipsis, so the dataset
+    prefix and the hash-like suffix both stay recognisable. Tables and
+    manifests always hold the full ID; this form is for titles and prose.
+    """
+    text = str(sample_id)
+    if max_length < 5:
+        raise ValueError("max_length must be at least 5")
+    if len(text) <= max_length:
+        return text
+    keep = max_length - 1
+    head = (keep + 1) // 2
+    tail = keep - head
+    return f"{text[:head]}\u2026{text[len(text) - tail:]}"
+
+
+def _display_sample_ids(sample_ids: Sequence[object]) -> dict[str, str]:
+    """Abbreviate IDs, lengthening only as much as needed to keep them distinct."""
+    unique = sorted({str(item) for item in sample_ids})
+    if not unique:
+        return {}
+    longest = max(len(item) for item in unique)
+    limit = SAMPLE_ID_DISPLAY_LENGTH
+    while True:
+        mapping = {item: abbreviate_sample_id(item, limit) for item in unique}
+        if len(set(mapping.values())) == len(unique) or limit >= longest:
+            return mapping
+        limit += 4
+
+
 def _cell_label(cell: tuple[str, str, str]) -> str:
     return f"{cell[0]}, {cell[1]}\u2192{cell[2]}"
+
+
+def _pair_label(cell: tuple[str, str, str]) -> str:
+    return f"{cell[1]}\u2192{cell[2]}"
+
+
+def _cells_for_model(
+    tables: ReportTables, model: str
+) -> tuple[tuple[str, str, str], ...]:
+    return tuple(cell for cell in _cells(tables) if cell[0] == model)
+
+
+def _summary_cells(
+    tables: ReportTables,
+) -> tuple[tuple[str, str, str], ...]:
+    cells = _cells(tables)
+    if len(cells) <= 9:
+        return cells
+    return tuple(cell for cell in cells if cell[1] == cell[2])
 
 
 def _cell_rows(frame: pd.DataFrame, cell: tuple[str, str, str]) -> pd.DataFrame:
@@ -1580,6 +1635,7 @@ _LAYER_AXIS_LABEL = "Camada do encoder (índice do bloco Transformer)"
 _CLASS_NAMES_PT = {0: "real", 1: "sintético"}
 _MIN_BAND_TICK_SPACING_IN = 0.34
 _HEATMAP_AXIS_SHARE = 0.55
+_MULTI_PANEL_XLABEL_Y = 0.115
 
 
 def _layer_axis(ax) -> None:
@@ -1612,6 +1668,58 @@ def _line_panels(
     shape: tuple[int, int],
     height: float,
 ):
+    if len(tables.models) > 1:
+        fig, axes = plt.subplots(
+            len(tables.models),
+            len(panels),
+            figsize=(_FIGURE_WIDTH, 2.25 * len(tables.models) + 1.0),
+            sharex=True,
+            squeeze=False,
+            constrained_layout=False,
+        )
+        for row, model in enumerate(tables.models):
+            for column, (metric, ylabel, scale) in enumerate(panels):
+                ax = axes[row, column]
+                for cell in _cells_for_model(tables, model):
+                    rows = _cell_rows(tables.performance, cell)
+                    ax.plot(
+                        rows["layer"],
+                        rows[metric] * scale,
+                        marker="o",
+                        markersize=2.5,
+                        linewidth=1.0,
+                        label=_pair_label(cell),
+                    )
+                if row == 0:
+                    ax.set_title(ylabel, fontsize=8)
+                if column == 0:
+                    ax.set_ylabel(f"{model}\n{ylabel}", fontsize=7)
+                _layer_axis(ax)
+        fig.supxlabel(
+            _LAYER_AXIS_LABEL,
+            fontsize=8,
+            y=_MULTI_PANEL_XLABEL_Y,
+        )
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(
+            handles,
+            labels,
+            loc="outside lower center",
+            ncol=3,
+            fontsize=6.5,
+            title="Idioma (treino\u2192avaliação)",
+            title_fontsize=7,
+        )
+        fig.subplots_adjust(
+            left=0.12,
+            right=0.98,
+            top=0.90,
+            bottom=0.24,
+            hspace=0.28,
+            wspace=0.30,
+        )
+        return fig, axes.ravel()
+
     fig, axes = plt.subplots(
         *shape,
         figsize=(_FIGURE_WIDTH, height),
@@ -1650,8 +1758,16 @@ def _figure_performance(plt, tables, figures_dir):
         (2, 1),
         4.6,
     )
-    axes[0].axhline(0.5, color="0.4", linestyle="--", linewidth=0.8, label="acaso (0,5)")
-    axes[0].legend(loc="best", ncol=1)
+    for index in range(0, len(axes), 2):
+        axes[index].axhline(
+            0.5,
+            color="0.4",
+            linestyle="--",
+            linewidth=0.8,
+            label="acaso (0,5)" if len(tables.models) == 1 else None,
+        )
+    if len(tables.models) == 1:
+        axes[0].legend(loc="best", ncol=1)
     record = _record(
         tables,
         name,
@@ -1685,8 +1801,10 @@ def _figure_fixed_threshold(plt, tables, figures_dir):
         (2, 2),
         4.8,
     )
-    axes[1].axhline(0.0, color="0.4", linestyle="--", linewidth=0.8)
-    axes[0].legend(loc="best")
+    for index in range(1, len(axes), 4):
+        axes[index].axhline(0.0, color="0.4", linestyle="--", linewidth=0.8)
+    if len(tables.models) == 1:
+        axes[0].legend(loc="best")
     record = _record(
         tables,
         name,
@@ -1733,7 +1851,7 @@ def _style_heatmap_axis(ax, labels: Sequence[str], columns: int) -> None:
 
 def _figure_heatmap(plt, tables, figures_dir):
     name = "dft_relevance_heatmap"
-    cells = _cells(tables)
+    cells = _summary_cells(tables)
     nrows, ncols = _grid_shape(len(cells))
     fig, axes = plt.subplots(
         nrows,
@@ -1757,6 +1875,12 @@ def _figure_heatmap(plt, tables, figures_dir):
         ax.set_ylabel("Camada do encoder")
     for ax in axes.ravel()[len(cells):]:
         ax.set_visible(False)
+    if len(tables.models) > 1:
+        for ax in axes.ravel():
+            ax.set_xlabel("")
+        fig.supxlabel(
+            "Centro da banda (Hz, espaçamento mel)", fontsize=8
+        )
     fig.colorbar(
         image,
         ax=axes.ravel().tolist(),
@@ -1781,6 +1905,7 @@ def _figure_heatmap(plt, tables, figures_dir):
             "sobre as bandas); centro da banda em Hz"
         ),
         transformation="relevância AttnLRP \u2192 DFT \u2192 |R(f)| agregada em bandas de espaçamento mel \u2192 normalização por amostra \u2192 média sobre a coorte fixa",
+        cells=cells,
     )
     fig.suptitle(record.title, fontsize=9)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
@@ -1788,7 +1913,80 @@ def _figure_heatmap(plt, tables, figures_dir):
 
 def _figure_class_relevance(plt, tables, figures_dir):
     name = "class_relevance_by_layer"
-    cells = _cells(tables)
+    cells = _summary_cells(tables)
+    if len(tables.models) > 1:
+        nrows, ncols = _grid_shape(len(cells))
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(_FIGURE_WIDTH, 2.45 * nrows + 0.7),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        frame = tables.class_relevance
+        frame = frame[
+            (frame["grouping"] == "y_true")
+            & (frame["measure"] == "absolute_normalized")
+        ]
+        prepared = {}
+        for cell in cells:
+            rows = _cell_rows(frame, cell)
+            real, labels = _band_matrix(rows[rows["group"] == 0])
+            synthetic, _ = _band_matrix(rows[rows["group"] == 1])
+            prepared[cell] = (synthetic - real, labels)
+        limit = (
+            max(float(np.abs(matrix).max()) for matrix, _ in prepared.values())
+            or 1.0
+        )
+        image = None
+        for ax, cell in zip(axes.ravel(), cells):
+            matrix, labels = prepared[cell]
+            image = ax.imshow(
+                matrix,
+                origin="lower",
+                aspect="auto",
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+            )
+            _style_heatmap_axis(ax, labels, ncols)
+            ax.set_title(_cell_label(cell), fontsize=7)
+            ax.set_xlabel("Centro da banda (Hz)")
+            ax.set_ylabel("Camada do encoder")
+        for ax in axes.ravel()[len(cells):]:
+            ax.set_visible(False)
+        for ax in axes.ravel():
+            ax.set_xlabel("")
+        fig.supxlabel("Centro da banda (Hz)", fontsize=8)
+        fig.colorbar(
+            image,
+            ax=axes.ravel().tolist(),
+            shrink=0.85,
+            label="Sintético \u2212 real\n(fração da massa em banda)",
+        )
+        band_range = _band_range_text(tables)
+        record = _record(
+            tables,
+            name,
+            (),
+            heading="Contraste de relevância entre amostras sintéticas e reais",
+            description=(
+                "Diferença entre a relevância DFT absoluta normalizada média das "
+                "amostras sintéticas e reais nas avaliações dentro da própria "
+                f"língua; a massa em banda de cada amostra ({band_range}) soma 1."
+            ),
+            metric="diferença sintético \u2212 real da relevância DFT absoluta normalizada média por banda",
+            units=(
+                f"pontos de fração da massa em banda ({band_range}; adimensional)"
+            ),
+            transformation="AttnLRP \u2192 DFT \u2192 bandas mel normalizadas em valor absoluto \u2192 média por classe verdadeira \u2192 sintético \u2212 real",
+            cells=cells,
+        )
+        fig.suptitle(record.title, fontsize=9)
+        return _with_files(
+            record, _save_report_figure(fig, name, figures_dir)
+        )
+
     fig, axes = plt.subplots(
         len(cells),
         3,
@@ -1853,15 +2051,94 @@ def _figure_class_relevance(plt, tables, figures_dir):
 
 def _figure_reorganization(plt, tables, figures_dir):
     name = "decision_reorganization_by_layer"
+    panels = (
+        ("similarity", "Similaridade cosseno\n(adimensional)"),
+        ("normalized_l1_change", "Variação L1 normalizada\n(adimensional, 0\u20132)"),
+    )
+    if len(tables.models) > 1:
+        fig, axes = plt.subplots(
+            len(tables.models),
+            len(panels),
+            figsize=(_FIGURE_WIDTH, 2.25 * len(tables.models) + 1.0),
+            sharex=True,
+            squeeze=False,
+            constrained_layout=False,
+        )
+        for row, model in enumerate(tables.models):
+            for column, (metric, ylabel) in enumerate(panels):
+                ax = axes[row, column]
+                for cell in _cells_for_model(tables, model):
+                    rows = _cell_rows(tables.transitions, cell)
+                    x = rows["current_layer"].to_numpy()
+                    line = ax.plot(
+                        x,
+                        rows[f"{metric}_mean"],
+                        marker="o",
+                        markersize=2.5,
+                        linewidth=1.0,
+                        label=_pair_label(cell),
+                    )[0]
+                    ax.fill_between(
+                        x,
+                        rows[f"{metric}_ci_low"],
+                        rows[f"{metric}_ci_high"],
+                        color=line.get_color(),
+                        alpha=0.15,
+                        linewidth=0,
+                    )
+                if row == 0:
+                    ax.set_title(ylabel, fontsize=8)
+                if column == 0:
+                    ax.set_ylabel(f"{model}\n{ylabel}", fontsize=7)
+        labels = _cell_rows(
+            tables.transitions, _cells(tables)[0]
+        )["transition"].tolist()
+        for ax in axes[-1]:
+            ax.set_xticks(range(2, 13))
+            ax.set_xticklabels(labels, rotation=45, ha="right")
+        fig.supxlabel(
+            "Transição entre camadas adjacentes (anterior \u2192 atual)",
+            fontsize=8,
+            y=_MULTI_PANEL_XLABEL_Y,
+        )
+        handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(
+            handles,
+            legend_labels,
+            loc="outside lower center",
+            ncol=3,
+            fontsize=6.5,
+            title="Idioma (treino\u2192avaliação)",
+            title_fontsize=7,
+        )
+        fig.subplots_adjust(
+            left=0.12,
+            right=0.98,
+            top=0.90,
+            bottom=0.24,
+            hspace=0.28,
+            wspace=0.20,
+        )
+        record = _record(
+            tables,
+            name,
+            (),
+            heading="Reorganização da relevância da decisão final entre camadas",
+            description="Média (com intervalo normal de 95% sobre as amostras) da similaridade e da variação L1 normalizada da massa temporal de relevância entre camadas adjacentes para a decisão final.",
+            metric="similaridade cosseno e variação L1 normalizada da massa temporal de relevância entre camadas adjacentes",
+            units="adimensional (cosseno 0\u20131 para massa não negativa; L1 0\u20132)",
+            transformation="relevância AttnLRP com sinal do logit final \u2192 massa temporal absoluta por camada \u2192 normalização para massa unitária \u2192 comparação entre camadas adjacentes, média \u00b1 1,96 EPM sobre as amostras",
+        )
+        fig.suptitle(record.title, fontsize=9)
+        return _with_files(
+            record, _save_report_figure(fig, name, figures_dir)
+        )
+
     fig, axes = plt.subplots(
         2, 1, figsize=(_FIGURE_WIDTH, 4.6), sharex=True, squeeze=False,
         constrained_layout=True,
     )
     flat = axes.ravel()
-    panels = (
-        ("similarity", "Similaridade cosseno\n(adimensional)"),
-        ("normalized_l1_change", "Variação L1 normalizada\n(adimensional, 0\u20132)"),
-    )
     for cell in _cells(tables):
         rows = _cell_rows(tables.transitions, cell)
         x = rows["current_layer"].to_numpy()
@@ -1899,6 +2176,8 @@ def _representative_layers(layers: Sequence[int]) -> list[int]:
 
 
 def _figure_stdft(plt, tables, figures_dir):
+    from matplotlib.colors import SymLogNorm
+
     name = "stdft_examples"
     cell = _cells(tables)[0]
     rows = _cell_rows(tables.stdft_examples, cell)
@@ -1923,11 +2202,29 @@ def _figure_stdft(plt, tables, figures_dir):
         (layer, y_true): chosen(layer, y_true) for layer in layers for y_true in classes
     }
     limit = 0.0
+    absolute_values: list[np.ndarray] = []
     for (layer, _), sample_id in selected.items():
         if sample_id is not None:
             payload = tables.stdft_payloads[(*cell, layer, sample_id)]
-            limit = max(limit, float(np.abs(payload["relevance"]).max()))
+            absolute = np.abs(payload["relevance"])
+            absolute_values.append(absolute.ravel())
+            limit = max(limit, float(absolute.max()))
     limit = limit or 1.0
+    positive = np.concatenate(absolute_values)
+    positive = positive[positive > 0.0]
+    linear_threshold = (
+        float(np.percentile(positive, 95.0))
+        if positive.size
+        else np.finfo(np.float64).eps
+    )
+    norm = SymLogNorm(
+        linthresh=max(linear_threshold, np.finfo(np.float64).eps),
+        linscale=1.0,
+        vmin=-limit,
+        vmax=limit,
+        base=10,
+    )
+    display_ids = _display_sample_ids([item for item in selected.values() if item is not None])
     fig, axes = plt.subplots(
         2, len(layers), figsize=(_FIGURE_WIDTH, 4.8), squeeze=False,
         constrained_layout=True,
@@ -1944,15 +2241,36 @@ def _figure_stdft(plt, tables, figures_dir):
             payload = tables.stdft_payloads[(*cell, layer, sample_id)]
             image = ax.pcolormesh(
                 payload["times"], payload["freqs"], payload["relevance"].T,
-                shading="auto", cmap="RdBu_r", vmin=-limit, vmax=limit,
+                shading="auto", cmap="RdBu_r", norm=norm,
             )
-            ax.set_title(f"camada {layer} \u00b7 {_CLASS_NAMES_PT[y_true]}\n{sample_id}", fontsize=7)
+            ax.set_title(
+                f"camada {layer} \u00b7 {_CLASS_NAMES_PT[y_true]}\n{display_ids[sample_id]}",
+                fontsize=7,
+            )
             if row == 1:
                 ax.set_xlabel("Tempo (s)")
             if column == 0:
                 ax.set_ylabel("Frequência (Hz)")
-    fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.85,
-                 label="Relevância STDFT com sinal (escala do logit)")
+    colorbar = fig.colorbar(
+        image,
+        ax=axes.ravel().tolist(),
+        shrink=0.85,
+        label="Relevância STDFT com sinal\n(escala simétrica não linear)",
+    )
+    inner_ticks = sorted(
+        value for value in {linear_threshold, 1.0} if 0.0 < value < limit
+    )
+    colorbar_ticks = [
+        -limit,
+        *(-value for value in reversed(inner_ticks)),
+        0.0,
+        *inner_ticks,
+        limit,
+    ]
+    colorbar.set_ticks(colorbar_ticks)
+    colorbar.set_ticklabels(
+        [f"{value:.2g}".replace("-", "\N{MINUS SIGN}") for value in colorbar_ticks]
+    )
     record = _record(
         tables,
         name,
@@ -1964,7 +2282,10 @@ def _figure_stdft(plt, tables, figures_dir):
             f"intermediária e na última camada; exibidos para {_cell_label(cell)}."
         ),
         metric="relevância STDFT-LRP com sinal por célula tempo\u2013frequência",
-        units="relevância na escala do logit (com sinal, escala de cor simétrica comum); tempo em s, frequência em Hz",
+        units=(
+            "relevância na escala do logit (com sinal); cores em escala simétrica "
+            "não linear comum entre painéis; tempo em s, frequência em Hz"
+        ),
         transformation="relevância AttnLRP no domínio do tempo \u2192 STDFT-LRP com janelamento (WOLA), conservando a relevância total",
         cells=(cell,),
     )
@@ -1981,6 +2302,13 @@ def _joined(values: Sequence[object]) -> str:
     return ", ".join(str(value) for value in unique)
 
 
+def _validation_sample_display(table: pd.DataFrame) -> str:
+    """Abbreviated validation sample ID(s); the full IDs stay in the tables."""
+    ids = [str(item) for item in table["validation_sample_id"]]
+    shown = _display_sample_ids(ids)
+    return ", ".join(shown[item] for item in sorted(set(ids)))
+
+
 def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
     """Per-layer worst case of each conservation check, with its own scope and limit.
 
@@ -1992,7 +2320,7 @@ def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
     worst = table.groupby("layer", sort=True).max(numeric_only=True)
     scope_bias = (
         f"amostra única ({_joined(table['validation_kind'])}; amostra de "
-        f"validação {_joined(table['validation_sample_id'])}), n=1"
+        f"validação {_validation_sample_display(table)}), n=1"
     )
     scope_dft = f"coorte XAI (n={_joined(table['n'])})"
     scope_stdft = f"subconjunto STDFT (n={_joined(table['n_stdft'])})"
@@ -2190,7 +2518,7 @@ _LATEX_ESCAPES: Mapping[str, str] = MappingProxyType(
 _MODEL_NAMES: Mapping[str, str] = MappingProxyType(
     {
         "hubert_base": "HuBERT Base",
-        "wavlm_base_plus": "WavLM Base+",
+        "wavlm_base": "WavLM Base",
         "wav2vec2_base": "Wav2Vec2 Base",
     }
 )
@@ -2218,12 +2546,13 @@ _SECTION_TITLES_PT: tuple[str, ...] = (
     "Desempenho ao longo das camadas",
     "Emergência estimada da decisão do detector",
     "Relevância em frequência ao longo das camadas",
-    "Reorganização da decisão final entre camadas consecutivas",
+    "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
     "Limitações atuais e próximos espaços de comparação",
 )
 _NOT_AVAILABLE = "n/d"
+_FIT_WIDTH_OPEN = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%"
 _MANIFEST_NAME = "report_manifest.json"
 _BUILD_SCRIPT_NAME = "build_local.ps1"
 _PDFLATEX = "pdflatex -interaction=nonstopmode -halt-on-error report.tex"
@@ -2298,6 +2627,18 @@ def _assert_pdflatex_safe(text: str, name: str) -> None:
 
 def _tt(value: object) -> str:
     return rf"\texttt{{{escape_latex(value)}}}"
+
+
+def _tt_breakable(value: object) -> str:
+    """Monospace text that may wrap after `_`, `-` and the ellipsis.
+
+    A monospace token has no hyphenation points, so long identifiers would
+    otherwise overflow the margin.
+    """
+    escaped = escape_latex(value)
+    for mark in (r"\_", "-", r"\ldots{}"):
+        escaped = escaped.replace(mark, mark + r"\allowbreak{}")
+    return rf"\texttt{{{escaped}}}"
 
 
 def _num(value: object, digits: int = 3) -> str:
@@ -2494,8 +2835,8 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
     table = tables.conservation
     cohort = escape_latex(_joined_values(table["n"]))
     subset = escape_latex(_joined_values(table["n_stdft"]))
-    kind = _tt(_joined_values(table["validation_kind"]))
-    sample = _tt(_joined_values(table["validation_sample_id"]))
+    kind = _tt_breakable(_joined_values(table["validation_kind"]))
+    sample = _tt_breakable(_validation_sample_display(table))
     rtol = _joined_sci(table["score_recompute_rtol"])
     atol = _joined_sci(table["score_recompute_atol"])
     return {
@@ -2586,8 +2927,10 @@ def _inventory_section(
             r"\begin{table}[H]",
             r"\centering",
             r"\small",
-            r"\caption{Inventário dos experimentos consumidos.}",
+            r"\setlength{\tabcolsep}{4pt}",
+            r"\caption{Inventário dos experimentos consumidos; o hash da configuração mostra os 12 primeiros caracteres.}",
             r"\label{tab:inventario}",
+            _FIT_WIDTH_OPEN,
             r"\begin{tabular}{lllll}",
             r"\toprule",
             _row(
@@ -2596,13 +2939,13 @@ def _inventory_section(
                     "Idiomas",
                     "Escopo",
                     "Camadas",
-                    "Hash da configuração (12 primeiros)",
+                    "Hash da config.",
                 ]
             ),
             r"\midrule",
             *rows,
             r"\bottomrule",
-            r"\end{tabular}",
+            r"\end{tabular}}",
             r"\end{table}",
             "",
         ]
@@ -2837,6 +3180,23 @@ def _reorganization_section(
     return lines
 
 
+def _abbreviation_note(tables: ReportTables) -> list[str]:
+    """Explain shortened sample IDs, only when some ID was actually shortened."""
+    ids = [
+        *map(str, tables.stdft_examples["sample_id"]),
+        *map(str, tables.conservation["validation_sample_id"]),
+    ]
+    if all(len(item) <= SAMPLE_ID_DISPLAY_LENGTH for item in ids):
+        return []
+    return [
+        "Os identificadores de amostra longos aparecem abreviados (início, "
+        "reticências e fim); os identificadores completos estão em "
+        r"\texttt{tables/stdft\_examples.csv} e "
+        r"\texttt{tables/conservation\_by\_layer.csv}.",
+        "",
+    ]
+
+
 def _stdft_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
@@ -2862,6 +3222,7 @@ def _stdft_section(
     lines += [
         "A figura mostra amostras de " + _join_pt([_cell_tex(c) for c in shown]) + ".",
         "",
+        *_abbreviation_note(tables),
     ]
     lines += _figure_block(figures["stdft_examples"], tables)
     return lines
@@ -2894,6 +3255,7 @@ def _conservation_section(
         "recálculo do score usa a razão rtol/atol, com limite 1.",
         "",
         *_itemize(items),
+        *_abbreviation_note(tables),
         *_figure_block(figures["conservation_diagnostics"], tables),
         r"\input{tables/conservation_by_layer.tex}",
         "",
@@ -2953,7 +3315,7 @@ def write_report_tex(
         r"\documentclass[a4paper,11pt]{article}",
         r"\usepackage[utf8]{inputenc}",
         r"\usepackage[T1]{fontenc}",
-        r"\usepackage[brazil]{babel}",
+        r"\usepackage[brazilian]{babel}",
         r"\usepackage{booktabs}",
         r"\usepackage{graphicx}",
         r"\usepackage{float}",
@@ -3018,10 +3380,12 @@ def _performance_tex(tables: ReportTables) -> str:
             r"\begin{table}[H]",
             r"\centering",
             r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
             rf"\caption{{Métricas por camada: {_cell_tex(cell)}. ROC-AUC e AP "
             r"sem limiar; EER diagnóstico em \%; acurácia, MCC, TPR e FPR no "
             r"limiar fixo da origem (classe positiva: sintético).}",
             rf"\label{{tab:performance-{_label(*cell)}}}",
+            _FIT_WIDTH_OPEN,
             r"\begin{tabular}{rrrrrrrrr}",
             r"\toprule",
             _row(
@@ -3040,7 +3404,7 @@ def _performance_tex(tables: ReportTables) -> str:
             r"\midrule",
             *body,
             r"\bottomrule",
-            r"\end{tabular}",
+            r"\end{tabular}}",
             r"\end{table}",
             "",
         ]

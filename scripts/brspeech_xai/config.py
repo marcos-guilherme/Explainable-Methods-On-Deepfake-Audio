@@ -19,7 +19,7 @@ class LayerwiseXaiConfig:
 
     profiles: tuple[str, ...] = (
         "hubert_base",
-        "wavlm_base_plus",
+        "wavlm_base",
         "wav2vec2_base",
     )
     xai_per_class: int = 25

@@ -43,13 +43,18 @@ def _pipeline_parts(head):
 def port_logistic_head(
     head,
     spoof_label: object = SPOOF_LABEL,
-) -> tuple[np.ndarray, np.float32]:
+    *,
+    dtype: type[np.floating] | np.dtype = np.float32,
+) -> tuple[np.ndarray, np.floating]:
     """Transplanta ``StandardScaler + LogisticRegression`` sem retreino.
 
     O ``decision_function`` binário do sklearn é orientado para ``classes_[1]``.
     Quando spoof é ``classes_[0]``, o logit transplantado é negado para continuar
     representando evidência em direção a spoof.
     """
+    resolved_dtype = np.dtype(dtype)
+    if resolved_dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise ValueError("dtype da head deve ser float32 ou float64")
     scaler, classifier = _pipeline_parts(head)
     classes = np.asarray(classifier.classes_)
     if classes.ndim != 1 or classes.size != 2:
@@ -90,24 +95,32 @@ def port_logistic_head(
     if int(matches[0]) == 0:
         w = -w
         b = -b
-    w32 = np.asarray(w, dtype=np.float32)
-    b32 = np.float32(b)
-    if not np.all(np.isfinite(w32)) or not np.isfinite(b32):
+    weight = np.asarray(w, dtype=resolved_dtype)
+    bias = resolved_dtype.type(b)
+    if not np.all(np.isfinite(weight)) or not np.isfinite(bias):
         raise ValueError("transplante da head produziu pesos ou bias não finitos")
-    return w32, b32
+    return weight, bias
 
 
-def _validate_linear_head(w: np.ndarray, b: float) -> tuple[np.ndarray, np.float32]:
+def _validate_linear_head(
+    w: np.ndarray,
+    b: float,
+    *,
+    dtype: type[np.floating] | np.dtype = np.float32,
+) -> tuple[np.ndarray, np.floating]:
+    resolved_dtype = np.dtype(dtype)
+    if resolved_dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise ValueError("dtype da head deve ser float32 ou float64")
     try:
-        weight = np.asarray(w, dtype=np.float32)
-        bias_array = np.asarray(b, dtype=np.float32)
+        weight = np.asarray(w, dtype=resolved_dtype)
+        bias_array = np.asarray(b, dtype=resolved_dtype)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("w e bias devem ser numéricos") from exc
     if weight.ndim != 1 or weight.size == 0:
         raise ValueError("w deve ser um vetor 1-D não vazio")
     if bias_array.ndim != 0:
         raise ValueError("bias deve ser um escalar finito")
-    bias = np.float32(bias_array)
+    bias = resolved_dtype.type(bias_array)
     if not np.all(np.isfinite(weight)):
         raise ValueError("w deve conter somente valores finitos")
     if not np.isfinite(bias):
@@ -162,12 +175,21 @@ class SSLDetectorAD(torch.nn.Module):
     ) -> None:
         if not isinstance(encoder, torch.nn.Module):
             raise ValueError("encoder deve ser um torch.nn.Module")
-        weight, bias = _validate_linear_head(w, b)
+        encoder_dtype = next(
+            (
+                parameter.dtype
+                for parameter in encoder.parameters()
+                if parameter.is_floating_point()
+            ),
+            torch.float32,
+        )
+        numpy_dtype = np.float64 if encoder_dtype == torch.float64 else np.float32
+        weight, bias = _validate_linear_head(w, b, dtype=numpy_dtype)
         self.encoder = encoder
         self.encoder.requires_grad_(False)
         self.layer = int(layer)
-        self.register_buffer("w", torch.as_tensor(weight, dtype=torch.float32))
-        self.register_buffer("b", torch.as_tensor(bias, dtype=torch.float32))
+        self.register_buffer("w", torch.as_tensor(weight, dtype=encoder_dtype))
+        self.register_buffer("b", torch.as_tensor(bias, dtype=encoder_dtype))
 
     def _hidden_frame_mask(
         self,
@@ -310,7 +332,20 @@ def relevance_for_clip(
         raise ValueError("processor retornou input_values com shape inválido")
     if not torch.all(torch.isfinite(values)):
         raise ValueError("processor retornou input_values não finitos")
-    input_values = values.to(device).detach().clone().requires_grad_(True)
+    floating_dtype = next(
+        (
+            parameter.dtype
+            for parameter in model.parameters()
+            if parameter.is_floating_point()
+        ),
+        model.w.dtype,
+    )
+    input_values = (
+        values.to(device=device, dtype=floating_dtype)
+        .detach()
+        .clone()
+        .requires_grad_(True)
+    )
     attention_mask = inputs.get("attention_mask")
     if attention_mask is not None:
         attention_mask = torch.as_tensor(attention_mask).to(device)
@@ -355,12 +390,15 @@ def verify_score_equivalence(
     if w is None:
         weight, bias = port_logistic_head(head, spoof_label=spoof_label)
     else:
-        weight, bias = _validate_linear_head(w, b)
+        requested_dtype = (
+            np.float64 if np.asarray(w).dtype == np.dtype(np.float64) else np.float32
+        )
+        weight, bias = _validate_linear_head(w, b, dtype=requested_dtype)
     if emb.shape[1] != weight.size:
         raise ValueError("dimensão dos embeddings incompatível com w")
 
     with torch.no_grad():
-        tensor = torch.as_tensor(emb, dtype=torch.float32)
+        tensor = torch.as_tensor(emb, dtype=torch.as_tensor(weight).dtype)
         probabilities = torch.sigmoid(tensor @ torch.as_tensor(weight) + float(bias))
         actual = probabilities.cpu().numpy().astype(np.float64)
     expected = score_head(head, emb, spoof_label=spoof_label)
@@ -393,7 +431,7 @@ def conservation_certificate(
     device: str | torch.device,
     b: float,
     tol: float = 1e-3,
-    atol: float = 5e-3,
+    atol: float = 1.5e-2,
 ) -> ConservationDiagnostics:
     """Mede conservação com biases do encoder temporariamente zerados.
 

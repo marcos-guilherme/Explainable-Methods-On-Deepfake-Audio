@@ -13,7 +13,8 @@ import torch
 
 from brspeech_xai.attnlrp import (_attention_forward_cp, _attention_forward_uniform,
                                   _identity_group_norm_forward, _identity_layer_norm_forward,
-                                  divide_gradient, ensure_ssl_encoder_attnlrp, identity_rule,
+                                  _preserve_forward_value, divide_gradient,
+                                  ensure_ssl_encoder_attnlrp, identity_rule,
                                   patch_ssl_encoder_for_attnlrp, patch_wav2vec2_for_attnlrp)
 
 
@@ -38,6 +39,18 @@ def test_identity_rule_conserves_through_activation():
 def test_divide_gradient_is_identity_in_forward():
     x = torch.randn(10, dtype=torch.float64)
     assert torch.allclose(divide_gradient(x, 4), x)
+
+
+def test_preserve_forward_value_uses_reference_value_and_custom_gradient():
+    x = torch.tensor([1.25], dtype=torch.float64, requires_grad=True)
+    reference = torch.nextafter(x * 3.0, torch.tensor([float("inf")]))
+    custom = x * 2.0
+
+    output = _preserve_forward_value(reference, custom)
+    output.sum().backward()
+
+    assert torch.equal(output, reference)
+    torch.testing.assert_close(x.grad, torch.tensor([2.0], dtype=torch.float64))
 
 
 def test_layer_norm_identity_rule_conserves():
