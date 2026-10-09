@@ -20,7 +20,7 @@ def test_initial_registry_has_three_layerwise_encoders():
 def test_encoder_profiles_have_exact_checkpoints():
     assert get_encoder_spec("hubert_base").checkpoint == "facebook/hubert-base-ls960"
     assert get_encoder_spec("wavlm_base").checkpoint == "microsoft/wavlm-base"
-    assert get_encoder_spec("wav2vec2_base").checkpoint == "facebook/wav2vec2-base-960h"
+    assert get_encoder_spec("wav2vec2_base").checkpoint == "facebook/wav2vec2-base"
     with pytest.raises(ValueError, match="not registered"):
         get_encoder_spec("wavlm_base_plus")
 

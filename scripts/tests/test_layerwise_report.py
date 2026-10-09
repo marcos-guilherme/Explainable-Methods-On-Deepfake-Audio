@@ -2366,6 +2366,19 @@ def test_official_docs_run_each_profile_in_its_own_canonical_output(relative):
             ), output
 
 
+@pytest.mark.parametrize("relative", ["README.md", "scripts/README.md"])
+def test_official_docs_name_the_pretrained_only_wav2vec2_checkpoint(relative):
+    text = _read_text(_REPO / relative)
+    assert "facebook/wav2vec2-base" in text
+    assert any(
+        statement in text
+        for statement in (
+            "does not use the ASR-fine-tuned",
+            "não faz parte deste protocolo",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 3 review fixes (I1-I4, M2-M5)
 # ---------------------------------------------------------------------------

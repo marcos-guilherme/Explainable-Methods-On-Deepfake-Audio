@@ -486,11 +486,26 @@ def _suite_config_hash(
     seed: int,
     device: str,
 ) -> str:
+    encoder_profiles = {}
+    for profile in suite_config.profiles:
+        spec = get_encoder_spec(profile)
+        encoder_profiles[profile] = {
+            "profile_id": spec.profile_id,
+            "encoder": spec.encoder,
+            "checkpoint": spec.checkpoint,
+            "family": spec.family,
+            "n_transformer_layers": spec.n_transformer_layers,
+            "layer_indices": list(spec.layer_indices),
+            "capabilities": sorted(spec.capabilities),
+            "attention_rule": spec.attention_rule,
+            "xai_dtype": spec.xai_dtype,
+        }
     return _canonical_hash(
         {
             "schema_version": PLAN_SCHEMA_VERSION,
             "contract_version": CONTRACT_VERSION,
             "suite_config": asdict(suite_config),
+            "encoder_profiles": encoder_profiles,
             "seed": seed,
             "device": device,
         }

@@ -376,6 +376,11 @@ Transformer blocks of HuBERT Base, WavLM Base and Wav2Vec2 Base. The primary
 explanation path is AttnLRP → DFT-LRP/STDFT-LRP; the existing H1/H2/H3 analysis
 is an optional layer-12 diagonal audit and is disabled by default.
 
+The active comparison uses pretrained-only checkpoints built from LibriSpeech
+960h: `facebook/hubert-base-ls960`, `microsoft/wavlm-base` and
+`facebook/wav2vec2-base`. In particular, it does not use the ASR-fine-tuned
+`facebook/wav2vec2-base-960h` checkpoint.
+
 The Linux VM needs Python 3.11, project dependencies, a CUDA-compatible
 PyTorch/Transformers environment, and mounts for the repository/configs,
 manifest files, every WAV referenced by `processed_path`, and the persistent

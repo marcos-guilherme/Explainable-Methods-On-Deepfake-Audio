@@ -218,6 +218,20 @@ def test_layerwise_config_validates_all_fields():
             replace(config, **kwargs)
 
 
+def test_suite_config_hash_changes_with_checkpoint(monkeypatch):
+    config = LayerwiseXaiConfig(profiles=("wav2vec2_base",))
+    original = encoder_suite.get_encoder_spec("wav2vec2_base")
+    baseline = encoder_suite._suite_config_hash(config, seed=42, device="cpu")
+
+    monkeypatch.setattr(
+        encoder_suite,
+        "get_encoder_spec",
+        lambda profile: replace(original, checkpoint="example/changed-checkpoint"),
+    )
+
+    assert encoder_suite._suite_config_hash(config, seed=42, device="cpu") != baseline
+
+
 def test_selected_languages_requires_at_least_one_config():
     with pytest.raises(ValueError, match="at least one language config"):
         encoder_suite._selected_languages({"eng": None, "por": None, "zho": None})
@@ -558,7 +572,7 @@ def test_trilingual_suite_aggregate_fingerprint_is_stable():
     )
 
     assert suite_aggregates[0].fingerprint == (
-        "b6043074fda399f5087d0eb8456f925db81f60ea84fdd82982d6344b4ee90dbe"
+        "84909e49468eae00fddda8dbf17627be280d8d05991bda75f3424b88715c243c"
     )
 
 

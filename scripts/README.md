@@ -84,6 +84,11 @@ Wav2Vec2 Base — com probes por camada e AttnLRP → DFT-LRP/STDFT-LRP. A audit
 clássica H1/H2/H3 é opcional, limitada às diagonais da camada 12 e desligada por
 padrão.
 
+A comparação ativa usa checkpoints somente pré-treinados no LibriSpeech 960h:
+`facebook/hubert-base-ls960`, `microsoft/wavlm-base` e
+`facebook/wav2vec2-base`. O checkpoint ajustado para ASR
+`facebook/wav2vec2-base-960h` não faz parte deste protocolo.
+
 Para validar a pipeline com menor custo, faça primeiro um `--dry-run` parcial
 com inglês e português:
 

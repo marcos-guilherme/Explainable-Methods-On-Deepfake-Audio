@@ -74,7 +74,7 @@ def _build_registries() -> None:
         ),
         (
             "wav2vec2_base",
-            "facebook/wav2vec2-base-960h",
+            "facebook/wav2vec2-base",
             "wav2vec2",
             "cp_lrp",
             "float64",
