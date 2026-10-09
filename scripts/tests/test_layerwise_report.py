@@ -1464,7 +1464,7 @@ def test_conservation_series_separate_scopes_and_do_not_share_one_tolerance(
     assert _VALIDATION_KIND in bias["scope"]
     assert "real-a" in bias["scope"]
     assert "n=4" in by_panel["dft_xai_cohort"].iloc[0]["scope"]
-    assert "coorte XAI" in by_panel["dft_xai_cohort"].iloc[0]["scope"]
+    assert "conjunto fixo de amostras XAI" in by_panel["dft_xai_cohort"].iloc[0]["scope"]
     assert "subconjunto STDFT" in by_panel["stdft_subset"].iloc[0]["scope"]
     assert "n=4" in by_panel["stdft_subset"].iloc[0]["scope"]
     score = by_panel["score_recompute_rtol_atol"].iloc[0]
@@ -1491,7 +1491,7 @@ def test_conservation_record_names_every_scope_and_validation_sample(
         "amostra única",
         _VALIDATION_KIND,
         "real-a",
-        "coorte XAI",
+        "conjunto fixo de amostras XAI",
         "subconjunto STDFT",
         "rtol",
         "atol",
@@ -1741,7 +1741,7 @@ _SECTION_TITLES = (
     "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
-    "Limitações atuais e próximos espaços de comparação",
+    "Limitações",
     "Conclusão",
 )
 _BUNDLE_TABLES = (
@@ -2103,7 +2103,8 @@ def test_tex_distinguishes_total_selected_audios_from_the_test_subset(eng_tex):
     assert f"treino {_ROLE_COUNTS['train']}" in eng_tex
     assert f"calibração {_ROLE_COUNTS['calibration']}" in eng_tex
     assert f"subconjunto de teste ({_ROLE_COUNTS['test']} áudios)" in eng_tex
-    assert "coorte XAI fixa" in eng_tex and "4 áudios (2 reais e 2 sintéticos)" in eng_tex
+    assert "conjunto fixo de amostras XAI" in eng_tex
+    assert "4 áudios (2 reais e 2 sintéticos)" in eng_tex
 
 
 def test_tex_omits_role_count_claims_when_the_plan_records_none(tmp_path):
@@ -2298,7 +2299,7 @@ def test_tex_states_each_conservation_scope_and_limit(eng_tex):
     for needle in (
         "uma única amostra",
         "bias_zeroed_model_rule_check".replace("_", r"\_"),
-        "coorte XAI",
+        "conjunto fixo de amostras XAI",
         "subconjunto STDFT",
         "rtol",
         "atol",
@@ -2307,10 +2308,12 @@ def test_tex_states_each_conservation_scope_and_limit(eng_tex):
     assert "tolerância comum" not in eng_tex
 
 
-def test_tex_lists_the_unavailable_comparison_slots(eng_tex):
-    assert "acordo entre encoders" in eng_tex
-    assert "apenas um modelo" in eng_tex
-    assert "apenas um idioma" in eng_tex
+def test_tex_does_not_create_placeholder_text_for_unavailable_comparisons(eng_tex):
+    assert "espaços de comparação" not in eng_tex.lower()
+    assert "comparações reservadas" not in eng_tex.lower()
+    assert "reservados para edições futuras" not in eng_tex.lower()
+    assert "apenas um modelo" not in eng_tex
+    assert "apenas um idioma" not in eng_tex
 
 
 def test_write_report_tables_emits_csv_and_tex_for_every_table(
@@ -4190,6 +4193,110 @@ def _png_is_nonblank(path: Path) -> bool:
 @pytest.fixture(scope="module")
 def full_comparison_tables(tmp_path_factory):
     return _build_full_comparison_tables(tmp_path_factory.mktemp("full_cmp"))
+
+
+@pytest.fixture(scope="module")
+def full_comparison_tex(full_comparison_tables, tmp_path_factory) -> str:
+    tmp_path = tmp_path_factory.mktemp("full_comparison_tex")
+    figures = render_report_figures(full_comparison_tables, tmp_path / "figures")
+    path = tmp_path / "report.tex"
+    write_report_tex(path, full_comparison_tables, figures, [])
+    return _read_text(path)
+
+
+def test_full_report_executive_summary_reports_all_four_comparisons_from_data(
+    full_comparison_tables, full_comparison_tex
+):
+    summary = full_comparison_tex.split(r"\section{Resumo executivo}", 1)[1].split(
+        r"\section{", 1
+    )[0]
+
+    for phrase in (
+        "acordo entre encoders",
+        "mudança de relevância entre corpora/idiomas",
+        "diagonal e fora da diagonal",
+        "divergência espectral",
+    ):
+        assert phrase in summary
+    for frame, metric in (
+        (full_comparison_tables.encoder_agreement, "prediction_agreement"),
+        (full_comparison_tables.language_shift, None),
+        (full_comparison_tables.diagonal_vs_offdiagonal, "delta_roc_auc"),
+        (full_comparison_tables.spectral_divergence, None),
+    ):
+        if metric is not None:
+            frame = frame[frame["metric"] == metric]
+        finite = frame.loc[np.isfinite(frame["estimate"]), "estimate"]
+        assert report_module._num(float(finite.median())) in summary
+
+
+def test_comparison_narrative_explains_method_and_links_each_result(
+    full_comparison_tex,
+):
+    section = full_comparison_tex.split(
+        r"\section{Comparações entre modelos e idiomas}", 1
+    )[1]
+    section_lower = section.lower()
+
+    for phrase in (
+        "unidade de reamostragem é o áudio",
+        "2.000 reamostragens bootstrap",
+        "semente base 42",
+        "hash estável",
+        r"intervalo percentil de 95\%",
+        "não são realizados testes de hipótese",
+        "não são produzidos valores-p",
+        "probe fixo",
+        "sistemas diagonais completos",
+    ):
+        assert phrase in section_lower
+    for family in _COMPARISON_FAMILIES:
+        assert rf"\label{{fig:{family}}}" in section
+        assert rf"\input{{tables/{family}.tex}}" in section
+    assert "mudança conjunta de corpus/idioma" in section
+    assert "efeito causal do idioma" in section
+
+
+def test_report_and_scripts_readme_avoid_reserved_slots_and_artificial_terms(
+    full_comparison_tex,
+):
+    texts = (
+        full_comparison_tex,
+        _read_text(_REPO / "scripts" / "README.md"),
+    )
+    forbidden = (
+        "espaços de comparação",
+        "comparações reservadas",
+        "reservados para edições futuras",
+        "coorte",
+        "confounder",
+        "matched",
+        "cotas",
+        "pacote",
+        "recibo",
+        "canônic",
+    )
+    for text in texts:
+        lowered = text.lower()
+        for term in forbidden:
+            assert term not in lowered, (term, text[:120])
+
+
+def test_conclusion_and_limitations_cover_comparisons_without_causal_claims(
+    full_comparison_tex,
+):
+    limitations = full_comparison_tex.split(r"\section{Limitações}", 1)[1].split(
+        r"\section{Conclusão}", 1
+    )[0]
+    conclusion = full_comparison_tex.split(r"\section{Conclusão}", 1)[1]
+
+    for text in (limitations, conclusion):
+        assert "acordo entre encoders" in text
+        assert "mudança conjunta de corpus/idioma" in text
+        assert "diagonal" in text
+        assert "divergência espectral" in text
+    assert "não isolam o efeito do idioma" in limitations
+    assert "não identificam um efeito causal do idioma" in conclusion
 
 
 def test_planned_figures_add_comparisons_only_when_complete(full_comparison_tables):

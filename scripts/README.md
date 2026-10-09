@@ -1,6 +1,6 @@
 # brspeech_xai — pipeline de explicabilidade acústica (em estágios, resumível)
 
-Port do notebook `notebooks/deepfake_brspeech_explainability.ipynb` para um pacote Python
+Port do notebook `notebooks/deepfake_brspeech_explainability.ipynb` para um módulo Python
 executável de forma headless, em estágios resumíveis, configurável por YAML + overrides de CLI.
 Compara um detector de deepfake **zero-shot** (`D_zs`) com uma versão **levemente adaptada**
 (`D_ad` = XLS-R congelado + regressão logística), usando **associação MFCC↔P(spoof)** (Spearman
@@ -161,7 +161,7 @@ Leia o `execution_plan.json` de cada output (por exemplo,
 antes de continuar. Ele registra hashes de configs/manifests, 36 probes e 108
 células por perfil (108 probes e 324 células nos três perfis), estimativas
 separadas de backprops de explicação/certificação/trace e a fórmula de espaço
-dos embeddings. Confirme espaço disponível, quotas, paths montados e orçamento
+dos embeddings. Confirme espaço disponível, caminhos montados e orçamento
 de backprops.
 
 Depois do preflight, faça primeiro o piloto de um perfil:
@@ -177,12 +177,13 @@ PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
 ```
 
 Antes da execução completa, valide no piloto os certificados de conservação
-AttnLRP/DFT/STDFT, hashes e manifests das gerações, identidade das coortes e as
+AttnLRP/DFT/STDFT, hashes e manifests das gerações, identidade dos conjuntos
+fixos de amostras e as
 seis tabelas agregadas. Com apenas um perfil,
 `encoder_relevance_agreement.csv` deve ser uma tabela vazia válida com status
 `not_applicable_less_than_two_profiles`, e a figura correspondente deve ser
 pulada; as outras cinco tabelas continuam obrigatórias. Então execute três
-execuções separadas, uma por perfil, cada uma com o seu output canônico:
+execuções separadas, uma por perfil, cada uma com o seu diretório de saída:
 
 ```bash
 PYTHONPATH=scripts python -m brspeech_xai.encoder_suite \
@@ -249,7 +250,7 @@ Todo diretório de resultado que alimenta o relatório layer-wise segue
 
 - `<model>`: perfil do encoder, por exemplo `hubert_base`, `wavlm_base` ou
   `wav2vec2_base`;
-- `<languages>`: códigos ISO 639-3 na ordem canônica `eng`, `por`, `zho`,
+- `<languages>`: códigos ISO 639-3 na ordem padrão `eng`, `por`, `zho`,
   unidos por `-`. A suíte aceita qualquer subconjunto não vazio de inglês,
   português e mandarim, e o relatório aceita as sete combinações: `eng`, `por`,
   `zho`, `eng-por`, `eng-zho`, `por-zho` e `eng-por-zho`;
@@ -275,7 +276,7 @@ trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
 ## Relatório layer-wise atualizável
 
 `brspeech_xai.layerwise_report` gera, a partir de resultados concluídos, um
-bundle LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
+conjunto LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
 O relatório inclui resumo executivo e conclusão; mapas treino
@@ -284,6 +285,21 @@ ROC-AUC e concentração espectral da relevância. Em cada célula dos mapas, a
 camada é selecionada pela maior ROC-AUC, e o MCC mostrado vem dessa mesma
 camada. As tabelas `transfer_selected_layers.csv` e
 `xai_performance_association.csv` persistem essas reduções.
+
+Quando os dados necessários estão completos, o relatório também apresenta
+quatro comparações: acordo entre encoders; mudança da relevância entre
+corpora/idiomas com o probe fixo; diferença entre diagonal e fora da diagonal
+no mesmo conjunto-alvo; e divergência espectral entre sistemas diagonais
+completos. As figuras resumem as células, enquanto as tabelas CSV preservam os
+resultados por camada e seus intervalos.
+
+Nessas quatro comparações, a unidade de reamostragem é o áudio. O método usa
+2.000 reamostragens bootstrap estratificadas por classe, semente base 42
+combinada com um hash estável da identidade da comparação e intervalo
+percentil de 95%. Não são realizados testes de hipótese nem produzidos
+valores-p. Comparações entre idiomas são apresentadas nos dois enquadramentos
+— probe fixo e sistemas diagonais completos — e descrevem mudança conjunta de
+corpus/idioma; não isolam nem atribuem efeito causal ao idioma.
 
 Na VM, informe cada diretório de resultado explicitamente (a opção `--result`
 pode ser repetida; nenhum diretório é varrido por padrão e identidades
@@ -295,7 +311,7 @@ PYTHONPATH=scripts python -m brspeech_xai.layerwise_report \
   --output /mnt/results/layerwise_xai_report
 ```
 
-Copie o bundle da VM para a máquina Windows (por exemplo, para
+Copie o conjunto gerado na VM para a máquina Windows (por exemplo, para
 `escrita/relatorio-layerwise-xai/`) e compile com o `pdflatex` do MiKTeX:
 
 ```powershell
@@ -311,7 +327,7 @@ versionados.
 valida o status `complete` da execução, as gerações imutáveis (hashes) e os
 markers das células, e grava apenas dentro de `--output`. Ele recusa um
 `--output` que se sobreponha a um diretório de resultado ou que seja um
-diretório não vazio sem bundle anterior. Nunca carrega encoder, não importa
+diretório não vazio sem relatório anterior. Nunca carrega encoder, não importa
 `torch` nem `transformers` e não exige GPU. A saída é determinística para os
 mesmos artefatos: `report_manifest.json` registra, com caminhos relativos e
 SHA-256, os artefatos consumidos e os arquivos gerados.

@@ -3491,7 +3491,7 @@ def _figure_heatmap(plt, tables, figures_dir):
             f"fração da massa em banda por amostra ({band_range}; adimensional, soma 1 "
             "sobre as bandas); centro da banda em Hz"
         ),
-        transformation="relevância AttnLRP \u2192 DFT \u2192 |R(f)| agregada em bandas de espaçamento mel \u2192 normalização por amostra \u2192 média sobre a coorte fixa",
+        transformation="relevância AttnLRP \u2192 DFT \u2192 |R(f)| agregada em bandas de espaçamento mel \u2192 normalização por amostra \u2192 média sobre o conjunto fixo de amostras",
         cells=cells,
     )
     fig.suptitle(record.title, fontsize=9)
@@ -3622,7 +3622,7 @@ def _figure_class_relevance(plt, tables, figures_dir):
         heading="Perfis de relevância de amostras reais e sintéticas por camada",
         description=(
             "Relevância DFT absoluta normalizada média por banda das amostras reais "
-            "(bona fide) e sintéticas (spoof) da coorte, e sua diferença, por camada; "
+            "(bona fide) e sintéticas (spoof) do conjunto fixo, e sua diferença, por camada; "
             f"a massa em banda de cada amostra ({band_range}) soma 1."
         ),
         metric="relevância DFT absoluta normalizada média por banda, condicionada à classe verdadeira",
@@ -3865,7 +3865,7 @@ def _figure_stdft(plt, tables, figures_dir):
         heading="Exemplos de relevância STDFT",
         description=(
             "Mapas representativos de relevância tempo\u2013frequência (janela de Hann de 512, "
-            "passo 256) de uma amostra real e uma sintética da coorte na primeira, na "
+            "passo 256) de uma amostra real e uma sintética do conjunto fixo na primeira, na "
             f"intermediária e na última camada; exibidos para {_cell_label(cell)}."
         ),
         metric="relevância STDFT-LRP com sinal por célula tempo\u2013frequência",
@@ -3909,10 +3909,10 @@ def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
         f"amostra única ({_joined(table['validation_kind'])}; amostra de "
         f"validação {_validation_sample_display(table)}), n=1"
     )
-    scope_dft = f"coorte XAI (n={_joined(table['n'])})"
+    scope_dft = f"conjunto fixo de amostras XAI (n={_joined(table['n'])})"
     scope_stdft = f"subconjunto STDFT (n={_joined(table['n_stdft'])})"
     scope_score = (
-        f"coorte XAI (n={_joined(table['n'])}); aceito se "
+        f"conjunto fixo de amostras XAI (n={_joined(table['n'])}); aceito se "
         f"|\u0394p| \u2264 atol + rtol\u00b7|p| (rtol={_joined_sci(table['score_recompute_rtol'])}, "
         f"atol={_joined_sci(table['score_recompute_atol'])})"
     )
@@ -3929,7 +3929,7 @@ def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
         (
             "dft_xai_cohort",
             "max_dft_residual",
-            "Conservação da DFT, máximo na coorte\n(resíduo relativo)",
+            "Conservação da DFT, máximo no conjunto fixo\n(resíduo relativo)",
             scope_dft,
             tolerance,
             tolerance_label,
@@ -3945,7 +3945,7 @@ def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
         (
             "score_recompute_rtol_atol",
             "max_score_recompute_ratio",
-            "Recálculo do score, máximo na coorte\n(|\u0394p| / (atol + rtol\u00b7|p|))",
+            "Recálculo do score, máximo no conjunto fixo\n(|\u0394p| / (atol + rtol\u00b7|p|))",
             scope_score,
             1.0,
             "limite de aceitação rtol/atol (razão = 1)",
@@ -4006,7 +4006,8 @@ def _figure_conservation(plt, tables, figures_dir):
         description=(
             "Quatro verificações com escopos distintos, cada uma contra o seu limite. "
             "A verificação bias-zeroed usa uma única amostra para validar a decomposição "
-            "modelo/regra, não a coorte; o resíduo da DFT cobre a coorte XAI; o resíduo "
+            "modelo/regra, não o conjunto inteiro; o resíduo da DFT cobre o conjunto "
+            "fixo de amostras XAI; o resíduo "
             "da STDFT cobre apenas o subconjunto STDFT; o recálculo do score é aceito "
             f"pela regra rtol/atol, não pela tolerância de conservação. Escopos: {scopes}."
         ),
@@ -4527,21 +4528,6 @@ _MODEL_NAMES: Mapping[str, str] = MappingProxyType(
 _LANGUAGE_NAMES: Mapping[str, str] = MappingProxyType(
     {"eng": "inglês", "por": "português", "zho": "mandarim"}
 )
-_COMPARISON_NAMES: Mapping[str, str] = MappingProxyType(
-    {
-        "encoder_agreement": "acordo entre encoders",
-        "language_shift": "mudança de relevância entre idiomas",
-        "diagonal_vs_offdiagonal": "diagonal versus fora da diagonal",
-        "spectral_divergence": "divergência espectral entre idiomas",
-    }
-)
-_OMISSION_REASONS: Mapping[str, str] = MappingProxyType(
-    {
-        "single_model": "indisponível porque há apenas um modelo",
-        "single_language": "indisponível porque há apenas um idioma",
-        "unavailable_incomplete_table": "tabela de comparação incompleta nesta edição",
-    }
-)
 _COMPARISON_SECTION_TITLE = "Comparações entre modelos e idiomas"
 _SECTION_TITLES_PT: tuple[str, ...] = (
     "Resumo executivo",
@@ -4553,7 +4539,7 @@ _SECTION_TITLES_PT: tuple[str, ...] = (
     "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
-    "Limitações atuais e próximos espaços de comparação",
+    "Limitações",
     "Conclusão",
 )
 _NOT_AVAILABLE = "n/d"
@@ -4814,7 +4800,7 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
         )
     elif record.name == "dft_relevance_heatmap":
         body = (
-            "Média sobre a coorte fixa da relevância AttnLRP absoluta "
+            "Média sobre o conjunto fixo de amostras da relevância AttnLRP absoluta "
             "normalizada após a DFT, por camada e banda de frequência mel "
             f"({band_range}). A massa dentro da banda de cada amostra soma 1; "
             "os valores são frações da massa em banda, não do espectro inteiro."
@@ -4859,14 +4845,14 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
             f"única amostra (tipo {kind}; amostra {sample}; n=1)"
         ),
         "dft_xai_cohort": (
-            f"resíduo relativo da DFT, máximo sobre a coorte XAI (n={cohort})"
+            f"resíduo relativo da DFT, máximo sobre o conjunto fixo de amostras XAI (n={cohort})"
         ),
         "stdft_subset": (
             "resíduo relativo da STDFT, máximo sobre o subconjunto STDFT "
             f"(n={subset})"
         ),
         "score_recompute_rtol_atol": (
-            f"recálculo do score, máximo sobre a coorte XAI (n={cohort}); "
+            f"recálculo do score, máximo sobre o conjunto fixo de amostras XAI (n={cohort}); "
             f"aceito se {escape_latex('|Δp| ≤ atol + rtol·|p|')} "
             f"(rtol={rtol}, atol={atol})"
         ),
@@ -4881,11 +4867,87 @@ def _conservation_caption(tables: ReportTables) -> str:
     return (
         "Quatro verificações com escopos e limites distintos, em escala "
         "logarítmica: o resíduo bias-zeroed vale para uma única amostra de "
-        "validação e não para a coorte; o resíduo da DFT cobre a coorte XAI; o "
+        "validação e não para o conjunto inteiro; o resíduo da DFT cobre o "
+        "conjunto fixo de amostras XAI; o "
         "resíduo da STDFT cobre apenas o subconjunto STDFT; o recálculo do "
         "score é aceito pela regra rtol/atol, não pela tolerância de "
         f"conservação. Escopos: {listed}."
     )
+
+
+def _median_comparison_estimate(
+    frame: pd.DataFrame, **filters: object
+) -> float | None:
+    selected = frame
+    for column, value in filters.items():
+        selected = selected[selected[column] == value]
+    values = selected["estimate"].to_numpy(dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    return float(np.median(finite)) if finite.size else None
+
+
+def _comparison_result_paragraphs(tables: ReportTables) -> list[str]:
+    """Data-dependent objectives and results for comparisons that are present."""
+    paragraphs: list[str] = []
+
+    agreement = _median_comparison_estimate(
+        tables.encoder_agreement, metric="prediction_agreement"
+    )
+    if agreement is not None:
+        paragraphs.append(
+            "O acordo entre encoders verifica se modelos distintos chegam às mesmas "
+            "decisões nos mesmos áudios e células. A mediana da fração de predições "
+            f"iguais é {_num(agreement)}; correlação de escores, kappa e proximidade "
+            r"das relevâncias completam a leitura na Figura~\ref{fig:encoder_agreement} "
+            r"e na Tabela~\ref{tab:encoder-agreement-summary}."
+        )
+
+    shift = _median_comparison_estimate(tables.language_shift)
+    if shift is not None:
+        paragraphs.append(
+            "A mudança de relevância entre corpora/idiomas mantém o modelo e o "
+            "idioma de treino do probe fixos e troca o conjunto de avaliação. A "
+            f"mediana da distância Jensen--Shannon é {_num(shift)} bits; valores "
+            "maiores indicam perfis médios menos parecidos, sem isolar o idioma das "
+            "demais diferenças entre os corpora. Essa é uma mudança conjunta de "
+            r"corpus/idioma (Figura~\ref{fig:language_shift}; "
+            r"Tabela~\ref{tab:language-shift-summary})."
+        )
+
+    delta_auc = _median_comparison_estimate(
+        tables.diagonal_vs_offdiagonal, metric="delta_roc_auc"
+    )
+    delta_mcc = _median_comparison_estimate(
+        tables.diagonal_vs_offdiagonal, metric="delta_mcc"
+    )
+    if delta_auc is not None or delta_mcc is not None:
+        values = []
+        if delta_auc is not None:
+            values.append(rf"mediana de $\Delta$ ROC-AUC {_signed(delta_auc)}")
+        if delta_mcc is not None:
+            values.append(rf"mediana de $\Delta$ MCC {_signed(delta_mcc)}")
+        paragraphs.append(
+            "A comparação diagonal e fora da diagonal mede, no mesmo conjunto-alvo, "
+            "a diferença fora da diagonal menos diagonal. Os resultados resumidos "
+            "são: "
+            + _join_pt(values)
+            + r" (Figura~\ref{fig:diagonal_vs_offdiagonal}; "
+            r"Tabela~\ref{tab:diagonal-off-summary}). O sinal informa a direção da "
+            "mudança observada, não sua causa."
+        )
+
+    spectral = _median_comparison_estimate(tables.spectral_divergence)
+    if spectral is not None:
+        paragraphs.append(
+            "A divergência espectral compara sistemas diagonais completos entre "
+            "corpora/idiomas. A mediana da distância de Wasserstein é "
+            f"{_num(spectral)} Hz; ela resume o deslocamento da massa de relevância "
+            "no eixo de frequência, sem medir qualidade nem identificar uma causa "
+            r"(Figura~\ref{fig:spectral_divergence}; "
+            r"Tabela~\ref{tab:spectral-divergence-summary})."
+        )
+
+    return paragraphs
 
 
 def _executive_summary_section(tables: ReportTables) -> list[str]:
@@ -4904,10 +4966,11 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         (tables.xai_performance_association["status"] == "available").sum()
     )
     fidelity_stability = _executive_fidelity_stability_blurbs(tables)
+    comparisons = _comparison_result_paragraphs(tables)
     return [
         rf"\section{{{_SECTION_TITLES_PT[0]}}}",
         r"\label{sec:resumo}",
-        f"O bundle reúne {len(tables.models)} modelo(s), "
+        f"O relatório reúne {len(tables.models)} modelo(s), "
         f"{len(tables.languages)} idioma(s) e {len(selected)} combinações de "
         f"treino e avaliação; contém {scope}.",
         "",
@@ -4921,6 +4984,7 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         f"{available} de {len(tables.xai_performance_association)} célula(s); "
         "ela é descritiva, baseada em 12 camadas e sem interpretação causal.",
         "",
+        *[item for paragraph in comparisons for item in (paragraph, "")],
         *fidelity_stability,
         *([""] if fidelity_stability else []),
     ]
@@ -5031,7 +5095,7 @@ def _protocol_section(
             if not cohort.empty:
                 row = cohort.iloc[0]
                 xai = (
-                    f"a coorte XAI fixa tem {int(row['n'])} áudios "
+                    f"o conjunto fixo de amostras XAI tem {int(row['n'])} áudios "
                     f"({int(row['n_real'])} reais e {int(row['n_synthetic'])} "
                     "sintéticos)"
                 )
@@ -5075,7 +5139,7 @@ def _protocol_section(
     counts_intro = (
         [
             "Contagens de áudios declaradas no plano de execução, separando o "
-            "total selecionado do subconjunto de teste e da coorte de "
+            "total selecionado do subconjunto de teste e do conjunto de "
             "explicação:",
             "",
         ]
@@ -5158,7 +5222,7 @@ def _performance_section(
     ]
     if off_diagonal.empty:
         lines += [
-            "Há somente avaliação diagonal neste bundle; não há célula fora da "
+            "Há somente avaliação diagonal neste relatório; não há célula fora da "
             "diagonal para descrever transferência.",
             "",
         ]
@@ -5457,10 +5521,29 @@ def _comparisons_section(
         rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
         r"\label{sec:comparacoes}",
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
-        "Cada figura mostra a mediana por camada e a faixa interquartil entre "
-        "células agregadas; intervalos bootstrap, contagens de status e detalhe "
-        "por célula permanecem nos CSV e nos resumos tabulares abaixo.",
+        "A figura de acordo entre encoders mostra a mediana por camada e a faixa "
+        "interquartil entre células. As outras três figuras reproduzem as "
+        "estimativas e os intervalos bootstrap persistidos; contagens de status "
+        "e detalhes por célula permanecem nos CSV e nos resumos tabulares abaixo.",
         "",
+        "A unidade de reamostragem é o áudio. Quando a estatística é estimável, "
+        "o procedimento usa 2.000 reamostragens bootstrap estratificadas por "
+        "classe, semente base 42 combinada com um hash estável da identidade da "
+        r"comparação e intervalo percentil de 95\%. Não são realizados testes "
+        "de hipótese e não são produzidos valores-p.",
+        "",
+        "A comparação entre corpora/idiomas é apresentada em dois enquadramentos. "
+        "No primeiro, o probe fixo mantém modelo e idioma de treino e troca apenas "
+        "o conjunto de avaliação; no segundo, sistemas diagonais completos usam "
+        "em cada corpus/idioma o probe treinado no próprio conjunto. Como áudio, "
+        "corpus e idioma mudam em conjunto, os resultados descrevem uma mudança "
+        "conjunta de corpus/idioma e não um efeito causal do idioma.",
+        "",
+        *[
+            item
+            for paragraph in _comparison_result_paragraphs(tables)
+            for item in (paragraph, "")
+        ],
     ]
     for name in names:
         lines += _figure_block(figures[name], tables)
@@ -5469,23 +5552,45 @@ def _comparisons_section(
 
 
 def _limitations_section(tables: ReportTables) -> list[str]:
-    slots = [
-        f"{_COMPARISON_NAMES[name]}: "
-        f"{_OMISSION_REASONS.get(reason, escape_latex(reason))}"
-        for name, reason in tables.omitted_comparisons.items()
-    ]
     limitations = [
         "as explicações descrevem o probe linear sobre as representações do "
         "encoder e não constituem uma verdade de referência sobre as pistas "
         "acústicas do áudio sintético;",
-        r"os intervalos mostrados usam a aproximação normal de 95\% da média "
-        "sobre as amostras e não incluem variação entre execuções;",
+        "a figura de acordo resume células por mediana e faixa interquartil, "
+        "enquanto as demais reproduzem estimativas por comparação; os intervalos "
+        r"percentis de 95\% nos CSV quantificam apenas a variação "
+        "obtida ao reamostrar os áudios observados e não incluem novas execuções "
+        "do pipeline;",
         "o recálculo de explicações, a seleção de amostras e o treinamento "
         "dos probes não fazem parte deste relatório; todos os valores vêm dos "
         "artefatos listados em \\texttt{report\\_manifest.json};",
         "resultados fora da diagonal, quando existirem, são validação externa "
-        "sob corpus shift e não efeitos causais do idioma.",
+        "sob mudança conjunta de corpus/idioma e não efeitos causais do idioma.",
     ]
+    if not tables.encoder_agreement.empty:
+        limitations.append(
+            "o acordo entre encoders mede proximidade de escores, decisões e "
+            "relevâncias nos mesmos áudios; acordo alto não torna os modelos "
+            "intercambiáveis e acordo baixo não aponta qual modelo está correto."
+        )
+    if not tables.language_shift.empty:
+        limitations.append(
+            "a mudança de relevância entre corpora/idiomas usa conjuntos de áudio "
+            "diferentes; mesmo com o probe fixo, as fontes de variação do "
+            "procedimento não isolam o efeito do idioma."
+        )
+    if not tables.diagonal_vs_offdiagonal.empty:
+        limitations.append(
+            "a comparação diagonal e fora da diagonal mantém fixo o conjunto-alvo, "
+            "mas também troca o conjunto usado para treinar o probe; o delta é "
+            "descritivo e não identifica a origem da diferença."
+        )
+    if not tables.spectral_divergence.empty:
+        limitations.append(
+            "a divergência espectral em Hz resume o deslocamento entre perfis "
+            "médios de relevância de sistemas diagonais completos; não mede "
+            "desempenho nem separa corpus de idioma."
+        )
     if not tables.probe_stability.empty:
         limitations.append(
             "quando presente, a tabela de variabilidade por reamostragem "
@@ -5502,23 +5607,12 @@ def _limitations_section(tables: ReportTables) -> list[str]:
             "não substitui auditoria causal, não cobre outras camadas e não "
             "valida transferência off-diagonal."
         )
-    slots_intro = (
-        [
-            "Espaços de comparação reservados para edições futuras, sem "
-            "figura ou tabela nesta edição:",
-            "",
-        ]
-        if slots
-        else []
-    )
     return [
         rf"\section{{{_SECTION_TITLES_PT[9]}}}",
         r"\label{sec:limitacoes}",
         "Limitações desta edição:",
         "",
         *_itemize(limitations),
-        *slots_intro,
-        *_itemize(slots),
     ]
 
 
@@ -5527,7 +5621,7 @@ def _conclusion_section(tables: ReportTables) -> list[str]:
     off_diagonal = selected[selected["source"] != selected["target"]]
     if off_diagonal.empty:
         transfer = (
-            "Como o bundle contém apenas a diagonal, os resultados sustentam "
+            "Como o relatório contém apenas a diagonal, os resultados sustentam "
             "somente a descrição do caso carregado, não uma conclusão de transferência."
         )
     else:
@@ -5549,12 +5643,14 @@ def _conclusion_section(tables: ReportTables) -> list[str]:
         )
     )
     extra = _conclusion_fidelity_stability_paragraphs(tables)
+    comparisons = _comparison_result_paragraphs(tables)
     return [
         rf"\section{{{_SECTION_TITLES_PT[10]}}}",
         r"\label{sec:conclusao}",
         "O relatório separa discriminação sem limiar de comportamento no limiar "
         "fixo e mantém ROC-AUC e MCC vinculados à mesma camada selecionada.",
         "",
+        *[item for paragraph in comparisons for item in (paragraph, "")],
         transfer,
         "",
         association,
