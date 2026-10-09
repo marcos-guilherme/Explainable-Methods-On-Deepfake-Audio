@@ -21,8 +21,10 @@ import pandas as pd
 
 from .bands import F_MAX, F_MIN, N_BANDS, mel_band_edges
 from .encoder_suite import LANGUAGE_ORDER, LAYER_ORDER, ROLE_ORDER
-from .layerwise_faithfulness import FINAL_LAYER
 from .layerwise_paths import LayerwiseSuitePaths, resolve_active_generation
+
+FINAL_LAYER = LAYER_ORDER[-1]
+
 _LANGUAGE_SEGMENTS: dict[str, tuple[str, ...]] = {
     "eng": ("eng",),
     "por": ("por",),
@@ -3229,6 +3231,7 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
     available = int(
         (tables.xai_performance_association["status"] == "available").sum()
     )
+    fidelity_stability = _executive_fidelity_stability_blurbs(tables)
     return [
         rf"\section{{{_SECTION_TITLES_PT[0]}}}",
         r"\label{sec:resumo}",
@@ -3246,6 +3249,8 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         f"{available} de {len(tables.xai_performance_association)} célula(s); "
         "ela é descritiva, baseada em 12 camadas e sem interpretação causal.",
         "",
+        *fidelity_stability,
+        *([""] if fidelity_stability else []),
     ]
 
 
@@ -3501,22 +3506,30 @@ def _performance_section(
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
     stability_tex = _probe_stability_tex(tables)
     fidelity_tex = _layer_faithfulness_tex(tables)
+    aligned_fidelity = _aligned_layer_faithfulness(tables)
+    aligned_stability = _aligned_probe_stability(tables)
     if fidelity_tex.strip():
         lines += [
             r"\subsection{Fidelidade por intervenção (camada 12, diagonal)}",
             "Comparações pareadas de comprehensividade (delete) entre faixas "
             r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
             "aleatórias com energia RMS igualada, com recomputação AttnLRP "
-            r"$\rightarrow$ STDFT sobre subamostra da coorte XAI fixa. Valores "
-            "positivos de top-minus-random ou top-minus-bottom sugerem, com "
-            "cautela, que as faixas mais relevantes segundo o DFT-LRP sustentam "
-            "mais a decisão do que controles; a filtragem STFT e o "
-            "reescalonamento RMS são fontes de variação introduzidas pelo "
-            "procedimento e não autorizam alegação causal no mundo real. "
-            "Escopo restrito à camada~12 com source=target; não extrapolar para "
-            "outras camadas ou células fora da diagonal.",
+            r"$\rightarrow$ STDFT sobre o subconjunto fixo de amostras XAI. "
+            "Valores positivos de top-minus-random ou top-minus-bottom "
+            "sugerem, com cautela, que as faixas mais relevantes segundo o "
+            "DFT-LRP sustentam mais a decisão do que controles; a filtragem "
+            "STFT e o reescalonamento RMS são fontes de variação introduzidas "
+            "pelo procedimento e não autorizam alegação causal no mundo real. "
+            "Escopo restrito à camada~12 com origem=destino; não extrapolar "
+            "para outras camadas ou células fora da diagonal.",
+            "",
+            _faithfulness_scope_note(aligned_fidelity),
             "",
             r"\input{tables/layer_faithfulness_summary.tex}",
+            "",
+            _faithfulness_pattern_paragraph(
+                faithfulness_aggregate_counts(aligned_fidelity)
+            ),
             "",
         ]
     if stability_tex.strip():
@@ -3529,9 +3542,15 @@ def _performance_section(
             "à amostra finita de treino; "
             r"\textbf{não} mede estabilidade de atribuições XAI (AttnLRP/DFT-LRP), "
             "nem estabilidade ponta-a-ponta de sementes do pipeline completo, "
-            "nem recomputa explicações.",
+            "nem recomputa explicações. "
+            "São três reamostragens por célula: indicam ordens de grandeza da "
+            "variabilidade, não um intervalo de confiança estreito.",
             "",
             r"\input{tables/probe_stability_by_layer.tex}",
+            "",
+            _probe_stability_pattern_paragraph(
+                probe_stability_aggregate_by_model(aligned_stability)
+            ),
             "",
         ]
     return lines
@@ -3836,6 +3855,7 @@ def _conclusion_section(tables: ReportTables) -> list[str]:
             "descritivos de n=12 e não permitem interpretação causal."
         )
     )
+    extra = _conclusion_fidelity_stability_paragraphs(tables)
     return [
         rf"\section{{{_SECTION_TITLES_PT[10]}}}",
         r"\label{sec:conclusao}",
@@ -3846,6 +3866,8 @@ def _conclusion_section(tables: ReportTables) -> list[str]:
         "",
         association,
         "",
+        *extra,
+        *([""] if extra else []),
     ]
 
 
@@ -3928,52 +3950,259 @@ def _aligned_layer_faithfulness(tables: ReportTables) -> pd.DataFrame:
     return subset.merge(perf_keys, on=keys, how="inner")
 
 
+_FAITHFULNESS_COMPARISON_PT: Mapping[str, str] = MappingProxyType(
+    {
+        "top_minus_random": "top-minus-random",
+        "top_minus_bottom": "top-minus-bottom",
+    }
+)
+
+
+def faithfulness_aggregate_counts(frame: pd.DataFrame) -> pd.DataFrame:
+    """Count aggregate faithfulness cells by mean sign and bootstrap CI placement."""
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "model",
+                "comparison",
+                "total",
+                "n_mean_positive",
+                "n_ci_above_zero",
+                "n_ci_below_zero",
+            ]
+        )
+    evaluated = frame.loc[frame["status"] == "ok"].copy()
+    if evaluated.empty:
+        evaluated = frame.copy()
+    rows: list[dict[str, object]] = []
+    for (model, comparison), group in evaluated.groupby(
+        ["model", "comparison"], sort=True
+    ):
+        mean_diff = group["mean_difference"].astype(float)
+        ci_low = group["ci_low"].astype(float)
+        ci_high = group["ci_high"].astype(float)
+        rows.append(
+            {
+                "model": model,
+                "comparison": comparison,
+                "total": int(len(group)),
+                "n_mean_positive": int((mean_diff > 0).sum()),
+                "n_ci_above_zero": int((ci_low > 0).sum()),
+                "n_ci_below_zero": int((ci_high < 0).sum()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def probe_stability_aggregate_by_model(frame: pd.DataFrame) -> pd.DataFrame:
+    """Median and maximum probe metric std per model across layer/source/target cells."""
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "model",
+                "roc_auc_std_median",
+                "roc_auc_std_max",
+                "mcc_std_median",
+                "mcc_std_max",
+            ]
+        )
+    rows: list[dict[str, object]] = []
+    for model in sorted(frame["model"].unique()):
+        subset = frame.loc[frame["model"] == model]
+        rows.append(
+            {
+                "model": model,
+                "roc_auc_std_median": float(subset["roc_auc_std"].median()),
+                "roc_auc_std_max": float(subset["roc_auc_std"].max()),
+                "mcc_std_median": float(subset["mcc_std"].median()),
+                "mcc_std_max": float(subset["mcc_std"].max()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _faithfulness_scope_note(aligned: pd.DataFrame) -> str:
+    cells = aligned[["model", "source", "target"]].drop_duplicates()
+    n_cells = len(cells)
+    k_values = sorted({int(value) for value in aligned["k"].dropna().unique()})
+    k_text = _join_pt([str(value) for value in k_values])
+    return (
+        f"Escopo: {n_cells} célula(s) diagonal(is) modelo$\\times$idioma, "
+        "duas classes (bonafide e spoof), "
+        f"valores de $k$ = {escape_latex(k_text)}, "
+        "oito amostras por classe no subconjunto XAI. "
+        "Top-$k$ e bottom-$k$ referem-se às faixas mais e menos relevantes "
+        "segundo o DFT-LRP; top-minus-random e top-minus-bottom são diferenças "
+        "médias pareadas frente a controles aleatórios ou às faixas menos "
+        "relevantes. "
+        "As contagens abaixo são descritivas, sem correção por comparações "
+        "múltiplas, e não substituem teste de hipótese confirmatório."
+    )
+
+
+def _faithfulness_pattern_paragraph(counts: pd.DataFrame) -> str:
+    if counts.empty:
+        return ""
+    by_model: list[tuple[str, int, int, int, int]] = []
+    for model in sorted(counts["model"].unique()):
+        subset = counts.loc[counts["model"] == model]
+        by_model.append(
+            (
+                model,
+                int(subset["n_ci_above_zero"].sum()),
+                int(subset["n_ci_below_zero"].sum()),
+                int(subset["n_mean_positive"].sum()),
+                int(subset["total"].sum()),
+            )
+        )
+    by_model.sort(key=lambda item: (item[1], item[3]), reverse=True)
+    leader = by_model[0]
+    leader_name = escape_latex(_model_name(leader[0]))
+    mixed = [
+        escape_latex(_model_name(model))
+        for model, above, below, _positive, _total in by_model
+        if above > 0 and below > 0
+    ]
+    trailing = by_model[-1]
+    lines = [
+        "Leitura cautelosa dos totais: "
+        f"{leader_name} concentra o maior número de células agregadas com "
+        f"intervalo de bootstrap inteiramente acima de zero ({leader[1]} de "
+        f"{leader[4]} avaliadas), seguido pelos demais modelos presentes nesta "
+        "edição."
+    ]
+    if len(by_model) > 1 and leader[1] > trailing[1]:
+        lines.append(
+            f"Em contraste, {escape_latex(_model_name(trailing[0]))} apresenta "
+            f"menos sinais estritamente positivos ({trailing[1]} células com IC "
+            "acima de zero)."
+        )
+    if mixed:
+        lines.append(
+            "Resultados mistos (simultaneamente células com IC acima e abaixo "
+            f"de zero) aparecem em {_join_pt(mixed)}, o que limita generalizações "
+            "fortes entre arquiteturas."
+        )
+    lines.append(
+        "Nenhum destes padrões implica causalidade no mundo real; a filtragem "
+        "STFT e o reescalonamento RMS permanecem fontes de variação do "
+        "procedimento."
+    )
+    return " ".join(lines)
+
+
+def _probe_stability_pattern_paragraph(summary: pd.DataFrame) -> str:
+    if summary.empty:
+        return ""
+    ordered = summary.sort_values("roc_auc_std_median")
+    calm = ordered.iloc[0]
+    volatile = summary.loc[summary["roc_auc_std_max"].idxmax()]
+    calm_name = escape_latex(_model_name(calm["model"]))
+    volatile_name = escape_latex(_model_name(volatile["model"]))
+    return (
+        "Entre os modelos listados, "
+        f"{calm_name} apresenta a mediana mais baixa de desvio-padrão da "
+        f"ROC-AUC ({_num(calm['roc_auc_std_median'])}) e do MCC "
+        f"({_num(calm['mcc_std_median'])}), enquanto "
+        f"{volatile_name} atinge o maior desvio-padrão máximo observado "
+        f"(ROC-AUC {_num(volatile['roc_auc_std_max'])}, MCC "
+        f"{_num(volatile['mcc_std_max'])}). "
+        "Com apenas três reamostragens bootstrap, estes números funcionam "
+        "como verificação de sensibilidade à amostra finita de treino, não "
+        "como intervalo de confiança preciso para o desempenho."
+    )
+
+
+def _executive_fidelity_stability_blurbs(tables: ReportTables) -> list[str]:
+    blurbs: list[str] = []
+    aligned_fidelity = _aligned_layer_faithfulness(tables)
+    if not aligned_fidelity.empty:
+        counts = faithfulness_aggregate_counts(aligned_fidelity)
+        if not counts.empty:
+            leader = counts.groupby("model", sort=True)[
+                "n_ci_above_zero"
+            ].sum()
+            model = leader.idxmax()
+            blurbs.append(
+                "Na fidelidade por intervenção (camada~12, diagonal), "
+                f"{escape_latex(_model_name(model))} reúne o maior número de "
+                f"células agregadas com IC bootstrap estritamente positivo "
+                f"({int(leader[model])} contagens somadas entre comparações), "
+                "sem implicar superioridade causal."
+            )
+    aligned_stability = _aligned_probe_stability(tables)
+    if not aligned_stability.empty:
+        summary = probe_stability_aggregate_by_model(aligned_stability)
+        if not summary.empty:
+            calm = summary.sort_values("roc_auc_std_median").iloc[0]
+            blurbs.append(
+                "Na sensibilidade do treino do probe (três bootstraps "
+                "estratificados), "
+                f"{escape_latex(_model_name(calm['model']))} mostra a mediana "
+                "mais baixa de desvio-padrão da ROC-AUC "
+                f"({_num(calm['roc_auc_std_median'])}), interpretada apenas "
+                "como cheque de robustez, não como incerteza ponta-a-ponta."
+            )
+    return blurbs
+
+
+def _conclusion_fidelity_stability_paragraphs(tables: ReportTables) -> list[str]:
+    paragraphs: list[str] = []
+    aligned_fidelity = _aligned_layer_faithfulness(tables)
+    if not aligned_fidelity.empty:
+        counts = faithfulness_aggregate_counts(aligned_fidelity)
+        paragraphs.append(_faithfulness_pattern_paragraph(counts))
+    aligned_stability = _aligned_probe_stability(tables)
+    if not aligned_stability.empty:
+        summary = probe_stability_aggregate_by_model(aligned_stability)
+        paragraphs.append(_probe_stability_pattern_paragraph(summary))
+    return paragraphs
+
+
 def _layer_faithfulness_tex(tables: ReportTables) -> str:
     aligned = _aligned_layer_faithfulness(tables)
     if aligned.empty:
         return ""
-    blocks: list[str] = []
-    for cell in _cells(tables):
-        rows = _cell_rows(aligned, cell)
-        if rows.empty:
-            continue
-        body = [
-            _row(
-                [
-                    int(row.k),
-                    escape_latex(str(row.true_class)),
-                    escape_latex(str(row.comparison)),
-                    _num(row.mean_difference),
-                    _num(row.ci_low),
-                    _num(row.ci_high),
-                    int(row.n_pairs),
-                    escape_latex(str(row.status)),
-                ]
-            )
-            for row in rows.itertuples(index=False)
-        ]
-        blocks += [
+    counts = faithfulness_aggregate_counts(aligned)
+    body = [
+        _row(
+            [
+                escape_latex(_model_name(row.model)),
+                escape_latex(
+                    _FAITHFULNESS_COMPARISON_PT.get(
+                        str(row.comparison), str(row.comparison)
+                    )
+                ),
+                int(row.total),
+                int(row.n_mean_positive),
+                int(row.n_ci_above_zero),
+                int(row.n_ci_below_zero),
+            ]
+        )
+        for row in counts.itertuples(index=False)
+    ]
+    return "\n".join(
+        [
             r"\begin{table}[H]",
             r"\centering",
             r"\small",
-            r"\setlength{\tabcolsep}{3pt}",
-            rf"\caption{{Comprehensividade pareada (delete): {_cell_tex(cell)}, "
-            r"camada 12 diagonal. Diferença média top/bottom vs.\ random com IC "
-            r"bootstrap pareado; Wilcoxon omitido aqui por brevidade.}",
-            rf"\label{{tab:layer-faithfulness-{_label(*cell)}}}",
+            r"\setlength{\tabcolsep}{4pt}",
+            r"\caption{Resumo descritivo da fidelidade por intervenção "
+            r"(camada~12, células diagonais): contagens sobre células agregadas "
+            r"por modelo e comparação. Detalhe completo em "
+            r"\texttt{layer\_faithfulness\_summary.csv}.}",
+            r"\label{tab:layer-faithfulness-summary}",
             _FIT_WIDTH_OPEN,
-            r"\begin{tabular}{rrlrrrrl}",
+            r"\begin{tabular}{llrrrr}",
             r"\toprule",
             _row(
                 [
-                    "$k$",
-                    "Classe",
+                    "Modelo",
                     "Comparação",
-                    r"$\Delta$ média",
-                    "IC inf.",
-                    "IC sup.",
-                    "$n$ pares",
-                    "Status",
+                    "Total",
+                    r"$\Delta$ média $>0$",
+                    "IC $>0$",
+                    "IC $<0$",
                 ]
             ),
             r"\midrule",
@@ -3983,7 +4212,7 @@ def _layer_faithfulness_tex(tables: ReportTables) -> str:
             r"\end{table}",
             "",
         ]
-    return "\n".join(blocks)
+    )
 
 
 def _num_std(value: object, n_seeds: object) -> str:
@@ -3996,52 +4225,40 @@ def _probe_stability_tex(tables: ReportTables) -> str:
     aligned = _aligned_probe_stability(tables)
     if aligned.empty:
         return ""
-    blocks: list[str] = []
-    for cell in _cells(tables):
-        rows = _cell_rows(aligned, cell)
-        if rows.empty:
-            continue
-        body = [
-            _row(
-                [
-                    int(row.layer),
-                    int(row.n_seeds),
-                    _num(row.roc_auc_mean),
-                    _num_std(row.roc_auc_std, row.n_seeds),
-                    _num(row.roc_auc_min),
-                    _num(row.roc_auc_max),
-                    _num(row.mcc_mean),
-                    _num_std(row.mcc_std, row.n_seeds),
-                    _num(row.mcc_min),
-                    _num(row.mcc_max),
-                ]
-            )
-            for row in rows.itertuples(index=False)
-        ]
-        blocks += [
+    summary = probe_stability_aggregate_by_model(aligned)
+    body = [
+        _row(
+            [
+                escape_latex(_model_name(row.model)),
+                _num(row.roc_auc_std_median),
+                _num(row.roc_auc_std_max),
+                _num(row.mcc_std_median),
+                _num(row.mcc_std_max),
+            ]
+        )
+        for row in summary.itertuples(index=False)
+    ]
+    return "\n".join(
+        [
             r"\begin{table}[H]",
             r"\centering",
             r"\small",
-            r"\setlength{\tabcolsep}{3pt}",
-            rf"\caption{{Reamostragem estratificada do treino do probe: {_cell_tex(cell)}. "
-            r"Média, desvio-padrão, mínimo e máximo de ROC-AUC e MCC sobre "
-            r"bootstrap estratificado do treino (embeddings e calibração/teste fixos).}",
-            rf"\label{{tab:probe-stability-{_label(*cell)}}}",
+            r"\setlength{\tabcolsep}{4pt}",
+            r"\caption{Sensibilidade do treino do probe: mediana e máximo do "
+            r"desvio-padrão de ROC-AUC e MCC sobre células camada$\times$origem"
+            r"$\times$destino (três bootstraps estratificados). Detalhe completo "
+            r"em \texttt{probe\_stability\_by\_layer.csv}.}",
+            r"\label{tab:probe-stability-summary}",
             _FIT_WIDTH_OPEN,
-            r"\begin{tabular}{rrrrrrrrrr}",
+            r"\begin{tabular}{lrrrr}",
             r"\toprule",
             _row(
                 [
-                    "Camada",
-                    "$n$ seeds",
-                    r"ROC-AUC $\mu$",
-                    r"ROC-AUC $\sigma$",
-                    "ROC min",
-                    "ROC max",
-                    r"MCC $\mu$",
-                    r"MCC $\sigma$",
-                    "MCC min",
-                    "MCC max",
+                    "Modelo",
+                    r"Mediana ROC $\sigma$",
+                    r"Máx. ROC $\sigma$",
+                    r"Mediana MCC $\sigma$",
+                    r"Máx. MCC $\sigma$",
                 ]
             ),
             r"\midrule",
@@ -4051,7 +4268,7 @@ def _probe_stability_tex(tables: ReportTables) -> str:
             r"\end{table}",
             "",
         ]
-    return "\n".join(blocks)
+    )
 
 
 def _performance_tex(tables: ReportTables) -> str:

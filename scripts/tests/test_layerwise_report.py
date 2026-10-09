@@ -29,10 +29,12 @@ from brspeech_xai.layerwise_report import (
     build_report_manifest,
     build_report_tables,
     escape_latex,
+    faithfulness_aggregate_counts,
     generate_report_bundle,
     load_report_source,
     main,
     parse_result_dir_name,
+    probe_stability_aggregate_by_model,
     render_report_figures,
     validate_result_directory,
     write_report_tables,
@@ -3957,3 +3959,129 @@ def test_report_layer_faithfulness_section_is_cautious_in_portuguese(tmp_path):
     assert "causal" in text.lower()
     assert "camada~12" in text
     assert "fora da diagonal" in text
+
+
+def test_faithfulness_aggregate_counts_arithmetic():
+    frame = pd.DataFrame(
+        [
+            {
+                "model": "hubert_base",
+                "comparison": "top_minus_random",
+                "mean_difference": 0.2,
+                "ci_low": 0.05,
+                "ci_high": 0.35,
+                "status": "ok",
+            },
+            {
+                "model": "hubert_base",
+                "comparison": "top_minus_random",
+                "mean_difference": -0.1,
+                "ci_low": -0.2,
+                "ci_high": -0.01,
+                "status": "ok",
+            },
+            {
+                "model": "hubert_base",
+                "comparison": "top_minus_bottom",
+                "mean_difference": 0.01,
+                "ci_low": -0.01,
+                "ci_high": 0.02,
+                "status": "ok",
+            },
+        ]
+    )
+    counts = faithfulness_aggregate_counts(frame)
+    random_row = counts.loc[
+        counts["comparison"] == "top_minus_random"
+    ].iloc[0]
+    assert int(random_row["total"]) == 2
+    assert int(random_row["n_mean_positive"]) == 1
+    assert int(random_row["n_ci_above_zero"]) == 1
+    assert int(random_row["n_ci_below_zero"]) == 1
+    bottom_row = counts.loc[
+        counts["comparison"] == "top_minus_bottom"
+    ].iloc[0]
+    assert int(bottom_row["n_ci_above_zero"]) == 0
+    assert int(bottom_row["n_ci_below_zero"]) == 0
+
+
+def test_probe_stability_aggregate_by_model_median_and_max():
+    frame = pd.DataFrame(
+        [
+            {
+                "model": "wav2vec2_base",
+                "roc_auc_std": 0.01,
+                "mcc_std": 0.02,
+            },
+            {
+                "model": "wav2vec2_base",
+                "roc_auc_std": 0.05,
+                "mcc_std": 0.04,
+            },
+        ]
+    )
+    summary = probe_stability_aggregate_by_model(frame)
+    row = summary.iloc[0]
+    assert float(row["roc_auc_std_median"]) == pytest.approx(0.03)
+    assert float(row["roc_auc_std_max"]) == pytest.approx(0.05)
+    assert float(row["mcc_std_median"]) == pytest.approx(0.03)
+    assert float(row["mcc_std_max"]) == pytest.approx(0.04)
+
+
+def test_faithfulness_tex_is_single_compact_table(tmp_path):
+    root = write_scientific_result_root(tmp_path / "compact_fidelity_tex")
+    paths = LayerwiseSuitePaths(root)
+    _write_layer_faithfulness_generation(paths, "hubert_base", "eng")
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    tex = report_module._layer_faithfulness_tex(tables)
+    assert tex.count(r"\begin{table}") == 1
+    assert "Resumo descritivo da fidelidade" in tex
+    assert r"\begin{tabular}{rrlrrrrl}" not in tex
+
+
+def test_report_fidelity_and_stability_use_compact_tables_and_cautious_prose(
+    tmp_path,
+):
+    root = write_scientific_result_root(tmp_path / "compact_sections")
+    paths = LayerwiseSuitePaths(root)
+    _write_layer_faithfulness_generation(paths, "hubert_base", "eng")
+    paths.probe_stability_dir("hubert_base").mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "profile": "hubert_base",
+                "layer": 12,
+                "source": "eng",
+                "target": "eng",
+                "n_seeds": 3,
+                "roc_auc_mean": 0.91,
+                "roc_auc_std": 0.01,
+                "roc_auc_min": 0.9,
+                "roc_auc_max": 0.92,
+                "mcc_mean": 0.55,
+                "mcc_std": 0.02,
+                "mcc_min": 0.53,
+                "mcc_max": 0.57,
+            }
+        ]
+    ).to_csv(paths.probe_stability_summary("hubert_base"), index=False)
+    loaded = load_report_source(validate_result_directory(root))
+    tables = build_report_tables([loaded])
+    report_path = tmp_path / "report_compact.tex"
+    write_report_tex(report_path, tables, [], [loaded])
+    text = report_path.read_text(encoding="utf-8")
+    assert "comparações múltiplas" in text
+    assert "Leitura cautelosa" in text
+    assert "três reamostragens" in text.lower() or "três bootstraps" in text
+    assert "Resumo executivo" in text
+    assert "concentra o maior número" in text or "fidelidade por intervenção" in text
+    assert "coorte" not in text.split("Fidelidade por intervenção")[1].split(
+        "Variabilidade"
+    )[0]
+    tables_dir = tmp_path / "tables_out"
+    write_report_tables(tables, tables_dir)
+    stability_tex = (tables_dir / "probe_stability_by_layer.tex").read_text(
+        encoding="utf-8"
+    )
+    assert stability_tex.count(r"\begin{table}") == 1
