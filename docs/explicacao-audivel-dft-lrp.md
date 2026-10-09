@@ -7,9 +7,11 @@ do rigor técnico. Cada seção começa com a intuição e termina com o detalhe
 
 > Convenção de "registro" (a mesma do resto do projeto):
 > - **Ilustrativo**: mostra/faz ouvir um padrão, sem afirmar significância nem causa.
-> - **Causal**: baseado em **intervenção** no áudio (remover algo e medir o efeito).
+> - **Fidelidade por intervenção**: modifica o áudio e mede a resposta do detector, mas não
+>   demonstra causalidade no mundo real porque a própria filtragem pode introduzir artefatos.
 >
-> A parte ouvível é ilustrativa. A parte que vira prova é o re-scoring de fidelidade.
+> A parte ouvível é ilustrativa. O re-scoring fornece evidência de fidelidade do modelo sob
+> uma intervenção controlada, não uma prova causal forte.
 
 ---
 
@@ -166,9 +168,10 @@ M \equiv 1 \;\Rightarrow\; \hat{x} = x
 
 ---
 
-## 6. Da ilustração à prova: a validação de fidelidade
+## 6. Da ilustração à medição: a validação de fidelidade
 
-Ouvir é convincente, mas não é evidência. Um som filtrado pode parecer "certo" e ainda assim
+Ouvir é convincente, mas não basta como evidência. Um som filtrado pode parecer "certo" e ainda
+assim
 não corresponder ao que o modelo usa. Por isso o passo decisivo: **devolver o áudio filtrado
 ao próprio detector e medir a decisão**. Se a região apontada é mesmo a evidência, mexer nela
 tem que mexer na resposta, mais do que mexer numa região qualquer.
@@ -180,9 +183,16 @@ tem que mexer na resposta, mais do que mexer numa região qualquer.
   relevantes. Se a decisão se mantém, essa parte **basta**.
 - **Remover o essencial (delete / comprehensiveness):** apague justamente as frequências mais
   relevantes. Se a decisão desmorona, essa parte era **necessária**.
-- **Controle aleatório (random):** faça o mesmo com a **mesma quantidade** de faixas, mas
-  escolhidas ao acaso. Isso mede o estrago "genérico" de filtrar, separando-o do estrago
-  específico de tirar a evidência certa.
+- **Controle inferior (bottom):** repita com as faixas de menor relevância DFT-LRP. Se o
+  ranking é informativo, as top-k devem ser mais suficientes/necessárias que as bottom-k.
+- **Controle aleatório pareado (random):** faça o mesmo com a **mesma quantidade** de faixas,
+  escolhidas ao acaso no mesmo clipe e no mesmo \(k\). Isso estima o efeito genérico de filtrar.
+- **Controle de energia RMS:** depois da filtragem, cada versão top, bottom e random é
+  reescalada para ter o mesmo RMS do áudio original. Assim, uma queda de confiança não pode ser
+  atribuída apenas à redução global de energia. O reescalonamento não recorta amplitudes
+  (`clipping`); `--no-rms-match` desliga o controle para análise de sensibilidade. Na exportação
+  ouvível, a conversão separada para PCM normaliza o pico, mas o detector recebe a onda sem esse
+  recorte.
 
 **Formal.**
 
@@ -191,14 +201,17 @@ tem que mexer na resposta, mais do que mexer numa região qualquer.
   previu spoof, contam as faixas positivas; se bonafide, as negativas).
 - **Varredura de \(k\):** repetimos com \(k \in \{1,2,3,4,6,8,12\}\) faixas mantidas/removidas
   e resumimos a curva com uma média estilo AOPC, mais um ponto principal (top-6).
-- **O que reportamos:** o **gap** entre a curva da DFT-LRP e a curva aleatória. É esse gap,
-  não o valor absoluto, que isola a qualidade da explicação do artefato do filtro.
+- **O que reportamos:** curvas e AOPC para top, bottom e random. Para comprehensiveness,
+  reportamos também diferenças pareadas por clipe e agregadas: top−random, top−bottom e
+  random−bottom, sempre usando os mesmos clipes e valores de \(k\).
 - **Incerteza:** intervalo de confiança de 95% por bootstrap **sobre os clipes** (a unidade de
-  variação é o clipe, não a banda).
+  variação é o clipe, não a banda), além do teste de Wilcoxon quando há pares suficientes e
+  diferenças não degeneradas. Casos insuficientes ou todos-zero são marcados explicitamente.
 
 A leitura esperada da figura: a linha **keep** fica alta (a evidência basta), a linha
-**delete** cai forte (a evidência é necessária), e a **random** fica no meio (filtrar em
-geral atrapalha um pouco, mas menos que tirar a evidência certa).
+**delete** cai forte (a evidência é necessária), enquanto **bottom** e **random** fornecem duas
+referências sob a mesma intervenção. Essa comparação reduz interpretações triviais por energia
+ou escolha de bandas, mas não elimina o confound introduzido pela filtragem STFT.
 
 - **Código implementado:** `scripts/dev/faithfulness_bands.py`, acionado pelo subcomando
   `vm.sh faithfulness`.
@@ -239,11 +252,11 @@ tarefa e arquitetura, não uma reimplementação.
 
 ## 8. Ressalvas (para não escorregar na linguagem)
 
-- **Filtrar introduz artefato.** É o mesmo confound da oclusão de H2. Por isso a versão
-  ouvível é **ilustrativa**, e a baseline aleatória existe: só o **gap** contra o aleatório
-  vira leitura justa.
-- **Tom observacional.** A sonificação ilustra e a métrica quantifica a fidelidade. Não
-  afirmamos causalidade além do que o re-scoring controlado sustenta.
+- **Filtrar introduz artefato.** É o mesmo confound da oclusão de H2. Bottom, random e
+  RMS-match tornam a comparação mais justa, mas não removem esse confound.
+- **Sem causalidade forte.** A sonificação ilustra e a métrica quantifica fidelidade sob uma
+  intervenção STFT específica. Ela não estabelece que as bandas tenham efeito causal em áudio
+  real não filtrado, nem que manipular o processo gerador nessas bandas produziria o mesmo efeito.
 - **Escopo inicial.** Começamos por um encoder (wav2vec2) em todo o split de teste, para
   validar o método; a extensão a hubert e wavlm reusa o mesmo código.
 
@@ -265,5 +278,7 @@ tarefa e arquitetura, não uma reimplementação.
 - **WOLA:** técnica de soma ponderada das janelas que torna a reconstrução exata.
 - **Suficiência (keep):** manter só o relevante basta para a decisão?
 - **Comprehensiveness (delete):** remover o relevante derruba a decisão?
+- **Bottom-k:** as \(k\) faixas de menor relevância, usadas como controle do ranking.
+- **RMS-match:** reescala cada onda perturbada para a energia RMS da original, sem clipping.
 - **AOPC:** média da curva ao longo de vários \(k\); resume o experimento num número.
 - **Bootstrap:** reamostrar os clipes para estimar a incerteza (intervalo de confiança).

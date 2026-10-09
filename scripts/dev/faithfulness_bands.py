@@ -1,19 +1,20 @@
-"""Validação de fidelidade por bandas: a explicação DFT-LRP aponta as faixas que sustentam
-(keep) e derrubam (delete) a decisão mais do que faixas aleatórias?
+"""Fidelidade por intervenção em bandas: a explicação DFT-LRP aponta faixas que sustentam
+(keep) e derrubam (delete) a decisão mais do que faixas bottom-k ou aleatórias?
 
-Transforma a sonificação (ilustrativa) em evidência (verificável). Para cada clipe do split de
-teste: rankeamos as 24 faixas mel pela relevância DFT-LRP orientada à classe PREVISTA, filtramos
-o áudio mantendo/removendo as top-k faixas (band-pass/band-stop na STFT, invertível), e devolvemos
-o áudio filtrado ao MESMO detector adaptado (D_ad). Comparamos com uma baseline aleatória de mesma
-quantidade de faixas: o que vale como evidência é o GAP contra o aleatório, que isola a explicação
-do artefato genérico do filtro (mesmo confound de H2).
+Para cada clipe, rankeamos as 24 faixas mel pela relevância DFT-LRP orientada à classe prevista,
+mantemos/removemos top-k, bottom-k e k faixas aleatórias com a mesma intervenção STFT e devolvemos
+o áudio ao mesmo detector. Por padrão, cada variante é reescalada para o RMS do original, para
+controlar energia. O reescalonamento não faz clipping; amplitudes fora de [-1, 1] são permitidas.
 
 Métricas (vocabulário da área):
   * suficiência   = p_pred quando MANTEMOS só as top-k faixas (alto => a evidência basta);
   * comprehensiveness = p_pred(orig) - p_pred(delete_k) (alto => a evidência é necessária).
-Resumo AOPC: média das curvas ao longo de k, e o gap DFT-LRP menos aleatório.
+Resumo AOPC: média das curvas ao longo de k. Comparações pareadas reportam top-random,
+top-bottom e random-bottom no mesmo clipe/k.
 
-Incerteza: IC 95% por bootstrap SOBRE OS CLIPES (a unidade de variação é o clipe, não a banda).
+Este é um experimento de fidelidade baseado em intervenção, não uma demonstração de causalidade
+no mundo real: a filtragem STFT continua sendo um confound. Bottom e random são controles para
+interpretar esse artefato, não para eliminá-lo.
 
 Fase 1: um encoder (wav2vec2), todos os clipes de teste. Extensão a hubert/wavlm reusa o mesmo
 código via --encoder.
@@ -36,6 +37,19 @@ from brspeech_xai import dft_lrp
 # para que as funções puras do filtro (testadas em CI local sem GPU) importem só numpy.
 
 _KS_DEFAULT = (1, 2, 3, 4, 6, 8, 12)
+CONDITION_ORDER = (
+    "keep_dftlrp",
+    "keep_dftlrp_bottom",
+    "keep_random",
+    "delete_dftlrp",
+    "delete_dftlrp_bottom",
+    "delete_random",
+)
+_COMPARISON_ORDER = (
+    ("top_minus_random", "delete_dftlrp", "delete_random"),
+    ("top_minus_bottom", "delete_dftlrp", "delete_dftlrp_bottom"),
+    ("random_minus_bottom", "delete_random", "delete_dftlrp_bottom"),
+)
 
 
 def band_of_bin(freqs: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -87,6 +101,41 @@ def reconstruct_with_band_mask(x_time: np.ndarray, mask_bins: np.ndarray,
     return y[pad:pad + n]
 
 
+def rms_match_waveform(original: np.ndarray, perturbed: np.ndarray) -> np.ndarray:
+    """Escala ``perturbed`` para o RMS de ``original``, sem clipping.
+
+    Entradas não finitas ou shapes diferentes são rejeitados. Se o original tem RMS zero, a
+    saída é zero; se apenas a variante tem RMS zero, ela permanece zero porque energia não pode
+    ser criada por escala multiplicativa. O chamador pode desativar este controle para análise
+    de sensibilidade.
+    """
+    x = np.asarray(original, dtype=np.float64)
+    y = np.asarray(perturbed, dtype=np.float64)
+    if x.shape != y.shape:
+        raise ValueError("original and perturbed must have the same shape")
+    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError("RMS matching requires finite waveforms")
+    if x.size == 0:
+        return y.copy()
+    x_rms = float(np.sqrt(np.mean(np.square(x))))
+    y_rms = float(np.sqrt(np.mean(np.square(y))))
+    if not np.isfinite(x_rms) or not np.isfinite(y_rms):
+        raise ValueError("RMS matching produced non-finite energy")
+    if x_rms == 0.0:
+        return np.zeros_like(y)
+    if y_rms == 0.0:
+        return y.copy()
+    return y * (x_rms / y_rms)
+
+
+def select_band_extremes(ranking: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Retorna top-k e bottom-k de um ranking descendente, preservando a ordem."""
+    ranked = np.asarray(ranking, dtype=int).ravel()
+    if k < 0 or k > ranked.size:
+        raise ValueError(f"k must be between 0 and {ranked.size}")
+    return ranked[:k], ranked[ranked.size - k:] if k else ranked[:0]
+
+
 def rank_bands_for_clip(r_tf: np.ndarray, freqs: np.ndarray, edges: np.ndarray,
                         pred_spoof: bool) -> np.ndarray:
     """Ordena as bandas (desc) pela relevância DFT-LRP orientada à classe prevista.
@@ -116,6 +165,100 @@ def _bootstrap_ci(values: np.ndarray, n_boot: int = 1000, alpha: float = 0.05,
     return float(np.percentile(means, 100 * alpha / 2)), float(np.percentile(means, 100 * (1 - alpha / 2)))
 
 
+def paired_comparison_rows(rows, ks, classes, p_orig_per_clip, seed: int = 42,
+                           n_boot: int = 1000) -> list[dict]:
+    """Compara comprehensiveness top/random/bottom nos mesmos clipes e valores de k.
+
+    Gera linhas por clipe e linhas agregadas. O Wilcoxon só é calculado com pelo menos dois
+    pares e alguma diferença não nula; caso contrário ``status`` explicita
+    ``insufficient_pairs`` ou ``degenerate_all_zero``.
+    """
+    from scipy.stats import wilcoxon
+
+    values: dict[tuple[int, str, int], float] = {}
+    class_of: dict[int, str] = {}
+    for row in rows:
+        idx = int(row["index"])
+        values[(idx, row["condition"], int(row["k"]))] = (
+            float(p_orig_per_clip[idx]) - float(row["p_pred"]))
+        class_of[idx] = row["true_class"]
+
+    out: list[dict] = []
+    required = tuple(cond for _name, cond, _rhs in _COMPARISON_ORDER) + \
+        tuple(rhs for _name, _lhs, rhs in _COMPARISON_ORDER)
+    required = tuple(dict.fromkeys(required))
+    for cls in classes:
+        for k in ks:
+            paired_idxs = [
+                idx for idx in sorted(class_of)
+                if class_of[idx] == cls and all((idx, cond, k) in values for cond in required)
+            ]
+            diffs_by_comparison: dict[str, list[float]] = {
+                name: [] for name, _lhs, _rhs in _COMPARISON_ORDER}
+            lhs_by_comparison: dict[str, list[float]] = {
+                name: [] for name, _lhs, _rhs in _COMPARISON_ORDER}
+            rhs_by_comparison: dict[str, list[float]] = {
+                name: [] for name, _lhs, _rhs in _COMPARISON_ORDER}
+            for idx in paired_idxs:
+                for name, lhs_cond, rhs_cond in _COMPARISON_ORDER:
+                    lhs = values[(idx, lhs_cond, k)]
+                    rhs = values[(idx, rhs_cond, k)]
+                    diff = lhs - rhs
+                    lhs_by_comparison[name].append(lhs)
+                    rhs_by_comparison[name].append(rhs)
+                    diffs_by_comparison[name].append(diff)
+                    out.append({
+                        "level": "clip", "index": idx, "k": k, "true_class": cls,
+                        "comparison": name, "lhs": lhs, "rhs": rhs, "difference": diff,
+                        "mean_difference": float("nan"), "ci_low": float("nan"),
+                        "ci_high": float("nan"), "n_pairs": 1,
+                        "wilcoxon_p": float("nan"), "status": "paired",
+                    })
+
+            for name, _lhs_cond, _rhs_cond in _COMPARISON_ORDER:
+                diff = np.asarray(diffs_by_comparison[name], dtype=np.float64)
+                lhs = np.asarray(lhs_by_comparison[name], dtype=np.float64)
+                rhs = np.asarray(rhs_by_comparison[name], dtype=np.float64)
+                n_pairs = int(diff.size)
+                mean_diff = float(diff.mean()) if n_pairs else float("nan")
+                if n_pairs < 2:
+                    status, lo, hi, p_value = (
+                        "insufficient_pairs", float("nan"), float("nan"), float("nan"))
+                else:
+                    lo, hi = _bootstrap_ci(diff, n_boot=n_boot, seed=seed)
+                    if np.all(diff == 0):
+                        status, p_value = "degenerate_all_zero", float("nan")
+                    else:
+                        try:
+                            p_value = float(wilcoxon(diff).pvalue)
+                            status = "ok"
+                        except ValueError:
+                            status, p_value = "wilcoxon_invalid", float("nan")
+                out.append({
+                    "level": "aggregate", "index": "", "k": k, "true_class": cls,
+                    "comparison": name,
+                    "lhs": float(lhs.mean()) if n_pairs else float("nan"),
+                    "rhs": float(rhs.mean()) if n_pairs else float("nan"),
+                    "difference": float("nan"), "mean_difference": mean_diff,
+                    "ci_low": lo, "ci_high": hi, "n_pairs": n_pairs,
+                    "wilcoxon_p": p_value, "status": status,
+                })
+    return out
+
+
+def _write_paired_comparisons_csv(path: Path, rows, ks, classes, p_orig_per_clip,
+                                  seed: int = 42) -> None:
+    result = paired_comparison_rows(rows, ks, classes, p_orig_per_clip, seed=seed)
+    fields = [
+        "level", "index", "k", "true_class", "comparison", "lhs", "rhs", "difference",
+        "mean_difference", "ci_low", "ci_high", "n_pairs", "wilcoxon_p", "status",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(result)
+
+
 def score_waves(model, waves: list[np.ndarray], device: str,
                 batch_size: int = 16) -> np.ndarray:
     """Logit de spoof do D_ad para uma lista de formas de onda já normalizadas (feed direto)."""
@@ -131,8 +274,8 @@ def score_waves(model, waves: list[np.ndarray], device: str,
 
 
 def process_clip(model, r_tf, x_time, logit, freqs, edges, win, hop, ks, n_random,
-                 rng, device) -> list[tuple[str, int, float]]:
-    """Re-scoring keep/delete/random por k para um clipe. Devolve (condition, k, p_pred)."""
+                 rng, device, rms_match: bool = True) -> list[tuple[str, int, float]]:
+    """Re-scoring top/bottom/random por k. Devolve ``(condition, k, p_pred)`` ordenado."""
     n_bands = len(edges) - 1
     pred_spoof = logit > 0
     ranking = rank_bands_for_clip(r_tf, freqs, edges, pred_spoof)
@@ -141,20 +284,23 @@ def process_clip(model, r_tf, x_time, logit, freqs, edges, win, hop, ks, n_rando
     # Monta todas as variantes do clipe e pontua num único lote (rótulo -> índice).
     waves: list[np.ndarray] = []
     labels: list[tuple[str, int, int]] = []   # (condition, k, draw)
+
+    def add_wave(condition, k, draw, keep):
+        wave = reconstruct_with_band_mask(
+            x_time, band_mask_bins(freqs, edges, keep), win, hop)
+        waves.append(rms_match_waveform(x_time, wave) if rms_match else wave)
+        labels.append((condition, k, draw))
+
     for k in ks:
-        top = ranking[:k]
-        waves.append(reconstruct_with_band_mask(x_time, band_mask_bins(freqs, edges, top), win, hop))
-        labels.append(("keep_dftlrp", k, 0))
-        keep_del = np.setdiff1d(all_bands, top, assume_unique=False)
-        waves.append(reconstruct_with_band_mask(x_time, band_mask_bins(freqs, edges, keep_del), win, hop))
-        labels.append(("delete_dftlrp", k, 0))
+        top, bottom = select_band_extremes(ranking, k)
+        add_wave("keep_dftlrp", k, 0, top)
+        add_wave("delete_dftlrp", k, 0, np.setdiff1d(all_bands, top))
+        add_wave("keep_dftlrp_bottom", k, 0, bottom)
+        add_wave("delete_dftlrp_bottom", k, 0, np.setdiff1d(all_bands, bottom))
         for d in range(n_random):
             rand = rng.choice(n_bands, size=k, replace=False)
-            waves.append(reconstruct_with_band_mask(x_time, band_mask_bins(freqs, edges, rand), win, hop))
-            labels.append(("keep_random", k, d))
-            rand_del = np.setdiff1d(all_bands, rand, assume_unique=False)
-            waves.append(reconstruct_with_band_mask(x_time, band_mask_bins(freqs, edges, rand_del), win, hop))
-            labels.append(("delete_random", k, d))
+            add_wave("keep_random", k, d, rand)
+            add_wave("delete_random", k, d, np.setdiff1d(all_bands, rand))
 
     logits = score_waves(model, waves, device)
     p = _sigmoid(logits) if pred_spoof else _sigmoid(-logits)   # p da classe PREVISTA
@@ -163,14 +309,15 @@ def process_clip(model, r_tf, x_time, logit, freqs, edges, win, hop, ks, n_rando
     acc: dict[tuple[str, int], list[float]] = {}
     for (cond, k, _d), pv in zip(labels, p):
         acc.setdefault((cond, k), []).append(float(pv))
-    return [(cond, k, float(np.mean(v))) for (cond, k), v in acc.items()]
+    return [(cond, k, float(np.mean(acc[(cond, k)])))
+            for k in ks for cond in CONDITION_ORDER if (cond, k) in acc]
 
 
 def _aggregate(rows, ks, classes):
     """Média + IC 95% (bootstrap sobre clipes) de p_pred por (class, condition, k)."""
     out = {}
     for cls in classes:
-        for cond in ("keep_dftlrp", "keep_random", "delete_dftlrp", "delete_random"):
+        for cond in CONDITION_ORDER:
             for k in ks:
                 vals = np.asarray([r["p_pred"] for r in rows
                                    if r["true_class"] == cls and r["condition"] == cond
@@ -183,19 +330,19 @@ def _aggregate(rows, ks, classes):
 
 
 def _plot(agg, ks, classes, p_orig, out_png, out_pdf):
-    """Curvas de fidelidade: p_pred vs nº de faixas, por classe. keep (verde), delete (vermelho);
-    linha cheia = DFT-LRP, tracejada = aleatório. O gap cheio-tracejado é a evidência."""
+    """Curvas de fidelidade top/bottom/random sob a mesma intervenção STFT."""
     from brspeech_xai.plotting import set_plot_style
     import matplotlib.pyplot as plt
 
     set_plot_style()
     fig, axes = plt.subplots(1, len(classes), figsize=(5.2 * len(classes), 4.0), squeeze=False)
-    # cor = operação (keep verde / delete vermelho); traço+marcador = fonte (DFT-LRP cheia·o /
-    # aleatório tracejada·x), para as quatro entradas ficarem distinguíveis na legenda.
+    # cor = operação; traço+marcador = braço experimental.
     style = {
         "keep_dftlrp": ("#2e7d32", "-", "o", "keep top-k (DFT-LRP)"),
+        "keep_dftlrp_bottom": ("#2e7d32", ":", "^", "keep bottom-k (DFT-LRP)"),
         "keep_random": ("#2e7d32", "--", "x", "keep k (random)"),
         "delete_dftlrp": ("#c0392b", "-", "o", "delete top-k (DFT-LRP)"),
+        "delete_dftlrp_bottom": ("#c0392b", ":", "^", "delete bottom-k (DFT-LRP)"),
         "delete_random": ("#c0392b", "--", "x", "delete k (random)"),
     }
     kx = np.asarray(ks, dtype=float)
@@ -221,7 +368,7 @@ def _plot(agg, ks, classes, p_orig, out_png, out_pdf):
         ax.set_xticks(kx)
         if j == 0:
             ax.legend(fontsize=7, loc="best", handlelength=3.0)
-    fig.suptitle("Faithfulness by frequency bands (keep / delete vs random)", fontsize=12)
+    fig.suptitle("Intervention-based faithfulness (top / bottom / random bands)", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=200)
@@ -244,7 +391,7 @@ def _write_curves_csv(path: Path, agg, ks, classes):
         wr = csv.writer(f)
         wr.writerow(["k", "condition", "true_class", "p_pred_mean", "ci_low", "ci_high", "n_clips"])
         for cls in classes:
-            for cond in ("keep_dftlrp", "keep_random", "delete_dftlrp", "delete_random"):
+            for cond in CONDITION_ORDER:
                 for k in ks:
                     if (cls, cond, k) not in agg:
                         continue
@@ -255,8 +402,9 @@ def _write_curves_csv(path: Path, agg, ks, classes):
 def _write_aopc_csv(path: Path, rows, ks, classes, p_orig_per_clip):
     """AOPC por clipe (média nas curvas) e IC 95% por bootstrap sobre clipes.
 
-    sufficiency        = média_k p_pred(keep_k)          (DFT-LRP e random)
-    comprehensiveness  = média_k [p_orig - p_pred(delete_k)] (DFT-LRP e random)
+    sufficiency        = média_k p_pred(keep_k)
+    comprehensiveness  = média_k [p_orig - p_pred(delete_k)]
+    Cada métrica inclui top DFT-LRP, bottom DFT-LRP e matched-random.
     """
     by_clip: dict[int, dict[tuple[str, int], float]] = {}
     cls_of: dict[int, str] = {}
@@ -273,9 +421,14 @@ def _write_aopc_csv(path: Path, rows, ks, classes, p_orig_per_clip):
             vals.append(pk if kind == "suff" else (p_orig_per_clip[idx] - pk))
         return float(np.mean(vals))
 
-    specs = [("sufficiency", "keep_dftlrp", "suff"), ("sufficiency", "keep_random", "suff"),
-             ("comprehensiveness", "delete_dftlrp", "comp"),
-             ("comprehensiveness", "delete_random", "comp")]
+    specs = [
+        ("sufficiency", "keep_dftlrp", "suff"),
+        ("sufficiency", "keep_dftlrp_bottom", "suff"),
+        ("sufficiency", "keep_random", "suff"),
+        ("comprehensiveness", "delete_dftlrp", "comp"),
+        ("comprehensiveness", "delete_dftlrp_bottom", "comp"),
+        ("comprehensiveness", "delete_random", "comp"),
+    ]
     with open(path, "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["metric", "condition", "true_class", "aopc", "ci_low", "ci_high", "n_clips"])
@@ -324,12 +477,12 @@ def _bands_hz(edges: np.ndarray, idx) -> str:
 
 
 def export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, clip_idx, audio_k,
-                       freqs, edges, win, hop, eps, device, out_dir, write_wav, log, seed=0):
-    """Grava, para poucos clipes, o áudio original e as intervenções por banda (top-k e aleatório).
+                       freqs, edges, win, hop, eps, device, out_dir, write_wav, log, seed=0,
+                       rms_match=True):
+    """Grava original e intervenções top/bottom/random para poucos clipes.
 
     Mesma operação que o experimento pontua (band-pass/stop invertível), para o ouvido conferir o
-    que a métrica mede. Também re-pontua cada versão no D_ad e registra p(classe prevista) no
-    manifesto, para casar percepção com número.
+    que a métrica mede. O controle RMS segue a CLI. Não há clipping dentro deste módulo.
     """
     rng = np.random.default_rng(seed)
     n_bands = len(edges) - 1
@@ -343,12 +496,14 @@ def export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, clip_idx
         true_cls = "spoof" if gt[i] == 1 else "bonafide"
         pred_cls = "spoof" if pred_spoof else "bonafide"
         ranking = rank_bands_for_clip(r_tf, freqs, edges, pred_spoof)
-        top = ranking[:audio_k]
+        top, bottom = select_band_extremes(ranking, audio_k)
         rand = rng.choice(n_bands, size=audio_k, replace=False)
         variants = {
             "original": None,
             f"keep_top{audio_k}": top,
             f"delete_top{audio_k}": np.setdiff1d(all_bands, top),
+            f"keep_bottom{audio_k}": bottom,
+            f"delete_bottom{audio_k}": np.setdiff1d(all_bands, bottom),
             f"keep_rand{audio_k}": rand,
             f"delete_rand{audio_k}": np.setdiff1d(all_bands, rand),
         }
@@ -358,6 +513,8 @@ def export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, clip_idx
         for name, keep in variants.items():
             y = x_time if keep is None else reconstruct_with_band_mask(
                 x_time, band_mask_bins(freqs, edges, keep), win, hop)
+            if keep is not None and rms_match:
+                y = rms_match_waveform(x_time, y)
             write_wav(d / f"{name}.wav", y)
             waves.append(np.asarray(y, dtype=np.float64))
             names.append(name)
@@ -366,6 +523,7 @@ def export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, clip_idx
             keep = variants[name]
             rows.append({"clip": clip_tag, "index": i, "true_class": true_cls, "pred": pred_cls,
                          "variant": name, "p_pred": round(float(pv), 4),
+                         "rms_matched": bool(rms_match and keep is not None),
                          "kept_bands_khz": "all" if keep is None else _bands_hz(edges, keep)})
         log.info(f"[{clip_tag}] pred={pred_cls} p_orig={float(_sigmoid(logit if pred_spoof else -logit)):.2f} "
                  f"| top{audio_k} bands (kHz): {_bands_hz(edges, top)}")
@@ -378,7 +536,10 @@ def export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, clip_idx
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="faithfulness_bands")
+    ap = argparse.ArgumentParser(
+        prog="faithfulness_bands",
+        description="Fidelidade por intervenção STFT (top/bottom/random), com confound de filtro; "
+                    "não estima causalidade no mundo real.")
     ap.add_argument("--results-root", default="/workspace/results")
     ap.add_argument("--encoder", default="wav2vec2",
                     help="substring do slug do encoder (default: wav2vec2)")
@@ -393,6 +554,10 @@ def main(argv=None) -> int:
                          "(inclui FN/FP raros). Substitui --max-clips.")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--rms-match", action=argparse.BooleanOptionalAction, default=True,
+        help="iguala o RMS de cada variante ao original (default: ligado; use --no-rms-match "
+             "para sensibilidade). Não aplica clipping.")
     ap.add_argument("--out", default=None,
                     help="dir de saída (default: <root>/_aggregate/faithfulness)")
     ap.add_argument("--audio-only", action="store_true",
@@ -449,7 +614,8 @@ def main(argv=None) -> int:
         log.info(f"modo áudio: clipes {args.audio_clips} | top-{args.audio_k} de {cfg.bands.n_bands}")
         export_audio_clips(model, emb, relevance_for_clip, audios, srs, gt, args.audio_clips,
                            args.audio_k, freqs, edges, args.stdft_win, args.stdft_hop, args.eps,
-                           device, audio_dir, _write_wav, log, seed=args.seed)
+                           device, audio_dir, _write_wav, log, seed=args.seed,
+                           rms_match=args.rms_match)
         return 0
 
     classes = ["spoof", "bonafide"]
@@ -479,7 +645,7 @@ def main(argv=None) -> int:
         clip_indices = list(range(n_clips))
         how = "todos" if args.max_clips <= 0 else f"sequencial {n_clips}"
     log.info(f"clipes: {len(clip_indices)} ({how}, split={split}) | bandas={cfg.bands.n_bands} "
-             f"| ks={args.ks} | n_random={args.n_random}")
+             f"| ks={args.ks} | n_random={args.n_random} | rms_match={args.rms_match}")
 
     rng = np.random.default_rng(args.seed)
     rows = []
@@ -494,7 +660,7 @@ def main(argv=None) -> int:
         p_orig_per_clip[i] = float(_sigmoid(logit if pred_spoof else -logit))
         for cond, k, pv in process_clip(model, r_tf, x_time, logit, freqs, edges,
                                         args.stdft_win, args.stdft_hop, args.ks,
-                                        args.n_random, rng, device):
+                                        args.n_random, rng, device, rms_match=args.rms_match):
             rows.append({"index": i, "true_class": true_cls,
                          "pred_class": "spoof" if pred_spoof else "bonafide",
                          "condition": cond, "k": k, "p_pred": pv})
@@ -511,6 +677,9 @@ def main(argv=None) -> int:
     _write_curves_csv(out_dir / f"faithfulness_bands_{short}.csv", agg, args.ks, classes)
     _write_aopc_csv(out_dir / f"faithfulness_aopc_{short}.csv", rows, args.ks, classes,
                     p_orig_per_clip)
+    _write_paired_comparisons_csv(
+        out_dir / f"faithfulness_paired_comparisons_{short}.csv",
+        rows, args.ks, classes, p_orig_per_clip, seed=args.seed)
     log.info(f"fidelidade salva em: {out_dir}")
     return 0
 
