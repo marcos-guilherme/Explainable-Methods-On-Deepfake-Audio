@@ -44,7 +44,11 @@ resolve_active_xai_generation = resolve_active_generation
 _CATALOG_COLUMNS = frozenset({"sample_id", "label", "processed_path"})
 _PREDICTION_COLUMNS = frozenset({"sample_id", "y_true", "score", "prediction"})
 _SCORE_RECOMPUTE_RTOL = 1e-5
-_SCORE_RECOMPUTE_ATOL = 7e-3
+# Batched embedding extraction and singleton gradient recomputation use
+# different CUDA reduction schedules.  The 1e-2 bound covers the largest
+# observed drift across the three Base encoders while remaining a strict
+# probability-scale guard against a mismatched head, layer, or checkpoint.
+_SCORE_RECOMPUTE_ATOL = 1e-2
 
 
 def _validated_catalog(catalog: pd.DataFrame) -> pd.DataFrame:

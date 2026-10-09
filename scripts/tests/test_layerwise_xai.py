@@ -564,9 +564,11 @@ def test_recomputed_score_drift_remains_bounded(tmp_path):
         )
 
 
-def test_observed_max_singleton_recompute_drift_is_bounded_and_audited(tmp_path):
-    persisted_score = 0.5992735
-    recomputed_score = 0.592789113500356
+def test_observed_encoder_singleton_recompute_drift_is_bounded_and_audited(tmp_path):
+    # Largest drift observed while recomputing the fixed XAI cohort one clip
+    # at a time instead of in the batched embedding pass (Wav2Vec2 Base).
+    persisted_score = 0.9366511106491089
+    recomputed_score = 0.9291791295729785
     recomputed_logit = float(
         np.log(recomputed_score / (1.0 - recomputed_score))
     )
