@@ -4028,13 +4028,27 @@ def _figure_conservation(plt, tables, figures_dir):
 
 _ENCODER_AGREEMENT_TRANSFORMATION = (
     "mediana por camada agregada sobre células treino→avaliação; faixa sombreada "
-    "entre quartis 25 e 75 % dessas células (não é intervalo de bootstrap; IC "
-    "bootstrap por linha permanecem apenas no CSV e no resumo TeX)"
+    "entre quartis 25 e 75 % dessas células (não reproduz ci_low/ci_high); "
+    "intervalos bootstrap por linha permanecem no CSV, não nos resumos TeX compactos"
 )
 _BOOTSTRAP_CI_TRANSFORMATION = (
-    "cada linha usa o ponto estimado persistido e a faixa sombreada reproduz "
-    "o intervalo de confiança bootstrap de 95 % (ci_low–ci_high) da tabela; "
-    "status que invalidam o IC são contabilizados no resumo TeX, não ocultados"
+    "cada curva usa o ponto estimado persistido e a faixa sombreada reproduz "
+    "o intervalo de confiança bootstrap de 95 % (ci_low–ci_high) da mesma linha "
+    "da tabela, interrompida quando o IC não é finito; os resumos TeX agregam "
+    "medianas e faixas entre linhas, sem repetir ci_low/ci_high linha a linha"
+)
+_COMPARISON_METRIC_LABELS_PT: Mapping[str, str] = MappingProxyType(
+    {
+        "score_spearman": "Spearman do score",
+        "prediction_agreement": "Acordo de decisão",
+        "cohen_kappa": "Kappa de Cohen",
+        "relevance_cosine_similarity": "Similaridade cosseno",
+        "relevance_jensen_shannon_distance": "Distância JS",
+        "jensen_shannon_distance": "Distância JS",
+        "delta_roc_auc": "Δ ROC-AUC",
+        "delta_mcc": "Δ MCC",
+        "wasserstein_distance": "Wasserstein (Hz)",
+    }
 )
 _COMPARISON_SUPX_Y = 0.10
 _COMPARISON_LEGEND_KW = {
@@ -4102,7 +4116,25 @@ def _plot_median_band(ax, summary: pd.DataFrame, *, label: str | None = None) ->
     _layer_axis_dynamic(ax, layers)
 
 
-def _plot_persisted_bootstrap_ci(
+def _comparison_metric_label(metric: str) -> str:
+    return _COMPARISON_METRIC_LABELS_PT.get(metric, metric)
+
+
+def _contiguous_true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, active in enumerate(mask):
+        if active and start is None:
+            start = index
+        if not active and start is not None:
+            runs.append((start, index))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask)))
+    return runs
+
+
+def _plot_persisted_bootstrap_ci_segmented(
     ax, series: pd.DataFrame, *, label: str | None = None
 ) -> None:
     ordered = series.sort_values("layer")
@@ -4110,18 +4142,43 @@ def _plot_persisted_bootstrap_ci(
     estimate = ordered["estimate"].to_numpy(dtype=np.float64)
     low = ordered["ci_low"].to_numpy(dtype=np.float64)
     high = ordered["ci_high"].to_numpy(dtype=np.float64)
-    ax.plot(
-        layers,
-        estimate,
-        marker="o",
-        markersize=2.5,
-        linewidth=1.0,
-        label=label,
-    )
-    finite = np.isfinite(layers) & np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
-    if finite.any():
-        ax.fill_between(layers[finite], low[finite], high[finite], alpha=0.22)
-    _layer_axis_dynamic(ax, layers)
+    ci_finite = np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
+    label_used = False
+    for start, end in _contiguous_true_runs(ci_finite):
+        segment = slice(start, end)
+        ax.plot(
+            layers[segment],
+            estimate[segment],
+            marker="o",
+            markersize=2.5,
+            linewidth=1.0,
+            label=label if not label_used else None,
+        )
+        ax.fill_between(
+            layers[segment],
+            low[segment],
+            high[segment],
+            alpha=0.22,
+        )
+        label_used = True
+    estimate_only = np.isfinite(estimate) & ~ci_finite
+    if estimate_only.any():
+        ax.plot(
+            layers[estimate_only],
+            estimate[estimate_only],
+            marker="x",
+            linestyle="none",
+            markersize=3.0,
+            color="0.35",
+        )
+    if np.isfinite(estimate).any():
+        _layer_axis_dynamic(ax, layers[np.isfinite(estimate)])
+
+
+def _plot_persisted_bootstrap_ci(
+    ax, series: pd.DataFrame, *, label: str | None = None
+) -> None:
+    _plot_persisted_bootstrap_ci_segmented(ax, series, label=label)
 
 
 def _pair_pretty(model_a: str, model_b: str) -> str:
@@ -5523,8 +5580,9 @@ def _comparisons_section(
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
         "A figura de acordo entre encoders mostra a mediana por camada e a faixa "
         "interquartil entre células. As outras três figuras reproduzem as "
-        "estimativas e os intervalos bootstrap persistidos; contagens de status "
-        "e detalhes por célula permanecem nos CSV e nos resumos tabulares abaixo.",
+        "estimativas e os intervalos bootstrap persistidos (ci_low–ci_high) nas "
+        "figuras; os resumos tabulares abaixo agregam medianas e faixas entre "
+        "linhas, enquanto os CSV mantêm cada linha com IC completo.",
         "",
         "A unidade de reamostragem é o áudio. Quando a estatística é estimável, "
         "o procedimento usa 2.000 reamostragens bootstrap estratificadas por "
@@ -6247,8 +6305,8 @@ def _encoder_agreement_tex(tables: ReportTables) -> str:
         estimates = estimates[np.isfinite(estimates)]
         body.append(
             [
-                escape_latex(f"{model_a}|{model_b}"),
-                escape_latex(str(metric)),
+                escape_latex(_pair_pretty(str(model_a), str(model_b))),
+                escape_latex(_comparison_metric_label(str(metric))),
                 int(len(group)),
                 _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
                 (
@@ -6260,8 +6318,9 @@ def _encoder_agreement_tex(tables: ReportTables) -> str:
             ]
         )
     return _comparison_compact_table(
-        "Resumo do acordo entre encoders: mediana e extensão por par de modelos "
-        "e métrica. Detalhe completo em \\texttt{encoder\\_agreement.csv}.",
+        "Resumo do acordo entre encoders: mediana e extensão agregadas por par "
+        "de modelos e métrica (ci_low/ci_high por linha apenas no CSV). Detalhe "
+        "completo em \\texttt{encoder\\_agreement.csv}.",
         "tab:encoder-agreement-summary",
         ["Par", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
@@ -6292,8 +6351,9 @@ def _language_shift_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo compacto da mudança de relevância entre idiomas-alvo (JS): mediana "
-        "e faixa sobre todas as células e camadas por modelo e grupo. Detalhe "
-        "completo em \\texttt{language\\_shift.csv}.",
+        "e faixa agregadas sobre linhas da tabela por modelo e grupo (não repete "
+        "ci_low/ci_high linha a linha). Detalhe completo em "
+        "\\texttt{language\\_shift.csv}.",
         "tab:language-shift-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
@@ -6311,7 +6371,7 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
         body.append(
             [
                 escape_latex(_model_name(str(model))),
-                escape_latex(str(metric)),
+                escape_latex(_comparison_metric_label(str(metric))),
                 int(len(group)),
                 _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
                 (
@@ -6324,7 +6384,8 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo compacto diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e "
-        "$\\Delta$ MCC) por modelo e métrica. Detalhe completo em "
+        "$\\Delta$ MCC) por modelo e métrica: medianas e faixas agregadas, sem "
+        "repetir ci_low/ci_high linha a linha. Detalhe completo em "
         "\\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
         "tab:diagonal-off-summary",
         ["Modelo", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
@@ -6356,8 +6417,8 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo compacto da divergência espectral (Wasserstein em Hz) por modelo "
-        "e grupo de classe. Detalhe completo em "
-        "\\texttt{spectral\\_divergence.csv}.",
+        "e grupo: medianas e faixas agregadas (ci_low/ci_high completos no CSV). "
+        "Detalhe completo em \\texttt{spectral\\_divergence.csv}.",
         "tab:spectral-divergence-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana (Hz)", "Faixa (Hz)", "Status (contagens)"],
         body,

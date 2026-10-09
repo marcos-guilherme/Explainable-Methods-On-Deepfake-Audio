@@ -4657,9 +4657,77 @@ def test_bootstrap_comparison_figures_shade_persisted_ci(
     report_module._FIGURE_BUILDERS[family](
         plt, full_comparison_tables, tmp_path / family
     )
+    table = getattr(full_comparison_tables, family)
     assert calls
-    widths = [np.nanmax(high - low) for _x, low, high in calls]
-    assert any(width > 0 for width in widths), widths
+    matched = False
+    for _, row in table.iterrows():
+        for x, low, high in calls:
+            for index in range(len(x)):
+                if int(x[index]) != int(row["layer"]):
+                    continue
+                if np.isclose(low[index], row["ci_low"]) and np.isclose(
+                    high[index], row["ci_high"]
+                ):
+                    matched = True
+    assert matched, "fill_between never received persisted ci_low/ci_high"
+
+
+def test_bootstrap_ci_fill_breaks_at_non_finite_interval_layers(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    meta = {
+        "model": "hubert_base",
+        "source": "eng",
+        "target_a": "eng",
+        "target_b": "por",
+        "group": "all",
+        "metric": "jensen_shannon_distance",
+        "unit": "bits",
+        "n_a": 4,
+        "n_b": 4,
+        "status": "ok",
+        "n_resamples": 2000,
+        "seed": 42,
+        "ci_level": 0.95,
+        "valid_bootstrap_n": 2000,
+        "degenerate_n": 0,
+    }
+    rows = []
+    for layer in (1, 2, 3, 4):
+        rows.append(
+            {
+                **meta,
+                "layer": layer,
+                "estimate": 0.2 + 0.01 * layer,
+                "ci_low": 0.1 + 0.01 * layer,
+                "ci_high": 0.3 + 0.01 * layer,
+            }
+        )
+    rows[1]["ci_low"] = float("nan")
+    rows[1]["ci_high"] = float("nan")
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        language_shift=pd.DataFrame(rows),
+        planned_figures=_TWELVE_FAMILIES,
+    )
+    calls: list[tuple] = []
+
+    original = plt.Axes.fill_between
+
+    def spy(self, x, y1, y2, *args, **kwargs):
+        calls.append((np.asarray(x), np.asarray(y1), np.asarray(y2)))
+        return original(self, x, y1, y2, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "fill_between", spy)
+    report_module._FIGURE_BUILDERS["language_shift"](
+        plt, tables, tmp_path / "gap"
+    )
+    assert len(calls) == 2
+    covered = {int(value) for call in calls for value in call[0]}
+    assert covered == {1, 3, 4}
+    assert 2 not in covered
 
 
 def test_encoder_agreement_record_distinguishes_cell_iqr_from_bootstrap(
@@ -4667,8 +4735,27 @@ def test_encoder_agreement_record_distinguishes_cell_iqr_from_bootstrap(
 ):
     records = render_report_figures(full_comparison_tables, tmp_path / "rec")
     record = next(item for item in records if item.name == "encoder_agreement")
-    assert "quartis" in record.transformation.lower() or "iqr" in record.transformation.lower()
-    assert "bootstrap" not in record.transformation.lower()
+    lowered = record.transformation.lower()
+    assert "quartis" in lowered or "interquartil" in lowered
+    assert "não reproduz ci_low/ci_high" in lowered
+    assert "csv" in lowered
+
+
+def test_comparison_tex_summaries_use_readable_model_and_metric_labels(
+    full_comparison_tables, tmp_path
+):
+    write_report_tables(full_comparison_tables, tmp_path / "tables")
+    encoder_tex = (tmp_path / "tables" / "encoder_agreement.tex").read_text(
+        encoding="utf-8"
+    )
+    diagonal_tex = (tmp_path / "tables" / "diagonal_vs_offdiagonal.tex").read_text(
+        encoding="utf-8"
+    )
+    assert "hubert_base" not in encoder_tex
+    assert "score_spearman" not in encoder_tex
+    assert "delta_roc_auc" not in diagonal_tex
+    assert "HuBERT" in encoder_tex
+    assert "ROC-AUC" in diagonal_tex or "roc" in diagonal_tex.lower()
 
 
 @pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
