@@ -4025,12 +4025,24 @@ def _figure_conservation(plt, tables, figures_dir):
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
-_COMPARISON_BAND_TRANSFORMATION = (
-    "mediana sobre células treino→avaliação por camada; faixa sombreada entre "
-    "quartis 25 e 75 % das células agregadas; intervalos de bootstrap da tabela "
-    "completa permanecem no CSV e entram no resumo TeX (omissões de IC quando "
-    "status ≠ ok são contabilizadas, não ocultadas)"
+_ENCODER_AGREEMENT_TRANSFORMATION = (
+    "mediana por camada agregada sobre células treino→avaliação; faixa sombreada "
+    "entre quartis 25 e 75 % dessas células (não é intervalo de bootstrap; IC "
+    "bootstrap por linha permanecem apenas no CSV e no resumo TeX)"
 )
+_BOOTSTRAP_CI_TRANSFORMATION = (
+    "cada linha usa o ponto estimado persistido e a faixa sombreada reproduz "
+    "o intervalo de confiança bootstrap de 95 % (ci_low–ci_high) da tabela; "
+    "status que invalidam o IC são contabilizados no resumo TeX, não ocultados"
+)
+_COMPARISON_SUPX_Y = 0.10
+_COMPARISON_LEGEND_KW = {
+    "loc": "upper center",
+    "bbox_to_anchor": (0.5, 0.02),
+    "ncol": 3,
+    "fontsize": 6.5,
+    "frameon": False,
+}
 _PERF_ENCODER_METRICS: tuple[tuple[str, str, str], ...] = (
     ("score_spearman", "Spearman do score", "ρ"),
     ("prediction_agreement", "Acordo de decisão", "fração"),
@@ -4077,13 +4089,96 @@ def _median_iqr_by_layer(frame: pd.DataFrame, keys: Sequence[str]) -> pd.DataFra
 def _plot_median_band(ax, summary: pd.DataFrame, *, label: str | None = None) -> None:
     ordered = summary.sort_values("layer")
     layers = ordered["layer"].to_numpy(dtype=int)
-    ax.plot(layers, ordered["median"], marker="o", markersize=2.5, linewidth=1.0, label=label)
+    ax.plot(
+        layers,
+        ordered["median"],
+        marker="o",
+        markersize=2.5,
+        linewidth=1.0,
+        label=label,
+    )
     ax.fill_between(layers, ordered["q25"], ordered["q75"], alpha=0.2)
     _layer_axis_dynamic(ax, layers)
 
 
-def _pair_short(model_a: str, model_b: str) -> str:
-    return f"{model_a}|{model_b}"
+def _plot_persisted_bootstrap_ci(
+    ax, series: pd.DataFrame, *, label: str | None = None
+) -> None:
+    ordered = series.sort_values("layer")
+    layers = ordered["layer"].to_numpy(dtype=int)
+    estimate = ordered["estimate"].to_numpy(dtype=np.float64)
+    low = ordered["ci_low"].to_numpy(dtype=np.float64)
+    high = ordered["ci_high"].to_numpy(dtype=np.float64)
+    ax.plot(
+        layers,
+        estimate,
+        marker="o",
+        markersize=2.5,
+        linewidth=1.0,
+        label=label,
+    )
+    finite = np.isfinite(layers) & np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
+    if finite.any():
+        ax.fill_between(layers[finite], low[finite], high[finite], alpha=0.22)
+    _layer_axis_dynamic(ax, layers)
+
+
+def _pair_pretty(model_a: str, model_b: str) -> str:
+    return f"{_model_name(model_a)}|{_model_name(model_b)}"
+
+
+def _transfer_pretty(source: str, target: str) -> str:
+    return f"{_language_name(source)}\u2192{_language_name(target)}"
+
+
+def _language_pair_pretty(language_a: str, language_b: str) -> str:
+    return f"{_language_name(language_a)}\u2194{_language_name(language_b)}"
+
+
+def _finalize_comparison_line_figure(
+    fig,
+    axes,
+    *,
+    legend_title: str | None = None,
+    top: float = 0.90,
+    bottom: float = 0.34,
+) -> None:
+    flat = np.atleast_1d(axes).ravel()
+    for axis in flat:
+        if axis.get_visible():
+            axis.set_xlabel("")
+    handles: list[object] = []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for axis in flat:
+        if not axis.get_visible():
+            continue
+        axis_handles, axis_labels = axis.get_legend_handles_labels()
+        for handle, label in zip(axis_handles, axis_labels):
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            handles.append(handle)
+            labels.append(label)
+    if handles:
+        legend = fig.legend(
+            handles,
+            labels,
+            title=legend_title,
+            title_fontsize=7 if legend_title else None,
+            **_COMPARISON_LEGEND_KW,
+        )
+        if legend_title:
+            legend.get_title().set_fontsize(7)
+    fig.supxlabel(_LAYER_AXIS_LABEL, fontsize=8, y=_COMPARISON_SUPX_Y)
+    fig.subplots_adjust(
+        left=0.12,
+        right=0.98,
+        top=top,
+        bottom=bottom,
+        hspace=0.32,
+        wspace=0.28,
+    )
 
 
 def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
@@ -4100,14 +4195,13 @@ def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
         }
     )
     n_pairs = len(pairs)
-    n_cols = max(len(_PERF_ENCODER_METRICS), len(_XAI_ENCODER_METRICS))
+    n_cols = len(_PERF_ENCODER_METRICS)
     fig, axes = plt.subplots(
         2 * n_pairs,
         n_cols,
-        figsize=(_FIGURE_WIDTH, 2.1 * 2 * n_pairs + 0.6),
+        figsize=(_FIGURE_WIDTH, 2.1 * 2 * n_pairs + 0.8),
         squeeze=False,
     )
-    layers = sorted({int(value) for value in frame["layer"]})
     for pair_index, (model_a, model_b) in enumerate(pairs):
         pair_frame = frame[
             (frame["model_a"] == model_a) & (frame["model_b"] == model_b)
@@ -4128,18 +4222,13 @@ def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
                 if pair_index == 0:
                     ax.set_title(title, fontsize=8)
                 if metric_index == 0:
-                    ax.set_ylabel(f"{_pair_short(model_a, model_b)}\n{ylabel}", fontsize=7)
+                    ax.set_ylabel(
+                        f"{_pair_pretty(model_a, model_b)}\n{ylabel}", fontsize=7
+                    )
                 else:
                     ax.set_ylabel(ylabel, fontsize=7)
-    for ax in axes[-1]:
-        ax.set_xlabel(_LAYER_AXIS_LABEL)
-    fig.legend(
-        [f"Par {a}|{b}" for a, b in pairs],
-        loc="upper center",
-        ncol=min(3, n_pairs),
-        fontsize=7,
-        frameon=False,
-    )
+            for extra_col in range(len(metrics), n_cols):
+                axes[2 * pair_index + row_block, extra_col].set_visible(False)
     record = _record(
         tables,
         name,
@@ -4153,10 +4242,10 @@ def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
         ),
         metric="acordo entre encoders (desempenho e explicação)",
         units="ρ, fração, κ, cosseno e bits em eixos rotulados separadamente",
-        transformation=_COMPARISON_BAND_TRANSFORMATION,
+        transformation=_ENCODER_AGREEMENT_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(fig, axes, bottom=0.20)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -4172,7 +4261,7 @@ def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(_FIGURE_WIDTH, 2.0 * n_rows + 0.6),
+        figsize=(_FIGURE_WIDTH, 2.0 * n_rows + 0.8),
         squeeze=False,
         sharex=True,
     )
@@ -4187,26 +4276,20 @@ def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
                     group_frame = pair_frame[pair_frame["group"] == group]
                     if group_frame.empty:
                         continue
-                    summary = _median_iqr_by_layer(
-                        group_frame,
-                        ("model", "source", "target_a", "target_b", "group"),
-                    )
-                    _plot_median_band(
+                    _plot_persisted_bootstrap_ci(
                         ax,
-                        summary,
+                        group_frame,
                         label=(
-                            f"{target_a}↔{target_b} · "
+                            f"{_language_pair_pretty(target_a, target_b)} · "
                             f"{_GROUP_LABELS_PT.get(group, group)}"
                         ),
                     )
             if row == 0:
-                ax.set_title(f"Probe fixo · {source}", fontsize=8)
+                ax.set_title(
+                    f"Probe fixo · {_language_name(source)}", fontsize=8
+                )
             if column == 0:
-                ax.set_ylabel(f"{model}\nJS (bits)", fontsize=7)
-            ax.axhline(0.0, color="0.7", linewidth=0.6, linestyle=":")
-    for ax in axes[-1]:
-        ax.set_xlabel(_LAYER_AXIS_LABEL)
-    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
+                ax.set_ylabel(f"{_model_name(model)}\nJS (bits)", fontsize=7)
     record = _record(
         tables,
         name,
@@ -4219,10 +4302,12 @@ def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
         ),
         metric="distância JS entre idiomas-alvo",
         units="bits (logaritmo base 2)",
-        transformation=_COMPARISON_BAND_TRANSFORMATION,
+        transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(
+        fig, axes, legend_title="Par de idiomas-alvo e grupo"
+    )
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -4239,7 +4324,7 @@ def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path
     fig, axes = plt.subplots(
         len(models),
         len(metrics),
-        figsize=(_FIGURE_WIDTH, 2.2 * len(models) + 0.6),
+        figsize=(_FIGURE_WIDTH, 2.2 * len(models) + 0.8),
         squeeze=False,
         sharex=True,
     )
@@ -4251,22 +4336,18 @@ def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path
             for (source, target), group in metric_frame.groupby(
                 ["source", "target"], sort=True
             ):
-                summary = _median_iqr_by_layer(group, ("model", "source", "target"))
-                _plot_median_band(
+                _plot_persisted_bootstrap_ci(
                     ax,
-                    summary,
-                    label=f"{source}→{target}",
+                    group,
+                    label=_transfer_pretty(str(source), str(target)),
                 )
             ax.axhline(0.0, color="0.45", linewidth=0.8)
             if row == 0:
                 ax.set_title(title, fontsize=8)
             if column == 0:
-                ax.set_ylabel(f"{model}\n{ylabel}", fontsize=7)
+                ax.set_ylabel(f"{_model_name(model)}\n{ylabel}", fontsize=7)
             else:
                 ax.set_ylabel(ylabel, fontsize=7)
-    for ax in axes[-1]:
-        ax.set_xlabel(_LAYER_AXIS_LABEL)
-    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
     record = _record(
         tables,
         name,
@@ -4278,10 +4359,12 @@ def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path
         ),
         metric="Δ desempenho off-diagonal − diagonal",
         units="ROC-AUC e MCC adimensionais",
-        transformation=_COMPARISON_BAND_TRANSFORMATION,
+        transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(
+        fig, axes, legend_title="Transferência (treino→avaliação)"
+    )
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -4320,24 +4403,20 @@ def _figure_spectral_divergence(plt, tables: ReportTables, figures_dir: Path):
                 group_frame = pair_frame[pair_frame["group"] == group]
                 if group_frame.empty:
                     continue
-                summary = _median_iqr_by_layer(
-                    group_frame,
-                    ("model", "language_a", "language_b", "group"),
-                )
-                _plot_median_band(
+                _plot_persisted_bootstrap_ci(
                     ax,
-                    summary,
+                    group_frame,
                     label=_GROUP_LABELS_PT.get(group, group),
                 )
             if row == 0:
-                ax.set_title(f"{language_a}↔{language_b} (diag.)", fontsize=8)
+                ax.set_title(
+                    f"{_language_pair_pretty(language_a, language_b)} (diag.)",
+                    fontsize=8,
+                )
             if column == 0:
-                ax.set_ylabel(f"{model}\nWasserstein (Hz)", fontsize=7)
+                ax.set_ylabel(f"{_model_name(model)}\nWasserstein (Hz)", fontsize=7)
             else:
                 ax.set_ylabel("Wasserstein (Hz)", fontsize=7)
-    for ax in axes[-1]:
-        ax.set_xlabel(_LAYER_AXIS_LABEL)
-    fig.legend(loc="upper center", ncol=3, fontsize=7, frameon=False)
     record = _record(
         tables,
         name,
@@ -4349,10 +4428,10 @@ def _figure_spectral_divergence(plt, tables: ReportTables, figures_dir: Path):
         ),
         metric="Wasserstein entre distribuições espectrais",
         units="Hz (suporte nos centros de banda registrados)",
-        transformation=_COMPARISON_BAND_TRANSFORMATION,
+        transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(fig, axes, legend_title="Grupo de classe")
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -6098,16 +6177,12 @@ def _language_shift_tex(tables: ReportTables) -> str:
     if frame.empty:
         return ""
     body = []
-    for keys, group in frame.groupby(
-        ["model", "source", "target_a", "target_b", "group"], sort=True
-    ):
-        model, source, target_a, target_b, group_name = keys
+    for (model, group_name), group in frame.groupby(["model", "group"], sort=True):
         estimates = group["estimate"].to_numpy(dtype=np.float64)
         estimates = estimates[np.isfinite(estimates)]
         body.append(
             [
                 escape_latex(_model_name(str(model))),
-                escape_latex(f"{source}→{target_a}|{target_b}"),
                 escape_latex(_GROUP_LABELS_PT.get(str(group_name), str(group_name))),
                 int(len(group)),
                 _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
@@ -6120,10 +6195,11 @@ def _language_shift_tex(tables: ReportTables) -> str:
             ]
         )
     return _comparison_compact_table(
-        "Resumo da mudança de relevância entre idiomas-alvo (JS). Detalhe completo "
-        "em \\texttt{language\\_shift.csv}.",
+        "Resumo compacto da mudança de relevância entre idiomas-alvo (JS): mediana "
+        "e faixa sobre todas as células e camadas por modelo e grupo. Detalhe "
+        "completo em \\texttt{language\\_shift.csv}.",
         "tab:language-shift-summary",
-        ["Modelo", "Treino / pares-alvo", "Grupo", "Camadas", "Mediana", "Faixa", "Status"],
+        ["Modelo", "Grupo", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
     )
 
@@ -6133,14 +6209,12 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
     if frame.empty:
         return ""
     body = []
-    for keys, group in frame.groupby(["model", "source", "target", "metric"], sort=True):
-        model, source, target, metric = keys
+    for (model, metric), group in frame.groupby(["model", "metric"], sort=True):
         estimates = group["estimate"].to_numpy(dtype=np.float64)
         estimates = estimates[np.isfinite(estimates)]
         body.append(
             [
                 escape_latex(_model_name(str(model))),
-                escape_latex(f"{source}→{target}"),
                 escape_latex(str(metric)),
                 int(len(group)),
                 _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
@@ -6153,10 +6227,11 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
             ]
         )
     return _comparison_compact_table(
-        "Resumo diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e $\\Delta$ MCC). "
-        "Detalhe completo em \\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
+        "Resumo compacto diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e "
+        "$\\Delta$ MCC) por modelo e métrica. Detalhe completo em "
+        "\\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
         "tab:diagonal-off-summary",
-        ["Modelo", "Transferência", "Métrica", "Camadas", "Mediana", "Faixa", "Status"],
+        ["Modelo", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
     )
 
@@ -6166,16 +6241,12 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
     if frame.empty:
         return ""
     body = []
-    for keys, group in frame.groupby(
-        ["model", "language_a", "language_b", "group"], sort=True
-    ):
-        model, language_a, language_b, group_name = keys
+    for (model, group_name), group in frame.groupby(["model", "group"], sort=True):
         estimates = group["estimate"].to_numpy(dtype=np.float64)
         estimates = estimates[np.isfinite(estimates)]
         body.append(
             [
                 escape_latex(_model_name(str(model))),
-                escape_latex(f"{language_a}|{language_b}"),
                 escape_latex(_GROUP_LABELS_PT.get(str(group_name), str(group_name))),
                 int(len(group)),
                 _num(float(np.median(estimates))) if estimates.size else _NOT_AVAILABLE,
@@ -6188,10 +6259,11 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
             ]
         )
     return _comparison_compact_table(
-        "Resumo da divergência espectral (Wasserstein em Hz) entre pares "
-        "diagonais de idioma. Detalhe completo em \\texttt{spectral\\_divergence.csv}.",
+        "Resumo compacto da divergência espectral (Wasserstein em Hz) por modelo "
+        "e grupo de classe. Detalhe completo em "
+        "\\texttt{spectral\\_divergence.csv}.",
         "tab:spectral-divergence-summary",
-        ["Modelo", "Par de idiomas", "Grupo", "Camadas", "Mediana (Hz)", "Faixa (Hz)", "Status"],
+        ["Modelo", "Grupo", "Linhas", "Mediana (Hz)", "Faixa (Hz)", "Status (contagens)"],
         body,
     )
 

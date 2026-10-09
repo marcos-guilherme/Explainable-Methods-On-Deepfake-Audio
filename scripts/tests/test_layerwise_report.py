@@ -4402,6 +4402,315 @@ def test_multiple_models_add_encoder_agreement_figure(tmp_path):
         assert tables.omitted_comparisons[name] == "single_language"
 
 
+_COMPARISON_BOOTSTRAP_FAMILIES = (
+    "language_shift",
+    "diagonal_vs_offdiagonal",
+    "spectral_divergence",
+)
+_COMPARISON_TEX_ROW_LIMITS = {
+    "encoder_agreement": 15,
+    "language_shift": 9,
+    "diagonal_vs_offdiagonal": 6,
+    "spectral_divergence": 9,
+}
+
+
+def _capture_comparison_layout(fig, name: str) -> dict:
+    import matplotlib.pyplot as plt
+
+    fig.canvas.draw()
+    renderer = fig._get_renderer()
+    layout = {
+        "name": name,
+        "figure_legend_labels": [
+            text.get_text()
+            for legend in fig.legends
+            for text in legend.get_texts()
+        ],
+        "axis_xlabels": [
+            axis.get_xlabel()
+            for axis in fig.axes
+            if axis.get_visible()
+        ],
+        "figure_xlabel": (
+            fig._supxlabel.get_text() if fig._supxlabel is not None else ""
+        ),
+        "figure_xlabel_box": (
+            fig._supxlabel.get_window_extent(renderer)
+            if fig._supxlabel is not None
+            else None
+        ),
+        "legend_boxes": [
+            legend.get_window_extent(renderer) for legend in fig.legends
+        ],
+        "title_box": (
+            fig._suptitle.get_window_extent(renderer)
+            if fig._suptitle is not None
+            else None
+        ),
+        "hidden_axes": [
+            axis for axis in fig.axes if not axis.get_visible()
+        ],
+        "fill_between_calls": [],
+    }
+    return layout
+
+
+def _render_comparison_family_with_layout(tables, tmp_path, family: str):
+    import matplotlib.pyplot as plt
+
+    captured: dict = {}
+    original_save = report_module._save_report_figure
+
+    def capture(fig, figure_name, figures_dir):
+        captured.update(_capture_comparison_layout(fig, figure_name))
+        return original_save(fig, figure_name, figures_dir)
+
+    report_module._save_report_figure = capture
+    try:
+        report_module._FIGURE_BUILDERS[family](plt, tables, tmp_path)
+    finally:
+        report_module._save_report_figure = original_save
+    return captured
+
+
+@pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
+def test_comparison_figure_legend_labels_are_unique(
+    full_comparison_tables, tmp_path, family
+):
+    layout = _render_comparison_family_with_layout(
+        full_comparison_tables, tmp_path / family, family
+    )
+    labels = layout["figure_legend_labels"]
+    assert labels
+    assert len(labels) == len(set(labels)), labels
+
+
+def test_encoder_agreement_hides_unused_xai_subplot_column(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    captured_axes: list = []
+
+    def capture(fig, figure_name, figures_dir):
+        captured_axes.extend(list(fig.axes))
+        plt.close(fig)
+        return (f"{figure_name}.pdf", f"{figure_name}.png")
+
+    monkeypatch.setattr(report_module, "_save_report_figure", capture)
+    report_module._FIGURE_BUILDERS["encoder_agreement"](
+        plt, full_comparison_tables, tmp_path / "enc_layout"
+    )
+    assert any(not axis.get_visible() for axis in captured_axes)
+
+
+def test_encoder_agreement_uses_shared_supxlabel_without_per_axis_xlabels(
+    full_comparison_tables, tmp_path
+):
+    layout = _render_comparison_family_with_layout(
+        full_comparison_tables, tmp_path / "encoder_agreement", "encoder_agreement"
+    )
+    assert not any(layout["axis_xlabels"])
+    assert layout["figure_xlabel"]
+
+
+@pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
+def test_comparison_figure_title_legend_and_xlabel_do_not_overlap(
+    full_comparison_tables, tmp_path, family
+):
+    layout = _render_comparison_family_with_layout(
+        full_comparison_tables, tmp_path / family, family
+    )
+    assert not any(layout["axis_xlabels"])
+    assert layout["figure_xlabel"]
+    assert layout["figure_xlabel_box"] is not None
+    title_box = layout["title_box"]
+    assert title_box is not None
+    for legend_box in layout["legend_boxes"]:
+        assert title_box.y0 >= legend_box.y1 or title_box.y1 <= legend_box.y0
+        assert legend_box.y1 <= layout["figure_xlabel_box"].y0, family
+
+
+@pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
+def test_bootstrap_comparison_figures_shade_persisted_ci(
+    full_comparison_tables, tmp_path, family, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    calls: list[tuple] = []
+
+    original = plt.Axes.fill_between
+
+    def spy(self, x, y1, y2, *args, **kwargs):
+        calls.append((np.asarray(x), np.asarray(y1), np.asarray(y2)))
+        return original(self, x, y1, y2, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "fill_between", spy)
+    report_module._FIGURE_BUILDERS[family](
+        plt, full_comparison_tables, tmp_path / family
+    )
+    assert calls
+    widths = [np.nanmax(high - low) for _x, low, high in calls]
+    assert any(width > 0 for width in widths), widths
+
+
+def test_encoder_agreement_record_distinguishes_cell_iqr_from_bootstrap(
+    full_comparison_tables, tmp_path
+):
+    records = render_report_figures(full_comparison_tables, tmp_path / "rec")
+    record = next(item for item in records if item.name == "encoder_agreement")
+    assert "quartis" in record.transformation.lower() or "iqr" in record.transformation.lower()
+    assert "bootstrap" not in record.transformation.lower()
+
+
+@pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
+def test_bootstrap_comparison_records_describe_persisted_ci(
+    full_comparison_tables, tmp_path, family
+):
+    records = render_report_figures(full_comparison_tables, tmp_path / "rec")
+    record = next(item for item in records if item.name == family)
+    assert "bootstrap" in record.transformation.lower()
+    assert "95" in record.transformation or "0,95" in record.transformation
+
+
+def test_comparison_tex_summaries_stay_bounded_for_inflated_grids(
+    full_comparison_tables, tmp_path
+):
+    """Compact TeX must not grow with every source/target/layer row in the CSV."""
+    from itertools import combinations
+
+    models = ("hubert_base", "wav2vec2_base", "wavlm_base")
+    languages = ("eng", "por", "zho")
+    layers = list(range(1, 13))
+    meta = {
+        "n_resamples": 2000,
+        "seed": 42,
+        "ci_level": 0.95,
+        "valid_bootstrap_n": 2000,
+        "degenerate_n": 0,
+        "status": "ok",
+    }
+
+    encoder_rows = []
+    for model_a, model_b in combinations(models, 2):
+        for metric in (
+            "score_spearman",
+            "prediction_agreement",
+            "cohen_kappa",
+            "relevance_cosine_similarity",
+            "relevance_jensen_shannon_distance",
+        ):
+            for source in languages:
+                for target in languages:
+                    for layer in layers:
+                        encoder_rows.append(
+                            {
+                                "model_a": model_a,
+                                "model_b": model_b,
+                                "source": source,
+                                "target": target,
+                                "layer": layer,
+                                "metric": metric,
+                                "unit": "u",
+                                "estimate": 0.5,
+                                "ci_low": 0.4,
+                                "ci_high": 0.6,
+                                "n": 4,
+                                **meta,
+                            }
+                        )
+    shift_rows = []
+    for model in models:
+        for source in languages:
+            for target_a, target_b in combinations(languages, 2):
+                for layer in layers:
+                    for group in ("all", "real", "synthetic"):
+                        shift_rows.append(
+                            {
+                                "model": model,
+                                "source": source,
+                                "target_a": target_a,
+                                "target_b": target_b,
+                                "layer": layer,
+                                "group": group,
+                                "metric": "jensen_shannon_distance",
+                                "unit": "bits",
+                                "estimate": 0.2,
+                                "ci_low": 0.1,
+                                "ci_high": 0.3,
+                                "n_a": 4,
+                                "n_b": 4,
+                                **meta,
+                            }
+                        )
+    diagonal_rows = []
+    for model in models:
+        for source in languages:
+            for target in languages:
+                for layer in layers:
+                    for metric in ("delta_roc_auc", "delta_mcc"):
+                        diagonal_rows.append(
+                            {
+                                "model": model,
+                                "source": source,
+                                "target": target,
+                                "layer": layer,
+                                "metric": metric,
+                                "unit": "dimensionless",
+                                "estimate": 0.01,
+                                "ci_low": -0.02,
+                                "ci_high": 0.04,
+                                "n": 4,
+                                **meta,
+                            }
+                        )
+    spectral_rows = []
+    for model in models:
+        for language_a, language_b in combinations(languages, 2):
+            for layer in layers:
+                for group in ("all", "real", "synthetic"):
+                    spectral_rows.append(
+                        {
+                            "model": model,
+                            "language_a": language_a,
+                            "language_b": language_b,
+                            "layer": layer,
+                            "group": group,
+                            "metric": "wasserstein_distance",
+                            "unit": "Hz",
+                            "estimate": 12.0,
+                            "ci_low": 10.0,
+                            "ci_high": 14.0,
+                            "n_a": 4,
+                            "n_b": 4,
+                            **meta,
+                        }
+                    )
+
+    inflated = dataclasses.replace(
+        full_comparison_tables,
+        models=models,
+        languages=languages,
+        planned_figures=_TWELVE_FAMILIES,
+        omitted_comparisons={},
+        encoder_agreement=pd.DataFrame(encoder_rows),
+        language_shift=pd.DataFrame(shift_rows),
+        diagonal_vs_offdiagonal=pd.DataFrame(diagonal_rows),
+        spectral_divergence=pd.DataFrame(spectral_rows),
+    )
+    write_report_tables(inflated, tmp_path / "tables")
+    for family, limit in _COMPARISON_TEX_ROW_LIMITS.items():
+        tex = (tmp_path / "tables" / f"{family}.tex").read_text(encoding="utf-8")
+        body = tex.split(r"\midrule", 1)[1].split(r"\bottomrule")[0]
+        rows = [
+            line
+            for line in body.strip().splitlines()
+            if line.strip() and not line.strip().startswith("%")
+        ]
+        assert len(rows) <= limit, (family, len(rows), limit)
+
+
 # ---------------------------------------------------------------------------
 # Per-sample predictions and XAI relevance for downstream comparisons
 # ---------------------------------------------------------------------------
