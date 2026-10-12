@@ -3044,6 +3044,12 @@ def test_escape_latex_maps_common_typographic_characters_safely():
     assert escape_latex("ação é ü") == "ação é ü"
 
 
+def test_escape_latex_lets_a_long_language_pair_break_after_the_arrow():
+    assert escape_latex("(portugu\u00eas\u2194mandarim)") == (
+        r"(português$\leftrightarrow$\allowbreak{}mandarim)"
+    )
+
+
 def test_escape_latex_replaces_unsupported_characters_with_ascii_codepoints():
     assert escape_latex("\u4e2d\u6587") == "[U+4E2D][U+6587]"
     assert escape_latex("a\U0001f4a5") == "a[U+1F4A5]"
@@ -4150,6 +4156,35 @@ def test_long_id_bundle_compiles_without_significant_overfull_boxes(
     assert "Overfull \\vbox" not in log
 
 
+def test_front_matter_page_numbers_do_not_shift_the_body(eng_tex):
+    body = eng_tex.split(r"\begin{document}", 1)[1]
+    front = (
+        "\n\\pagenumbering{roman}\n\\maketitle\n\\tableofcontents\n"
+        "\\clearpage\n\\pagenumbering{arabic}\n"
+    )
+    assert body.startswith(front)
+
+
+@pytest.mark.skipif(_PDFLATEX is None, reason="pdflatex is not installed")
+def test_two_pdflatex_passes_resolve_every_page_reference(eng_bundle, tmp_path):
+    workdir = tmp_path / "compile"
+    shutil.copytree(eng_bundle, workdir)
+    tocs = []
+    for _ in range(2):
+        completed = subprocess.run(
+            [_PDFLATEX, "-interaction=nonstopmode", "-halt-on-error", "report.tex"],
+            cwd=workdir,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=600,
+        )
+        assert completed.returncode == 0
+        tocs.append((workdir / "report.toc").read_bytes())
+    log = (workdir / "report.log").read_bytes().decode("utf-8", "replace")
+    assert "Rerun to get cross-references right" not in log
+    assert tocs[0] == tocs[1]
+
+
 def test_report_omits_probe_stability_input_when_rows_miss_performance_cells(
     tmp_path,
 ):
@@ -4885,13 +4920,15 @@ def test_encoder_agreement_heatmaps_use_metric_scales_and_canonical_layout(
         assert sorted(panel["texts"]) == sorted(f"{value:.2f}" for value in finite)
 
 
-_FIGURE_SIZE = r"width=\linewidth,height=0.7\textheight,keepaspectratio"
+_FIGURE_SIZE = r"width=\linewidth,height=\figuremaxheight,keepaspectratio"
 
 
 def test_every_figure_leaves_room_for_its_caption_on_one_page(
     full_comparison_tex, eng_tex
 ):
     for tex in (full_comparison_tex, eng_tex):
+        preamble = tex.split(r"\begin{document}", 1)[0]
+        assert r"\setlength{\figuremaxheight}{0.7\textheight}" in preamble
         options = re.findall(r"\\includegraphics\[([^\]]*)\]", tex)
         assert options and set(options) == {_FIGURE_SIZE}
 

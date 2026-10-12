@@ -5362,7 +5362,7 @@ _LATEX_ESCAPES: Mapping[str, str] = MappingProxyType(
         "^": r"\textasciicircum{}",
         "\u2192": r"$\rightarrow$",
         "\u2190": r"$\leftarrow$",
-        "\u2194": r"$\leftrightarrow$",
+        "\u2194": r"$\leftrightarrow$\allowbreak{}",
         "\u2212": r"$-$",
         "\u2264": r"$\leq$",
         "\u2265": r"$\geq$",
@@ -5622,8 +5622,7 @@ def _figure_block(record: FigureRecord, tables: ReportTables) -> list[str]:
     return [
         r"\begin{figure}[H]",
         r"\centering",
-        # The height cap keeps tall multi-panel figures and their captions on one page.
-        rf"\includegraphics[width=\linewidth,height=0.7\textheight,keepaspectratio]"
+        rf"\includegraphics[width=\linewidth,height=\figuremaxheight,keepaspectratio]"
         rf"{{figures/{pdf}}}",
         rf"\caption{{{caption}}}",
         rf"\label{{fig:{record.name}}}",
@@ -7339,13 +7338,20 @@ def write_report_tex(
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{0.6em}",
         r"\setlength{\emergencystretch}{3em}",
+        # Leaves room below tall multi-panel figures for the longest caption.
+        r"\newlength{\figuremaxheight}",
+        r"\setlength{\figuremaxheight}{0.7\textheight}",
         rf"\title{{{title}}}",
         r"\author{}",
         r"\date{}",
         "",
         r"\begin{document}",
+        # The TOC is empty on the first pass; separate numbering keeps body pages stable.
+        r"\pagenumbering{roman}",
         r"\maketitle",
         r"\tableofcontents",
+        r"\clearpage",
+        r"\pagenumbering{arabic}",
         "",
     ]
     sections = (
