@@ -1721,7 +1721,11 @@ def test_multiple_models_add_encoder_agreement_without_language_figures(tmp_path
     for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
         assert tables.omitted_comparisons[name] == "single_language"
         assert name not in tables.planned_figures
-    assert tables.planned_figures == _EIGHT_FAMILIES + ("encoder_agreement",)
+    assert tables.planned_figures == _EIGHT_FAMILIES + (
+        "encoder_agreement",
+        "encoder_agreement_heatmaps",
+        "encoder_agreement_by_layer",
+    )
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
 
@@ -4167,6 +4171,100 @@ def test_report_fidelity_and_stability_use_compact_tables_and_cautious_prose(
 # ---------------------------------------------------------------------------
 
 _TWELVE_FAMILIES = _EIGHT_FAMILIES + _COMPARISON_FAMILIES
+_MAIN_RESULT_FIGURES = (
+    "transfer_performance_heatmaps",
+    "transfer_delta_roc_auc",
+    "transfer_delta_mcc",
+    "encoder_agreement_heatmaps",
+    "language_shift_intervals",
+    "spectral_divergence_by_layer",
+    "layer_faithfulness_intervals",
+)
+
+
+def test_selected_transfer_effects_reuses_the_roc_auc_selected_layer(
+    full_comparison_tables,
+):
+    selected = report_module.selected_transfer_effects(
+        full_comparison_tables, "delta_mcc"
+    )
+    expected = full_comparison_tables.transfer_selection.query("source != target")
+    assert len(selected) == len(expected)
+    assert (selected["layer"] == selected["selected_layer"]).all()
+    assert set(selected["metric"]) == {"delta_mcc"}
+
+
+def test_full_report_declares_seven_main_result_figures(full_comparison_tables):
+    assert all(
+        name in full_comparison_tables.planned_figures
+        for name in _MAIN_RESULT_FIGURES
+    )
+
+
+def test_transfer_effect_claim_filters_unusable_rows():
+    frame = pd.DataFrame(
+        {
+            "estimate": [-0.3, 0.1, np.nan, -0.8],
+            "ci_low": [-0.5, 0.01, -0.2, -1.0],
+            "ci_high": [-0.1, 0.2, 0.2, -0.4],
+            "status": ["ok", "ok", "ok", "insufficient_bootstrap"],
+        }
+    )
+    claim = report_module.transfer_effect_claim(frame)
+    assert claim["median"] == pytest.approx(-0.1)
+    assert {key: value for key, value in claim.items() if key != "median"} == {
+        "n": 2,
+        "negative_n": 1,
+        "ci_below_zero_n": 1,
+        "ci_above_zero_n": 1,
+    }
+
+
+def test_agreement_claim_filters_metric_status_and_nonfinite_estimates():
+    frame = pd.DataFrame(
+        {
+            "metric": [
+                "prediction_agreement",
+                "prediction_agreement",
+                "prediction_agreement",
+                "score_correlation",
+            ],
+            "estimate": [0.7, 0.9, np.nan, 0.1],
+            "status": ["ok", "ok", "ok", "ok"],
+        }
+    )
+    assert report_module.agreement_claim(frame) == {
+        "n": 2,
+        "median": 0.8,
+        "minimum": 0.7,
+        "maximum": 0.9,
+    }
+
+
+def test_faithfulness_claim_groups_usable_finite_rows_by_model():
+    frame = pd.DataFrame(
+        {
+            "model": ["hubert_base", "hubert_base", "wavlm_base", "wavlm_base"],
+            "ci_low": [0.1, -0.3, -0.2, np.nan],
+            "ci_high": [0.4, -0.1, 0.3, 0.2],
+            "status": ["ok", "ok", "ok", "ok"],
+        }
+    )
+    result = report_module.faithfulness_claim(frame)
+    assert result.to_dict("records") == [
+        {
+            "model": "hubert_base",
+            "total": 2,
+            "ci_above_zero_n": 1,
+            "ci_below_zero_n": 1,
+        },
+        {
+            "model": "wavlm_base",
+            "total": 1,
+            "ci_above_zero_n": 0,
+            "ci_below_zero_n": 0,
+        },
+    ]
 
 
 def _build_full_comparison_tables(tmp_path: Path):
@@ -4177,6 +4275,10 @@ def _build_full_comparison_tables(tmp_path: Path):
     second = write_scientific_result_root(
         base, profile="wavlm_base", languages=("eng", "por")
     )
+    for profile, root in (("hubert_base", first), ("wavlm_base", second)):
+        paths = LayerwiseSuitePaths(root)
+        for language in ("eng", "por"):
+            _write_layer_faithfulness_generation(paths, profile, language)
     return build_report_tables(
         [
             load_report_source(validate_result_directory(first)),
@@ -4308,8 +4410,9 @@ def test_conclusion_and_limitations_cover_comparisons_without_causal_claims(
 def test_planned_figures_add_comparisons_only_when_complete(full_comparison_tables):
     tables = full_comparison_tables
     assert tables.omitted_comparisons == {}
-    assert tables.planned_figures == _TWELVE_FAMILIES
+    assert tables.planned_figures[: len(_TWELVE_FAMILIES)] == _TWELVE_FAMILIES
     assert set(_COMPARISON_FAMILIES) <= set(tables.planned_figures)
+    assert set(_MAIN_RESULT_FIGURES) <= set(tables.planned_figures)
 
 
 def test_single_model_keeps_eight_figure_families_without_dangling_comparisons(
@@ -4493,10 +4596,14 @@ def test_multiple_languages_add_language_comparison_figures(tmp_path):
         "language_shift",
         "diagonal_vs_offdiagonal",
         "spectral_divergence",
+        "transfer_delta_roc_auc",
+        "transfer_delta_mcc",
+        "language_shift_intervals",
+        "spectral_divergence_by_layer",
     )
     assert tables.planned_figures == expected
     records = render_report_figures(tables, tmp_path / "figs")
-    assert tuple(record.name for record in records) == expected
+    assert tuple(record.name for record in records) == expected[:11]
 
 
 def test_multiple_models_add_encoder_agreement_figure(tmp_path):

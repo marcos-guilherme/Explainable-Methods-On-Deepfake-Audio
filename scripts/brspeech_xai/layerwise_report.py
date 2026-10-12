@@ -264,6 +264,25 @@ FIGURE_FAMILIES: tuple[str, ...] = (
     "stdft_examples",
     "conservation_diagnostics",
 )
+MAIN_RESULT_FIGURES: tuple[str, ...] = (
+    "transfer_performance_heatmaps",
+    "transfer_delta_roc_auc",
+    "transfer_delta_mcc",
+    "encoder_agreement_heatmaps",
+    "language_shift_intervals",
+    "spectral_divergence_by_layer",
+    "layer_faithfulness_intervals",
+)
+APPENDIX_FIGURES: tuple[str, ...] = (
+    "performance_by_layer",
+    "fixed_threshold_by_layer",
+    "dft_relevance_heatmap",
+    "class_relevance_by_layer",
+    "decision_reorganization_by_layer",
+    "encoder_agreement_by_layer",
+    "stdft_examples",
+    "conservation_diagnostics",
+)
 COMPARISON_FAMILIES: tuple[str, ...] = (
     "encoder_agreement",
     "language_shift",
@@ -275,12 +294,27 @@ _GROUP_LABELS_PT: Mapping[str, str] = MappingProxyType(
 )
 
 
-def _planned_figures(omitted_comparisons: Mapping[str, str]) -> tuple[str, ...]:
+def _planned_figures(
+    omitted_comparisons: Mapping[str, str],
+    *,
+    has_aligned_faithfulness: bool = False,
+) -> tuple[str, ...]:
     """Base figure families plus comparison figures whose tables are complete."""
     delivered = tuple(
         name for name in COMPARISON_FAMILIES if name not in omitted_comparisons
     )
-    return FIGURE_FAMILIES + delivered
+    additions: list[str] = []
+    if "diagonal_vs_offdiagonal" not in omitted_comparisons:
+        additions.extend(("transfer_delta_roc_auc", "transfer_delta_mcc"))
+    if "encoder_agreement" not in omitted_comparisons:
+        additions.extend(("encoder_agreement_heatmaps", "encoder_agreement_by_layer"))
+    if "language_shift" not in omitted_comparisons:
+        additions.append("language_shift_intervals")
+    if "spectral_divergence" not in omitted_comparisons:
+        additions.append("spectral_divergence_by_layer")
+    if has_aligned_faithfulness:
+        additions.append("layer_faithfulness_intervals")
+    return tuple(dict.fromkeys(FIGURE_FAMILIES + delivered + tuple(additions)))
 # Fixed, non-negotiable bootstrap contract shared by every comparison builder.
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 42
@@ -2939,6 +2973,25 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
             len(rel_languages) > 1, "single_language",
         ),
     }
+    layer_faithfulness = (
+        merged(
+            "layer_faithfulness",
+            ["model", "source", "target", "layer", "k", "true_class", "comparison"],
+        )
+        if any(not item.layer_faithfulness.empty for item in loaded)
+        else pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS))
+    )
+    faithfulness_keys = ["model", "source", "target", "layer"]
+    aligned_faithfulness = layer_faithfulness[
+        layer_faithfulness["comparison"].isin(
+            ("top_minus_random", "top_minus_bottom")
+        )
+    ].merge(
+        performance[faithfulness_keys].drop_duplicates(),
+        on=faithfulness_keys,
+        how="inner",
+    )
+    has_aligned_faithfulness = not aligned_faithfulness.empty
     return ReportTables(
         models=models,
         languages=languages,
@@ -2963,19 +3016,16 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         omitted_comparisons=(
             omitted := _omitted_comparisons(comparison_completeness_map)
         ),
-        planned_figures=_planned_figures(omitted),
+        planned_figures=_planned_figures(
+            omitted, has_aligned_faithfulness=has_aligned_faithfulness
+        ),
         probe_stability=merged(
             "probe_stability",
             ["model", "source", "target", "layer"],
         )
         if any(not item.probe_stability.empty for item in loaded)
         else pd.DataFrame(columns=sorted(_PROBE_STABILITY_COLUMNS)),
-        layer_faithfulness=merged(
-            "layer_faithfulness",
-            ["model", "source", "target", "layer", "k", "true_class", "comparison"],
-        )
-        if any(not item.layer_faithfulness.empty for item in loaded)
-        else pd.DataFrame(columns=sorted(_LAYER_FAITHFULNESS_COLUMNS)),
+        layer_faithfulness=layer_faithfulness,
         cell_predictions=cell_predictions,
         sample_relevance=sample_relevance,
         encoder_agreement=encoder_agreement,
@@ -2994,6 +3044,73 @@ _PDF_METADATA = {"Creator": "layerwise_report", "Producer": "matplotlib", "Creat
 _PNG_METADATA = {"Software": None}
 _FIGURE_WIDTH = 7.0
 _CONSERVATION_FLOOR = 1e-12
+
+
+def selected_transfer_effects(
+    tables: ReportTables, metric: str
+) -> pd.DataFrame:
+    selected = tables.transfer_selection.loc[
+        tables.transfer_selection["source"] != tables.transfer_selection["target"],
+        ["model", "source", "target", "selected_layer"],
+    ]
+    effects = tables.diagonal_vs_offdiagonal[
+        tables.diagonal_vs_offdiagonal["metric"] == metric
+    ]
+    merged = effects.merge(
+        selected,
+        on=["model", "source", "target"],
+        how="inner",
+        validate="many_to_one",
+    )
+    return _ordered(
+        merged[merged["layer"] == merged["selected_layer"]],
+        ("model", "source", "target"),
+    )
+
+
+def _usable_claim_rows(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    usable = frame.loc[frame["status"] == "ok"].copy()
+    finite = np.isfinite(usable[list(columns)].to_numpy(dtype=np.float64)).all(axis=1)
+    return usable.loc[finite]
+
+
+def transfer_effect_claim(frame: pd.DataFrame) -> Mapping[str, float | int]:
+    usable = _usable_claim_rows(frame, ("estimate", "ci_low", "ci_high"))
+    estimates = usable["estimate"].to_numpy(dtype=np.float64)
+    return {
+        "n": int(estimates.size),
+        "median": float(np.median(estimates)) if estimates.size else float("nan"),
+        "negative_n": int((estimates < 0).sum()),
+        "ci_below_zero_n": int((usable["ci_high"] < 0).sum()),
+        "ci_above_zero_n": int((usable["ci_low"] > 0).sum()),
+    }
+
+
+def agreement_claim(frame: pd.DataFrame) -> Mapping[str, float | int]:
+    selected = frame.loc[frame["metric"] == "prediction_agreement"]
+    usable = _usable_claim_rows(selected, ("estimate",))
+    estimates = usable["estimate"].to_numpy(dtype=np.float64)
+    return {
+        "n": int(estimates.size),
+        "median": float(np.median(estimates)) if estimates.size else float("nan"),
+        "minimum": float(np.min(estimates)) if estimates.size else float("nan"),
+        "maximum": float(np.max(estimates)) if estimates.size else float("nan"),
+    }
+
+
+def faithfulness_claim(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = ["model", "total", "ci_above_zero_n", "ci_below_zero_n"]
+    usable = _usable_claim_rows(frame, ("ci_low", "ci_high"))
+    rows = [
+        {
+            "model": model,
+            "total": int(len(group)),
+            "ci_above_zero_n": int((group["ci_low"] > 0).sum()),
+            "ci_below_zero_n": int((group["ci_high"] < 0).sum()),
+        }
+        for model, group in usable.groupby("model", sort=True)
+    ]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _save_report_figure(fig, name: str, figures_dir: Path) -> tuple[str, ...]:
@@ -4529,7 +4646,9 @@ def render_report_figures(
     with mpl.rc_context():
         set_plot_style()
         for name in tables.planned_figures:
-            records.append(_FIGURE_BUILDERS[name](plt, tables, figures_dir))
+            builder = _FIGURE_BUILDERS.get(name)
+            if builder is not None:
+                records.append(builder(plt, tables, figures_dir))
     return tuple(records)
 
 
