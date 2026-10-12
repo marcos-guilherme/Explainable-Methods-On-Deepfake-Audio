@@ -4276,6 +4276,9 @@ def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
                 summary = _median_iqr_by_layer(
                     metric_frame, ("model_a", "model_b")
                 )
+                if summary.empty:
+                    ax.set_visible(False)
+                    continue
                 _plot_median_band(ax, summary)
                 if pair_index == 0:
                     ax.set_title(title, fontsize=8)
@@ -5580,7 +5583,7 @@ def _comparisons_section(
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
         "A figura de acordo entre encoders mostra a mediana por camada e a faixa "
         "interquartil entre células. As outras três figuras reproduzem as "
-        "estimativas e os intervalos bootstrap persistidos (ci_low–ci_high) nas "
+        "estimativas e os intervalos bootstrap persistidos (ci_low--ci_high) nas "
         "figuras; os resumos tabulares abaixo agregam medianas e faixas entre "
         "linhas, enquanto os CSV mantêm cada linha com IC completo.",
         "",

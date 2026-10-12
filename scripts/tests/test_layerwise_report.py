@@ -2071,7 +2071,11 @@ def test_multi_source_bundle_is_independent_of_source_order(
     assert "HuBERT Base" in tex and "WavLM Base" in tex
     assert "WavLM Base+" not in tex
     assert "não estão disponíveis" in tex
-    assert _sections(tex) == list(_SECTION_TITLES)
+    assert _sections(tex) == [
+        *_SECTION_TITLES[:-2],
+        "Comparações entre modelos e idiomas",
+        *_SECTION_TITLES[-2:],
+    ]
 
 
 # --- scientific text ---
