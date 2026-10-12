@@ -4345,22 +4345,109 @@ def test_transfer_effect_figures_show_selected_effects_and_zero_reference(
     full_comparison_tables, tmp_path, family, metric, monkeypatch
 ):
     zero_lines = []
+    intervals = []
+    points = []
     import matplotlib.pyplot as plt
 
-    original = plt.Axes.axvline
+    original_axvline = plt.Axes.axvline
+    original_hlines = plt.Axes.hlines
+    original_scatter = plt.Axes.scatter
 
     def spy(self, x, *args, **kwargs):
         zero_lines.append(float(x))
-        return original(self, x, *args, **kwargs)
+        return original_axvline(self, x, *args, **kwargs)
 
+    def spy_hlines(self, y, xmin, xmax, *args, **kwargs):
+        intervals.extend(
+            zip(
+                np.atleast_1d(y).astype(float),
+                np.atleast_1d(xmin).astype(float),
+                np.atleast_1d(xmax).astype(float),
+            )
+        )
+        return original_hlines(self, y, xmin, xmax, *args, **kwargs)
+
+    def spy_scatter(self, x, y, *args, **kwargs):
+        points.extend(
+            zip(
+                np.atleast_1d(y).astype(float),
+                np.atleast_1d(x).astype(float),
+            )
+        )
+        return original_scatter(self, x, y, *args, **kwargs)
+
+    tables = dataclasses.replace(full_comparison_tables, planned_figures=(family,))
     monkeypatch.setattr(plt.Axes, "axvline", spy)
+    monkeypatch.setattr(plt.Axes, "hlines", spy_hlines)
+    monkeypatch.setattr(plt.Axes, "scatter", spy_scatter)
     records, captured = _capture_figures(
-        full_comparison_tables, tmp_path / family
+        tables, tmp_path / family
     )
+    selected = report_module.selected_transfer_effects(
+        tables, f"delta_{metric.lower().replace('-', '_')}"
+    )
+    expected_intervals = []
+    expected_points = []
+    for model in tables.models:
+        model_rows = selected[selected["model"] == model].sort_values(
+            ["source", "target"], kind="stable"
+        )
+        for position, row in enumerate(model_rows.itertuples(index=False)):
+            expected_intervals.append((float(position), row.ci_low, row.ci_high))
+            expected_points.append((float(position), row.estimate))
+
     assert family in captured
-    assert 0.0 in zero_lines
+    assert zero_lines == [0.0] * len(tables.models)
+    assert intervals == pytest.approx(expected_intervals)
+    assert points == pytest.approx(expected_points)
     assert metric in "\n".join(captured[family]["texts"])
-    assert next(r for r in records if r.name == family).units == "adimensional"
+    record = next(r for r in records if r.name == family)
+    assert record.units == "adimensional"
+    assert "fora da diagonal menos o sistema diagonal correspondente" in record.caption
+    assert "estimativa pontual e intervalo bootstrap de 95%" in record.caption
+    assert "A linha vertical marca efeito zero" in record.caption
+    assert "combinam mudança de corpus e idioma" in record.caption
+    assert "não identificam um efeito causal do idioma" in record.caption
+
+
+def test_transfer_effect_figure_accepts_persisted_interval_excluding_estimate(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    frame = full_comparison_tables.diagonal_vs_offdiagonal.copy()
+    selected = report_module.selected_transfer_effects(
+        full_comparison_tables, "delta_roc_auc"
+    ).iloc[0]
+    row = (
+        (frame["model"] == selected["model"])
+        & (frame["source"] == selected["source"])
+        & (frame["target"] == selected["target"])
+        & (frame["layer"] == selected["layer"])
+        & (frame["metric"] == "delta_roc_auc")
+    )
+    frame.loc[row, ["estimate", "ci_low", "ci_high"]] = [0.1, 0.2, 0.3]
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        diagonal_vs_offdiagonal=frame,
+        planned_figures=("transfer_delta_roc_auc",),
+    )
+    intervals = []
+    original_hlines = plt.Axes.hlines
+
+    def spy_hlines(self, y, xmin, xmax, *args, **kwargs):
+        intervals.extend(
+            zip(
+                np.atleast_1d(xmin).astype(float),
+                np.atleast_1d(xmax).astype(float),
+            )
+        )
+        return original_hlines(self, y, xmin, xmax, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "hlines", spy_hlines)
+    render_report_figures(tables, tmp_path / "outside_interval")
+
+    assert (0.2, 0.3) in intervals
 
 
 def test_transfer_heatmap_caption_keeps_train_rows_evaluation_columns_and_shared_layers(

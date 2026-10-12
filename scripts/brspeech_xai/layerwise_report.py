@@ -3585,32 +3585,22 @@ def _figure_transfer_effect(
         estimates = model_rows["estimate"].to_numpy(dtype=np.float64)
         low = model_rows["ci_low"].to_numpy(dtype=np.float64)
         high = model_rows["ci_high"].to_numpy(dtype=np.float64)
-        finite_intervals = (
-            np.isfinite(estimates) & np.isfinite(low) & np.isfinite(high)
-        )
-        if finite_intervals.any():
-            ax.errorbar(
-                estimates[finite_intervals],
-                positions[finite_intervals],
-                xerr=np.vstack(
-                    (
-                        estimates[finite_intervals] - low[finite_intervals],
-                        high[finite_intervals] - estimates[finite_intervals],
-                    )
-                ),
-                fmt="o",
-                markersize=4,
-                capsize=2,
+        ordered_intervals = np.isfinite(low) & np.isfinite(high) & (low <= high)
+        if ordered_intervals.any():
+            ax.hlines(
+                positions[ordered_intervals],
+                low[ordered_intervals],
+                high[ordered_intervals],
                 linewidth=1.0,
             )
-        estimate_only = np.isfinite(estimates) & ~finite_intervals
-        if estimate_only.any():
-            ax.plot(
-                estimates[estimate_only],
-                positions[estimate_only],
-                marker="x",
-                linestyle="none",
-                color="0.35",
+        finite_estimates = np.isfinite(estimates)
+        if finite_estimates.any():
+            ax.scatter(
+                estimates[finite_estimates],
+                positions[finite_estimates],
+                marker="o",
+                s=16,
+                zorder=3,
             )
         ax.axvline(0.0, color="0.45", linestyle="--", linewidth=0.8)
         ax.set_yticks(positions)
@@ -3637,7 +3627,9 @@ def _figure_transfer_effect(
         description=(
             f"Efeito {metric_label} fora da diagonal menos o sistema diagonal "
             "correspondente, com estimativa pontual e intervalo bootstrap de 95%. "
-            "A linha vertical marca efeito zero."
+            "A linha vertical marca efeito zero. Como as diferenças fora da "
+            "diagonal combinam mudança de corpus e idioma, não identificam um "
+            "efeito causal do idioma."
         ),
         metric=f"Δ {metric_label} fora da diagonal − diagonal",
         units="adimensional",
