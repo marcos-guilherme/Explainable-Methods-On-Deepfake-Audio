@@ -1724,7 +1724,6 @@ def test_multiple_models_add_encoder_agreement_without_language_figures(tmp_path
     assert tables.planned_figures == _EIGHT_FAMILIES + (
         "encoder_agreement",
         "encoder_agreement_heatmaps",
-        "encoder_agreement_by_layer",
     )
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
@@ -4195,10 +4194,24 @@ def test_selected_transfer_effects_reuses_the_roc_auc_selected_layer(
 
 
 def test_full_report_declares_seven_main_result_figures(full_comparison_tables):
-    assert all(
-        name in full_comparison_tables.planned_figures
-        for name in _MAIN_RESULT_FIGURES
+    declared = tuple(
+        name
+        for name in full_comparison_tables.planned_figures
+        if name in report_module.MAIN_RESULT_FIGURES
     )
+    assert declared == _MAIN_RESULT_FIGURES
+
+
+def test_render_rejects_unknown_planned_figure_family(eng_tables, tmp_path):
+    tables = dataclasses.replace(
+        eng_tables,
+        planned_figures=("misspelled_figure_family",) + eng_tables.planned_figures,
+    )
+
+    with pytest.raises(
+        ValueError, match="unknown planned figure family: misspelled_figure_family"
+    ):
+        render_report_figures(tables, tmp_path / "figures")
 
 
 def test_transfer_effect_claim_filters_unusable_rows():

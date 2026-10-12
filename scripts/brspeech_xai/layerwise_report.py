@@ -307,7 +307,7 @@ def _planned_figures(
     if "diagonal_vs_offdiagonal" not in omitted_comparisons:
         additions.extend(("transfer_delta_roc_auc", "transfer_delta_mcc"))
     if "encoder_agreement" not in omitted_comparisons:
-        additions.extend(("encoder_agreement_heatmaps", "encoder_agreement_by_layer"))
+        additions.append("encoder_agreement_heatmaps")
     if "language_shift" not in omitted_comparisons:
         additions.append("language_shift_intervals")
     if "spectral_divergence" not in omitted_comparisons:
@@ -4627,6 +4627,16 @@ _FIGURE_BUILDERS = {
     "diagonal_vs_offdiagonal": _figure_diagonal_vs_offdiagonal,
     "spectral_divergence": _figure_spectral_divergence,
 }
+_DEFERRED_MAIN_RESULT_FIGURES = frozenset(
+    {
+        "transfer_delta_roc_auc",
+        "transfer_delta_mcc",
+        "encoder_agreement_heatmaps",
+        "language_shift_intervals",
+        "spectral_divergence_by_layer",
+        "layer_faithfulness_intervals",
+    }
+)
 
 
 def render_report_figures(
@@ -4647,8 +4657,11 @@ def render_report_figures(
         set_plot_style()
         for name in tables.planned_figures:
             builder = _FIGURE_BUILDERS.get(name)
-            if builder is not None:
-                records.append(builder(plt, tables, figures_dir))
+            if builder is None:
+                if name in _DEFERRED_MAIN_RESULT_FIGURES:
+                    continue
+                raise ValueError(f"unknown planned figure family: {name}")
+            records.append(builder(plt, tables, figures_dir))
     return tuple(records)
 
 
