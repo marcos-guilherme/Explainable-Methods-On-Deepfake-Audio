@@ -3989,7 +3989,55 @@ def _write_layer_faithfulness_generation(
                     "n_pairs": 8,
                     "wilcoxon_p": 0.04,
                     "status": "ok",
-                }
+                },
+                {
+                    "level": "aggregate",
+                    "index": "",
+                    "k": 1,
+                    "true_class": "spoof",
+                    "comparison": "top_minus_bottom",
+                    "lhs": 0.5,
+                    "rhs": 0.4,
+                    "difference": float("nan"),
+                    "mean_difference": 0.1,
+                    "ci_low": -0.05,
+                    "ci_high": 0.25,
+                    "n_pairs": 8,
+                    "wilcoxon_p": 0.2,
+                    "status": "ok",
+                },
+                {
+                    "level": "aggregate",
+                    "index": "",
+                    "k": 1,
+                    "true_class": "bonafide",
+                    "comparison": "top_minus_random",
+                    "lhs": 0.45,
+                    "rhs": 0.3,
+                    "difference": float("nan"),
+                    "mean_difference": 0.15,
+                    "ci_low": 0.02,
+                    "ci_high": 0.28,
+                    "n_pairs": 8,
+                    "wilcoxon_p": 0.08,
+                    "status": "ok",
+                },
+                {
+                    "level": "aggregate",
+                    "index": "",
+                    "k": 1,
+                    "true_class": "bonafide",
+                    "comparison": "top_minus_bottom",
+                    "lhs": 0.45,
+                    "rhs": 0.41,
+                    "difference": float("nan"),
+                    "mean_difference": 0.04,
+                    "ci_low": -0.1,
+                    "ci_high": 0.18,
+                    "n_pairs": 8,
+                    "wilcoxon_p": 0.4,
+                    "status": "ok",
+                },
             ]
         ).to_csv(directory / "paired_comparisons.csv", index=False)
         (directory / "faithfulness_run_manifest.json").write_text(
@@ -4073,6 +4121,84 @@ def test_faithfulness_aggregate_counts_arithmetic():
     ].iloc[0]
     assert int(bottom_row["n_ci_above_zero"]) == 0
     assert int(bottom_row["n_ci_below_zero"]) == 0
+
+
+def test_faithfulness_figure_exposes_scope_zero_line_and_both_controls(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    zero_lines: list[float] = []
+    original = plt.Axes.axvline
+
+    def spy(self, x, *args, **kwargs):
+        zero_lines.append(float(x))
+        return original(self, x, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "axvline", spy)
+    records, captured = _capture_figures(
+        full_comparison_tables, tmp_path / "faithfulness"
+    )
+    text = "\n".join(captured["layer_faithfulness_intervals"]["texts"])
+    assert "top-minus-random" in text
+    assert "top-minus-bottom" in text
+    assert 0.0 in zero_lines
+    record = next(r for r in records if r.name == "layer_faithfulness_intervals")
+    assert "camada 12" in record.caption.lower()
+    assert "diagonal" in record.caption.lower()
+    assert "oito amostras por classe" in record.caption.lower()
+    assert "wilcoxon" not in text.lower()
+    assert "wilcoxon" not in record.caption.lower()
+
+
+def test_results_synthesis_records_verified_transfer_counts(
+    full_comparison_tables,
+):
+    result = report_module.build_results_synthesis(full_comparison_tables)
+    assert list(result.columns) == ["question", "evidence", "result", "caution"]
+    assert len(result) == 4
+    transfer = result[result["question"] == "Quanto o desempenho cai na transferência?"]
+    joined = " ".join(transfer.astype(str).to_numpy().ravel())
+    effects = full_comparison_tables.diagonal_vs_offdiagonal
+    for metric in ("delta_roc_auc", "delta_mcc"):
+        rows = effects[(effects["metric"] == metric) & (effects["status"] == "ok")]
+        assert f"{int((rows['estimate'] < 0).sum())}/{len(rows)}" in joined
+        assert f"{int((rows['ci_high'] < 0).sum())}/{len(rows)}" in joined
+
+
+def test_faithfulness_and_synthesis_are_exported_and_referenced(
+    full_comparison_tables, tmp_path
+):
+    tables_dir = tmp_path / "tables"
+    written = set(write_report_tables(full_comparison_tables, tables_dir))
+    assert {
+        "results_synthesis.csv",
+        "results_synthesis.tex",
+    } <= written
+    pd.testing.assert_frame_equal(
+        pd.read_csv(tables_dir / "results_synthesis.csv"),
+        report_module.build_results_synthesis(full_comparison_tables),
+        check_dtype=False,
+    )
+    tex = (tables_dir / "results_synthesis.tex").read_text(encoding="utf-8")
+    assert r"\label{tab:results-synthesis}" in tex
+    assert tex.count(r"\begin{table}") == 1
+
+    figures = render_report_figures(full_comparison_tables, tmp_path / "figures")
+    report_path = tmp_path / "report.tex"
+    write_report_tex(report_path, full_comparison_tables, figures, [])
+    report = report_path.read_text(encoding="utf-8")
+    assert r"\input{tables/results_synthesis.tex}" in report
+    assert r"\label{fig:layer_faithfulness_intervals}" in report
+    assert report.count(r"\appendix") == 1
+
+
+def test_faithfulness_planned_without_aligned_rows_fails_closed(eng_tables, tmp_path):
+    tables = dataclasses.replace(
+        eng_tables, planned_figures=("layer_faithfulness_intervals",)
+    )
+    with pytest.raises(ValueError, match="aligned table is empty"):
+        render_report_figures(tables, tmp_path / "figures")
 
 
 def test_probe_stability_aggregate_by_model_median_and_max():
@@ -4737,6 +4863,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
         "encoder_agreement_by_layer",
         "language_shift_intervals",
         "spectral_divergence_by_layer",
+        "layer_faithfulness_intervals",
     )
     expected = {
         f"{name}.{suffix}"
@@ -5073,11 +5200,13 @@ def test_full_comparison_bundle_manifest_lists_figure_families_in_order(
     roots = []
     base = tmp_path / "roots"
     for profile in ("hubert_base", "wavlm_base"):
-        roots.append(
-            write_scientific_result_root(
-                base, profile=profile, languages=("eng", "por")
-            )
+        root = write_scientific_result_root(
+            base, profile=profile, languages=("eng", "por")
         )
+        roots.append(root)
+        paths = LayerwiseSuitePaths(root)
+        for language in ("eng", "por"):
+            _write_layer_faithfulness_generation(paths, profile, language)
     output = tmp_path / "bundle"
     generate_report_bundle(roots, output)
     manifest = json.loads(_read_text(output / "report_manifest.json"))
@@ -5094,13 +5223,25 @@ def test_full_comparison_bundle_manifest_lists_figure_families_in_order(
     for name in ("encoder_agreement_heatmaps", "encoder_agreement_by_layer"):
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
-    for name in ("language_shift_intervals", "spectral_divergence_by_layer"):
+    for name in (
+        "language_shift_intervals",
+        "spectral_divergence_by_layer",
+        "layer_faithfulness_intervals",
+    ):
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
+    generated_paths = {
+        item["path"] for item in manifest["generated_files"]
+    }
+    assert {
+        "tables/results_synthesis.csv",
+        "tables/results_synthesis.tex",
+    } <= generated_paths
     tex = _read_text(output / "report.tex")
     for name in _RENDERED_COMPARISON_FAMILIES + (
         "encoder_agreement_heatmaps",
         "encoder_agreement_by_layer",
+        "layer_faithfulness_intervals",
     ):
         assert rf"\label{{fig:{name}}}" in tex
     assert r"\label{fig:encoder_agreement}" not in tex

@@ -3115,6 +3115,93 @@ def faithfulness_claim(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def build_results_synthesis(tables: ReportTables) -> pd.DataFrame:
+    """Build the four-question synthesis from the validated claim helpers."""
+    columns = ["question", "evidence", "result", "caution"]
+    rows: list[dict[str, str]] = []
+
+    transfer_parts = []
+    for metric, label in (("delta_roc_auc", "Δ ROC-AUC"), ("delta_mcc", "Δ MCC")):
+        claim = transfer_effect_claim(
+            tables.diagonal_vs_offdiagonal.loc[
+                tables.diagonal_vs_offdiagonal["metric"] == metric
+            ]
+        )
+        if claim["n"]:
+            transfer_parts.append(
+                f"{label}: {claim['negative_n']}/{claim['n']} estimativas negativas; "
+                f"{claim['ci_below_zero_n']}/{claim['n']} ICs inteiramente abaixo de zero"
+            )
+    rows.append(
+        {
+            "question": "Quanto o desempenho cai na transferência?",
+            "evidence": "Diferença fora da diagonal menos diagonal no mesmo conjunto-alvo.",
+            "result": "; ".join(transfer_parts) if transfer_parts else "Não disponível.",
+            "caution": "O sinal descreve a mudança observada, não sua causa.",
+        }
+    )
+
+    agreement = agreement_claim(tables.encoder_agreement)
+    agreement_result = (
+        "Não disponível."
+        if not agreement["n"]
+        else (
+            f"Mediana {_num(agreement['median'])}; faixa "
+            f"{_num(agreement['minimum'])}–{_num(agreement['maximum'])} "
+            f"em {agreement['n']} estimativas."
+        )
+    )
+    rows.append(
+        {
+            "question": "Quanto os encoders concordam?",
+            "evidence": "Fração de decisões iguais nos mesmos áudios e condições.",
+            "result": agreement_result,
+            "caution": "Acordo não indica qual modelo está correto.",
+        }
+    )
+
+    has_shift = not _usable_claim_rows(
+        tables.language_shift, ("estimate", "ci_low", "ci_high")
+    ).empty
+    has_divergence = not _usable_claim_rows(
+        tables.spectral_divergence, ("estimate", "ci_low", "ci_high")
+    ).empty
+    shift_result = (
+        "Mudança de relevância e divergência espectral observadas."
+        if has_shift and has_divergence
+        else "Não disponível."
+    )
+    rows.append(
+        {
+            "question": "Como a relevância muda entre corpora/idiomas?",
+            "evidence": "Jensen–Shannon com probe fixo e Wasserstein entre sistemas diagonais.",
+            "result": shift_result,
+            "caution": "Corpus, áudio e idioma mudam juntos; não há isolamento causal.",
+        }
+    )
+
+    faithfulness = faithfulness_claim(_aligned_layer_faithfulness(tables))
+    if faithfulness.empty:
+        faithfulness_result = "Não disponível."
+    else:
+        parts = []
+        for row in faithfulness.itertuples(index=False):
+            parts.append(
+                f"{_model_name(row.model)}: {row.ci_above_zero_n}/{row.total} ICs "
+                f"acima de zero e {row.ci_below_zero_n}/{row.total} abaixo de zero"
+            )
+        faithfulness_result = "; ".join(parts) + "."
+    rows.append(
+        {
+            "question": "As faixas mais relevantes sustentam mais a decisão?",
+            "evidence": "Top-minus-random e top-minus-bottom com ICs persistidos.",
+            "result": faithfulness_result,
+            "caution": "Intervenção STFT controlada; não implica causalidade no mundo real.",
+        }
+    )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _save_report_figure(fig, name: str, figures_dir: Path) -> tuple[str, ...]:
     import matplotlib.pyplot as plt
 
@@ -5050,6 +5137,116 @@ def _figure_spectral_divergence_by_layer(
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
+def _figure_layer_faithfulness_intervals(
+    plt, tables: ReportTables, figures_dir: Path
+) -> FigureRecord:
+    name = "layer_faithfulness_intervals"
+    frame = _aligned_layer_faithfulness(tables)
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the aligned table is empty")
+    frame = frame[
+        (frame["source"] == frame["target"])
+        & (frame["layer"] == FINAL_LAYER)
+        & (frame["n_pairs"] == 8)
+    ].copy()
+    comparisons = ("top_minus_random", "top_minus_bottom")
+    if frame.empty or set(frame["comparison"]) != set(comparisons):
+        raise ValueError(
+            f"{name} requires diagonal layer {FINAL_LAYER}, 8 samples per class, "
+            "and both registered controls"
+        )
+    models = tuple(model for model in tables.models if model in set(frame["model"]))
+    classes = tuple(sorted({str(value) for value in frame["true_class"]}))
+    fig, axes = plt.subplots(
+        len(classes),
+        len(models),
+        figsize=(_FIGURE_WIDTH, 1.8 * len(classes) + 0.8),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    styles = {
+        "top_minus_random": ("o", "#1f77b4"),
+        "top_minus_bottom": ("s", "#d62728"),
+    }
+    offsets = {"top_minus_random": -0.08, "top_minus_bottom": 0.08}
+    for row, true_class in enumerate(classes):
+        for column, model in enumerate(models):
+            ax = axes[row, column]
+            subset = frame[
+                (frame["model"] == model) & (frame["true_class"] == true_class)
+            ]
+            for comparison in comparisons:
+                ordered = subset[subset["comparison"] == comparison].sort_values("k")
+                if ordered.empty:
+                    continue
+                estimate = ordered["mean_difference"].to_numpy(dtype=np.float64)
+                low = ordered["ci_low"].to_numpy(dtype=np.float64)
+                high = ordered["ci_high"].to_numpy(dtype=np.float64)
+                k_values = ordered["k"].to_numpy(dtype=np.float64)
+                mask = np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
+                if not mask.any():
+                    continue
+                marker, color = styles[comparison]
+                y = k_values[mask] + offsets[comparison]
+                ax.errorbar(
+                    estimate[mask],
+                    y,
+                    xerr=np.vstack(
+                        (estimate[mask] - low[mask], high[mask] - estimate[mask])
+                    ),
+                    fmt=marker,
+                    color=color,
+                    linestyle="none",
+                    capsize=2,
+                    markersize=4,
+                    label=_FAITHFULNESS_COMPARISON_PT[comparison],
+                )
+            ax.axvline(0.0, color="0.45", linewidth=0.8)
+            if row == 0:
+                ax.set_title(_model_name(model), fontsize=8)
+            if column == 0:
+                ax.set_ylabel(f"{true_class}\n$k$", fontsize=7)
+            ax.set_yticks(sorted({int(value) for value in frame["k"]}))
+            ax.set_xlabel("Diferença média pareada", fontsize=7)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            ncol=len(comparisons),
+            title="Comparação",
+            fontsize=7,
+            title_fontsize=7,
+        )
+    cells = tuple(
+        row
+        for row in _cells(tables)
+        if row[1] == row[2] and row[0] in set(frame["model"])
+    )
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Fidelidade por intervenção",
+        description=(
+            f"Camada {FINAL_LAYER}, escopo diagonal e oito amostras por classe; "
+            "diferenças pareadas top-minus-random e top-minus-bottom."
+        ),
+        metric="diferença média de comprehensividade",
+        units="adimensional",
+        transformation=(
+            "k no eixo vertical, mean_difference no horizontal e hastes iguais "
+            "a ci_low–ci_high persistidos; sem valores-p"
+        ),
+        cells=cells,
+    )
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    fig.subplots_adjust(bottom=0.28, top=0.82, hspace=0.35, wspace=0.2)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
 _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
@@ -5068,12 +5265,8 @@ _FIGURE_BUILDERS = {
     "diagonal_vs_offdiagonal": _figure_diagonal_vs_offdiagonal,
     "spectral_divergence": _figure_spectral_divergence,
     "spectral_divergence_by_layer": _figure_spectral_divergence_by_layer,
+    "layer_faithfulness_intervals": _figure_layer_faithfulness_intervals,
 }
-_DEFERRED_FIGURE_FAMILIES = frozenset(
-    {
-        "layer_faithfulness_intervals",
-    }
-)
 
 
 def render_report_figures(
@@ -5095,8 +5288,6 @@ def render_report_figures(
         for name in tables.planned_figures:
             builder = _FIGURE_BUILDERS.get(name)
             if builder is None:
-                if name in _DEFERRED_FIGURE_FAMILIES:
-                    continue
                 raise ValueError(f"unknown planned figure family: {name}")
             records.append(builder(plt, tables, figures_dir))
     return tuple(records)
@@ -5458,6 +5649,16 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "agregado. Limite principal: distância maior não significa resultado "
             "melhor nem pior e não identifica a causa do deslocamento."
         )
+    elif record.name == "layer_faithfulness_intervals":
+        body = (
+            "Pergunta: as faixas mais relevantes sustentam mais a decisão do que "
+            "os controles? Células diagonais na camada 12, com oito amostras por "
+            "classe. O eixo vertical mostra $k$; pontos e hastes reproduzem "
+            r"\texttt{mean\_difference} e \texttt{ci\_low}--\texttt{ci\_high} "
+            "persistidos para top-minus-random e top-minus-bottom. Limite "
+            "principal: a intervenção STFT controlada não implica causalidade "
+            "no mundo real."
+        )
     elif record.name == "dft_relevance_heatmap":
         body = (
             "Média sobre o conjunto fixo de amostras da relevância AttnLRP absoluta "
@@ -5649,6 +5850,8 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         *[item for paragraph in comparisons for item in (paragraph, "")],
         *fidelity_stability,
         *([""] if fidelity_stability else []),
+        r"\input{tables/results_synthesis.tex}",
+        "",
     ]
 
 
@@ -5923,6 +6126,11 @@ def _performance_section(
             "",
             _faithfulness_scope_note(aligned_fidelity),
             "",
+            *(
+                _figure_block(figures["layer_faithfulness_intervals"], tables)
+                if "layer_faithfulness_intervals" in figures
+                else []
+            ),
             r"\input{tables/layer_faithfulness_summary.tex}",
             "",
             _faithfulness_pattern_paragraph(
@@ -7083,6 +7291,41 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
     )
 
 
+def _results_synthesis_tex(tables: ReportTables) -> str:
+    synthesis = build_results_synthesis(tables)
+    body = [
+        _row(
+            [
+                escape_latex(row.question),
+                escape_latex(row.evidence),
+                escape_latex(row.result),
+                escape_latex(row.caution),
+            ]
+        )
+        for row in synthesis.itertuples(index=False)
+    ]
+    return "\n".join(
+        [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
+            r"\caption{Síntese dos resultados verificados e dos limites de interpretação.}",
+            r"\label{tab:results-synthesis}",
+            _FIT_WIDTH_OPEN,
+            r"\begin{tabular}{p{0.20\linewidth}p{0.25\linewidth}p{0.29\linewidth}p{0.22\linewidth}}",
+            r"\toprule",
+            _row(["Pergunta", "Evidência", "Resultado", "Cautela"]),
+            r"\midrule",
+            *body,
+            r"\bottomrule",
+            r"\end{tabular}}",
+            r"\end{table}",
+            "",
+        ]
+    )
+
+
 _COMPARISON_TEX_BUILDERS: Mapping[str, object] = MappingProxyType(
     {
         "encoder_agreement": _encoder_agreement_tex,
@@ -7115,6 +7358,12 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
     fidelity_tex = _layer_faithfulness_tex(tables)
     if fidelity_tex.strip():
         fragments["layer_faithfulness_summary"] = fidelity_tex
+    synthesis = build_results_synthesis(tables)
+    synthesis.to_csv(
+        tables_dir / "results_synthesis.csv", index=False, lineterminator="\n"
+    )
+    written.append("results_synthesis.csv")
+    fragments["results_synthesis"] = _results_synthesis_tex(tables)
     for name, text in fragments.items():
         if text:
             _write_tex(tables_dir / f"{name}.tex", text)
