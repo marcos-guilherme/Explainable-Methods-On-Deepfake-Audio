@@ -1740,7 +1740,10 @@ _REPO = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO / "scripts"
 _SECTION_TITLES = (
     "Resumo executivo",
-    "Escopo e inventário dos experimentos",
+    "Como ler este relatório",
+    "Resultados",
+    "Limitações transversais",
+    "Conclusão",
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
     "Emergência estimada da decisão do detector",
@@ -1748,8 +1751,6 @@ _SECTION_TITLES = (
     "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
-    "Limitações",
-    "Conclusão",
 )
 _BUNDLE_TABLES = (
     "performance_by_layer",
@@ -2078,11 +2079,7 @@ def test_multi_source_bundle_is_independent_of_source_order(
     assert "HuBERT Base" in tex and "WavLM Base" in tex
     assert "WavLM Base+" not in tex
     assert "não estão disponíveis" in tex
-    assert _sections(tex) == [
-        *_SECTION_TITLES[:-2],
-        "Comparações entre modelos e idiomas",
-        *_SECTION_TITLES[-2:],
-    ]
+    assert _sections(tex) == [*_SECTION_TITLES, "Comparações entre modelos e idiomas"]
 
 
 # --- scientific text ---
@@ -2149,16 +2146,21 @@ def test_tex_scientific_statements_follow_the_loaded_values(
     performance = eng_tables.performance.copy()
     performance.loc[performance["layer"] == 7, "roc_auc"] = 0.9991
     performance.loc[performance["layer"] != 7, "roc_auc"] = 0.6
-    modified = dataclasses.replace(eng_tables, performance=performance)
+    modified = dataclasses.replace(
+        eng_tables,
+        performance=performance,
+        transfer_selection=report_module.build_transfer_selection(performance),
+    )
     path = tmp_path / "report.tex"
 
     write_report_tex(path, modified, eng_figures, [eng_loaded])
 
     tex = _read_text(path)
-    assert "a maior ROC-AUC (0,999) ocorre na camada 7" in tex
+    claim = "A maior ROC-AUC selecionada é 0,999, na camada 7"
+    assert claim in tex.split(r"\appendix", 1)[0]
     baseline = tmp_path / "baseline.tex"
     write_report_tex(baseline, eng_tables, eng_figures, [eng_loaded])
-    assert "a maior ROC-AUC (0,999) ocorre na camada 7" not in _read_text(baseline)
+    assert claim not in _read_text(baseline)
 
 
 def test_transfer_reduction_selects_layer_by_roc_auc_and_reuses_its_mcc(
@@ -2214,7 +2216,7 @@ def test_xai_performance_association_uses_twelve_layers_and_marks_gaps_unavailab
 def test_report_opens_with_summary_closes_with_conclusion_and_separates_transfer(
     eng_tex,
 ):
-    sections = _sections(eng_tex)
+    sections = _sections(eng_tex.split(r"\appendix", 1)[0])
     assert sections[0] == "Resumo executivo"
     assert sections[-1] == "Conclusão"
     assert "Associação descritiva entre XAI e desempenho" in eng_tex
@@ -3001,8 +3003,11 @@ def test_tex_uses_idiomatic_portuguese_for_unidentified_emergence(
 
 
 def test_tex_reports_identified_emergence_layers(eng_tex):
-    assert "o início estimado da emergência é a camada 2" in eng_tex
-    assert "a consolidação é a camada 8" in eng_tex
+    assert (
+        "o início estimado da emergência foi identificado em 1 de 1 célula(s), "
+        "na camada 2"
+    ) in eng_tex
+    assert "a consolidação foi identificada em 1 de 1 célula(s), na camada 8" in eng_tex
 
 
 # --- M5: consistent decimal and scientific formatting ---
@@ -4831,55 +4836,262 @@ def test_full_report_executive_summary_reports_all_four_comparisons_from_data(
         "divergência espectral",
     ):
         assert phrase in summary
-    for frame, metric in (
-        (full_comparison_tables.encoder_agreement, "prediction_agreement"),
-        (full_comparison_tables.language_shift, None),
-        (full_comparison_tables.diagonal_vs_offdiagonal, "delta_roc_auc"),
-        (full_comparison_tables.spectral_divergence, None),
+    for frame, column, value in (
+        (full_comparison_tables.encoder_agreement, "metric", "prediction_agreement"),
+        (full_comparison_tables.language_shift, "group", "all"),
+        (full_comparison_tables.diagonal_vs_offdiagonal, "metric", "delta_roc_auc"),
+        (full_comparison_tables.spectral_divergence, "group", "all"),
     ):
-        if metric is not None:
-            frame = frame[frame["metric"] == metric]
-        finite = frame.loc[np.isfinite(frame["estimate"]), "estimate"]
-        assert report_module._num(float(finite.median())) in summary
+        frame = frame[(frame[column] == value) & (frame["status"] == "ok")]
+        median = float(frame.loc[np.isfinite(frame["estimate"]), "estimate"].median())
+        assert (
+            report_module._num(median) in summary
+            or report_module._signed(median) in summary
+        )
+    assert r"\input{tables/results_synthesis.tex}" not in summary
+
+
+_MAIN_RESULT_HEADINGS = (
+    "Visão geral do desempenho",
+    "Quanto o desempenho cai na transferência?",
+    "Até que ponto os encoders concordam?",
+    "Como a relevância muda entre corpora e idiomas?",
+    "Quanto a relevância se desloca em frequência?",
+    "As faixas apontadas sustentam a decisão?",
+)
+
+
+def _main_body(tex: str) -> str:
+    return tex.split(r"\appendix", 1)[0]
+
+
+def _result_block(body: str, heading: str) -> str:
+    start = body.index(rf"\subsection{{{heading}}}")
+    rest = body[start + 1 :]
+    ends = [
+        index
+        for index in (rest.find(r"\subsection{"), rest.find(r"\section{"))
+        if index >= 0
+    ]
+    return body[start : start + 1 + min(ends)]
+
+
+def test_full_report_body_is_question_driven_and_has_no_cell_by_cell_prose(
+    full_comparison_tex,
+):
+    body = full_comparison_tex.split(r"\appendix", 1)[0]
+    for heading in (
+        "Visão geral do desempenho",
+        "Quanto o desempenho cai na transferência?",
+        "Até que ponto os encoders concordam?",
+        "Como a relevância muda entre corpora e idiomas?",
+        "As faixas apontadas sustentam a decisão?",
+    ):
+        assert heading in body
+    assert body.count("Para \\texttt{hubert\\_base}") < 4
+    assert body.count("eng$\\rightarrow$por") < 8
+
+
+def test_each_main_result_block_has_result_interpretation_and_caution(
+    full_comparison_tex,
+):
+    body = full_comparison_tex.split(r"\appendix", 1)[0]
+    assert body.count(r"\textbf{Resultado:}") == 6
+    assert body.count(r"\textbf{Interpretação:}") == 6
+    assert body.count(r"\textbf{Cautela:}") == 6
+
+
+def test_main_body_has_toc_orientation_and_short_glossary(full_comparison_tex):
+    body = _main_body(full_comparison_tex)
+    assert body.index(r"\tableofcontents") < body.index(r"\section{")
+    orientation = body.split(r"\section{Como ler este relatório}", 1)[1].split(
+        r"\section{", 1
+    )[0]
+    for term in (
+        "Diagonal",
+        "Transferência",
+        "ROC-AUC",
+        "MCC",
+        "Intervalo bootstrap",
+        "Relevância",
+    ):
+        assert rf"\item \textbf{{{term}}}" in orientation, term
+    for phrase in (
+        "unidade de reamostragem é o áudio",
+        "2000 reamostragens bootstrap",
+        "semente base 42",
+        r"intervalo percentil de 95\%",
+        "não são produzidos valores-p",
+    ):
+        assert phrase in orientation
+    assert orientation.count("o conjunto fixo de amostras XAI tem") == 1
+    assert "Exceções" not in orientation
+
+
+def test_orientation_states_shared_counts_once_and_lists_only_exceptions(
+    two_model_roots, tmp_path
+):
+    loaded = [
+        load_report_source(validate_result_directory(root)) for root in two_model_roots
+    ]
+    tables = build_report_tables(loaded)
+
+    def orientation(frame_tables) -> str:
+        path = tmp_path / "report.tex"
+        write_report_tex(path, frame_tables, [], loaded)
+        return _read_text(path).split(r"\section{Como ler este relatório}", 1)[1].split(
+            r"\section{", 1
+        )[0]
+
+    shared = orientation(tables)
+    assert shared.count("áudios selecionados no total") == 1
+    assert shared.count("o conjunto fixo de amostras XAI tem") == 1
+    assert "Exceções" not in shared
+
+    cohort = tables.cohort.copy()
+    wavlm = cohort["model"] == "wavlm_base"
+    cohort.loc[wavlm, ["n", "n_real", "n_synthetic"]] = [6, 3, 3]
+    differing = orientation(dataclasses.replace(tables, cohort=cohort))
+    assert "Exceções:" in differing
+    assert (
+        r"\texttt{wavlm\_base}, eng: o conjunto fixo de amostras XAI tem 6 áudios "
+        "(3 reais e 3 sintéticos)."
+    ) in differing
+    assert differing.count("áudios selecionados no total") == 1
+
+
+def test_main_result_blocks_follow_approved_order_with_their_figures(
+    full_comparison_tex,
+):
+    body = _main_body(full_comparison_tex)
+    positions = [body.index(rf"\subsection{{{h}}}") for h in _MAIN_RESULT_HEADINGS]
+    assert positions == sorted(positions)
+    expected_figures = (
+        ("transfer_performance_heatmaps",),
+        ("transfer_delta_roc_auc", "transfer_delta_mcc"),
+        ("encoder_agreement_heatmaps",),
+        ("language_shift_intervals",),
+        ("spectral_divergence_by_layer",),
+        ("layer_faithfulness_intervals",),
+    )
+    for heading, names in zip(_MAIN_RESULT_HEADINGS, expected_figures):
+        block = _result_block(body, heading)
+        assert r"\textbf{Pergunta:}" in block
+        for name in names:
+            assert rf"\label{{fig:{name}}}" in block, (heading, name)
+        assert block.index(r"\textbf{Resultado:}") < block.index(
+            r"\textbf{Interpretação:}"
+        ) < block.index(r"\textbf{Cautela:}")
+        findings = block.split(r"\textbf{Resultado:}", 1)[1].split(
+            r"\textbf{Interpretação:}", 1
+        )[0]
+        assert 1 <= findings.count(r"\item ") <= 3, heading
+        assert "Detalhe completo:" in block
+        assert ".csv}" in block
+    for name in _MAIN_RESULT_FIGURES:
+        assert full_comparison_tex.count(rf"\label{{fig:{name}}}") == 1
+    synthesis = body.index(r"\input{tables/results_synthesis.tex}")
+    assert synthesis > positions[-1]
+    assert synthesis < body.index(r"\section{Limitações transversais}")
+
+
+def test_main_result_findings_are_derived_from_the_tables(
+    full_comparison_tables, full_comparison_tex
+):
+    body = _main_body(full_comparison_tex)
+    transfer = _result_block(body, _MAIN_RESULT_HEADINGS[1])
+    for metric in ("delta_roc_auc", "delta_mcc"):
+        claim = report_module.transfer_effect_claim(
+            full_comparison_tables.diagonal_vs_offdiagonal.query("metric == @metric")
+        )
+        assert f"{claim['negative_n']} de {claim['n']}" in transfer
+        assert f"{claim['ci_below_zero_n']} de {claim['n']}" in transfer
+        assert report_module._signed(claim["median"]) in transfer
+    agreement = report_module.agreement_claim(full_comparison_tables.encoder_agreement)
+    block = _result_block(body, _MAIN_RESULT_HEADINGS[2])
+    assert report_module._num(agreement["median"]) in block
+    assert report_module._num(agreement["minimum"]) in block
+    assert report_module._num(agreement["maximum"]) in block
+    fidelity = report_module.faithfulness_claim(
+        report_module._aligned_layer_faithfulness(full_comparison_tables)
+    )
+    block = _result_block(body, _MAIN_RESULT_HEADINGS[5])
+    for row in fidelity.itertuples(index=False):
+        assert f"{row.ci_above_zero_n} de {row.total}" in block
+    selected = full_comparison_tables.transfer_selection
+    diagonal = selected[selected["source"] == selected["target"]]
+    block = _result_block(body, _MAIN_RESULT_HEADINGS[0])
+    assert report_module._num(diagonal["roc_auc"].median()) in block
+
+
+def test_main_findings_follow_modified_table_values(
+    full_comparison_tables, tmp_path
+):
+    effects = full_comparison_tables.diagonal_vs_offdiagonal.copy()
+    roc = effects["metric"] == "delta_roc_auc"
+    effects.loc[roc, ["estimate", "ci_low", "ci_high"]] = [0.2, 0.1, 0.3]
+    modified = dataclasses.replace(
+        full_comparison_tables, diagonal_vs_offdiagonal=effects
+    )
+    path = tmp_path / "report.tex"
+    write_report_tex(path, modified, [], [])
+    body = _main_body(_read_text(path))
+    n = int(roc.sum())
+    assert f"0 de {n} estimativas de $\\Delta$ ROC-AUC são negativas" in body
+    assert f"{n} de {n} intervalos ficam inteiramente acima de zero" in body
+
+
+def test_cross_cutting_limitations_and_short_conclusion(full_comparison_tex):
+    body = _main_body(full_comparison_tex)
+    limitations = body.split(r"\section{Limitações transversais}", 1)[1].split(
+        r"\section{Conclusão}", 1
+    )[0]
+    conclusion = body.split(r"\section{Conclusão}", 1)[1]
+    assert "não isolam o efeito do idioma" in limitations
+    assert "mudança conjunta de corpus/idioma" in limitations
+    for local in ("intercambiáveis", "Wasserstein", "top-minus-random"):
+        assert local not in limitations, local
+    assert "não identificam um efeito causal do idioma" in conclusion
+    assert r"Tabela~\ref{tab:results-synthesis}" in conclusion
+    assert conclusion.count(r"Figura~\ref") == 0
+    assert len(conclusion) < 1600
+    for phrase in ("causado pelo idioma", "o idioma causa", "efeito causal do idioma é"):
+        assert phrase not in body
 
 
 def test_comparison_narrative_explains_method_and_links_each_result(
     full_comparison_tex,
 ):
-    section = full_comparison_tex.split(
-        r"\section{Comparações entre modelos e idiomas}", 1
-    )[1].split(r"\section{Limitações}", 1)[0]
-    section_lower = section.lower()
+    body = _main_body(full_comparison_tex)
+    appendix = full_comparison_tex.split(r"\appendix", 1)[1]
+    section = appendix.split(r"\section{Comparações entre modelos e idiomas}", 1)[
+        1
+    ].split(r"\section{", 1)[0]
 
-    for phrase in (
-        "unidade de reamostragem é o áudio",
-        "2.000 reamostragens bootstrap",
-        "semente base 42",
-        "hash estável",
-        r"intervalo percentil de 95\%",
-        "não são realizados testes de hipótese",
-        "não são produzidos valores-p",
-        "probe fixo",
-        "sistemas diagonais completos",
-    ):
-        assert phrase in section_lower
+    for phrase in ("probe fixo", "sistemas diagonais"):
+        assert phrase in body.lower()
     for family in (
         "language_shift_intervals",
-        "diagonal_vs_offdiagonal",
         "spectral_divergence_by_layer",
         "encoder_agreement_heatmaps",
-        "encoder_agreement_by_layer",
+        "transfer_delta_roc_auc",
+        "transfer_delta_mcc",
     ):
+        assert rf"\label{{fig:{family}}}" in body
+    for family in ("diagonal_vs_offdiagonal", "encoder_agreement_by_layer"):
         assert rf"\label{{fig:{family}}}" in section
+        assert rf"\label{{fig:{family}}}" not in body
     for family in ("language_shift", "spectral_divergence"):
         assert rf"\label{{fig:{family}}}" not in section
     for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
-    assert r"\label{fig:encoder_agreement}" not in section
-    assert r"ci\_low--ci\_high" in section
+        assert rf"\input{{tables/{family}.tex}}" not in body
+        csv = rf"\texttt{{tables/{family.replace('_', chr(92) + '_')}.csv}}"
+        assert csv in body.replace(r"\allowbreak{}", "")
+    assert r"\label{fig:encoder_agreement}" not in full_comparison_tex
+    assert r"\texttt{ci\_low}--\texttt{ci\_high}" in section
     assert "ci_low--ci_high" not in section
-    assert "mudança conjunta de corpus/idioma" in section
-    assert "efeito causal do idioma" in section
+    assert r"Seção~\ref{sec:orientacao}" in section
 
 
 def test_report_and_scripts_readme_avoid_reserved_slots_and_artificial_terms(
@@ -4907,21 +5119,21 @@ def test_report_and_scripts_readme_avoid_reserved_slots_and_artificial_terms(
             assert term not in lowered, (term, text[:120])
 
 
-def test_conclusion_and_limitations_cover_comparisons_without_causal_claims(
+def test_local_limitations_sit_in_the_caution_of_their_result_block(
     full_comparison_tex,
 ):
-    limitations = full_comparison_tex.split(r"\section{Limitações}", 1)[1].split(
-        r"\section{Conclusão}", 1
-    )[0]
-    conclusion = full_comparison_tex.split(r"\section{Conclusão}", 1)[1]
-
-    for text in (limitations, conclusion):
-        assert "acordo entre encoders" in text
-        assert "mudança conjunta de corpus/idioma" in text
-        assert "diagonal" in text
-        assert "divergência espectral" in text
-    assert "não isolam o efeito do idioma" in limitations
-    assert "não identificam um efeito causal do idioma" in conclusion
+    body = _main_body(full_comparison_tex)
+    expected = {
+        _MAIN_RESULT_HEADINGS[0]: "não é maximizado separadamente",
+        _MAIN_RESULT_HEADINGS[1]: "não sua causa",
+        _MAIN_RESULT_HEADINGS[2]: "não torna os modelos intercambiáveis",
+        _MAIN_RESULT_HEADINGS[3]: "não isola um efeito do idioma",
+        _MAIN_RESULT_HEADINGS[4]: "não identifica a causa do deslocamento",
+        _MAIN_RESULT_HEADINGS[5]: "não implica causalidade no mundo real",
+    }
+    for heading, phrase in expected.items():
+        caution = _result_block(body, heading).split(r"\textbf{Cautela:}", 1)[1]
+        assert phrase in caution.split(r"\textit{Detalhe completo:}", 1)[0], heading
 
 
 def test_planned_figures_add_comparisons_only_when_complete(full_comparison_tables):

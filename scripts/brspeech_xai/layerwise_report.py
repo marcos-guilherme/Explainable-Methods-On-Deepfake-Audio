@@ -5397,7 +5397,10 @@ _LANGUAGE_NAMES: Mapping[str, str] = MappingProxyType(
 _COMPARISON_SECTION_TITLE = "Comparações entre modelos e idiomas"
 _SECTION_TITLES_PT: tuple[str, ...] = (
     "Resumo executivo",
-    "Escopo e inventário dos experimentos",
+    "Como ler este relatório",
+    "Resultados",
+    "Limitações transversais",
+    "Conclusão",
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
     "Emergência estimada da decisão do detector",
@@ -5405,8 +5408,6 @@ _SECTION_TITLES_PT: tuple[str, ...] = (
     "Reorganização da decisão entre camadas",
     "Exemplos tempo-frequência STDFT selecionados",
     "Conservação e qualidade numérica",
-    "Limitações",
-    "Conclusão",
 )
 _NOT_AVAILABLE = "n/d"
 _FIT_WIDTH_OPEN = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%"
@@ -5498,6 +5499,10 @@ def _tt_breakable(value: object) -> str:
     for mark in (r"\_", "-", r"\ldots{}"):
         escaped = escaped.replace(mark, mark + r"\allowbreak{}")
     return rf"\texttt{{{escaped}}}"
+
+
+def _csv_tex(name: str) -> str:
+    return _tt_breakable(f"tables/{name}.csv").replace("/", r"/\allowbreak{}")
 
 
 def _num(value: object, digits: int = 3) -> str:
@@ -5605,10 +5610,10 @@ def _report_title(tables: ReportTables) -> str:
 
 
 def _figure_block(
-    record: FigureRecord, tables: ReportTables
+    record: FigureRecord, tables: ReportTables, *, compact_scope: bool = False
 ) -> list[str]:
     pdf = next(name for name in record.files if name.endswith(".pdf"))
-    caption = _caption_pt(record, tables)
+    caption = _caption_pt(record, tables, compact_scope=compact_scope)
     return [
         r"\begin{figure}[H]",
         r"\centering",
@@ -5640,9 +5645,30 @@ def _caption_scope(record: FigureRecord) -> str:
     return f" Modelos e idiomas (treino$\\rightarrow$avaliação): {listed}."
 
 
-def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
+def _compact_caption_scope(record: FigureRecord) -> str:
+    """Name each model and language once, without listing every cell."""
+    models = list(dict.fromkeys(model for model, _, _ in record.cells))
+    languages = [
+        language
+        for language in LANGUAGE_ORDER
+        if any(language in (origin, target) for _, origin, target in record.cells)
+    ]
+    if not models:
+        return ""
+    noun = "Modelo" if len(models) == 1 else "Modelos"
+    return (
+        f" {noun}: {', '.join(_tt(model) for model in models)}; "
+        f"idiomas: {escape_latex(', '.join(languages))}."
+    )
+
+
+def _caption_pt(
+    record: FigureRecord, tables: ReportTables, *, compact_scope: bool = False
+) -> str:
     band_range = escape_latex(_band_range_text(tables))
-    scope = _caption_scope(record)
+    scope = (
+        _compact_caption_scope(record) if compact_scope else _caption_scope(record)
+    )
     if record.name == "performance_by_layer":
         body = (
             "ROC-AUC (sem limiar, adimensional de 0 a 1) e EER diagnóstico "
@@ -5663,6 +5689,17 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "Em cada célula, a camada selecionada é exclusivamente a de maior "
             "ROC-AUC; são mostrados a ROC-AUC e o MCC dessa mesma camada, sem "
             "maximizar o MCC separadamente. Valores aparecem dentro das células."
+        )
+    elif record.name in ("transfer_delta_roc_auc", "transfer_delta_mcc"):
+        metric = "ROC-AUC" if record.name.endswith("roc_auc") else "MCC"
+        body = (
+            f"Pergunta: quanto muda a {metric} fora da diagonal em relação ao "
+            "sistema diagonal do mesmo conjunto-alvo? Um painel por modelo; cada "
+            "linha é uma transferência treino$\\rightarrow$avaliação na camada "
+            "selecionada pela ROC-AUC da célula, com o ponto na estimativa e o "
+            f"segmento no intervalo bootstrap de {_ci_percent_tex()} persistido; a linha "
+            "tracejada marca efeito zero. Limite principal: corpus e idioma mudam "
+            "juntos, portanto o efeito não identifica uma causa."
         )
     elif record.name == "encoder_agreement_heatmaps":
         body = (
@@ -5784,81 +5821,94 @@ def _conservation_caption(tables: ReportTables) -> str:
     )
 
 
-def _median_comparison_estimate(
-    frame: pd.DataFrame, **filters: object
-) -> float | None:
+def _has_comparison(tables: ReportTables, name: str) -> bool:
+    return name not in tables.omitted_comparisons and not getattr(tables, name).empty
+
+
+def _estimate_claim(frame: pd.DataFrame, **filters: object) -> Mapping[str, float | int]:
+    """Median and range of usable estimates, the same rows the claim helpers keep."""
     selected = frame
     for column, value in filters.items():
         selected = selected[selected[column] == value]
-    values = selected["estimate"].to_numpy(dtype=np.float64)
-    finite = values[np.isfinite(values)]
-    return float(np.median(finite)) if finite.size else None
+    usable = _usable_claim_rows(selected, ("estimate",))
+    estimates = usable["estimate"].to_numpy(dtype=np.float64)
+    if not estimates.size:
+        return {"n": 0}
+    return {
+        "n": int(estimates.size),
+        "median": float(np.median(estimates)),
+        "minimum": float(np.min(estimates)),
+        "maximum": float(np.max(estimates)),
+    }
 
 
-def _comparison_result_paragraphs(tables: ReportTables) -> list[str]:
-    """Data-dependent objectives and results for comparisons that are present."""
-    paragraphs: list[str] = []
+def _median_by(
+    frame: pd.DataFrame, keys: Sequence[str], **filters: object
+) -> pd.Series:
+    selected = frame
+    for column, value in filters.items():
+        selected = selected[selected[column] == value]
+    usable = _usable_claim_rows(selected, ("estimate",))
+    return usable.groupby(list(keys), sort=True)["estimate"].median()
 
-    agreement = _median_comparison_estimate(
-        tables.encoder_agreement, metric="prediction_agreement"
-    )
-    if agreement is not None:
-        paragraphs.append(
-            "O acordo entre encoders verifica se modelos distintos chegam às mesmas "
-            "decisões nos mesmos áudios e células. A mediana da fração de predições "
-            f"iguais é {_num(agreement)}; correlação de escores, kappa e proximidade "
-            r"das relevâncias completam a leitura na "
-            r"Figura~\ref{fig:encoder_agreement_heatmaps}; os perfis por camada "
-            r"estão na Figura~\ref{fig:encoder_agreement_by_layer} "
-            r"e na Tabela~\ref{tab:encoder-agreement-summary}."
+
+def _delta_claims(tables: ReportTables) -> dict[str, Mapping[str, float | int]]:
+    if not _has_comparison(tables, "diagonal_vs_offdiagonal"):
+        return {}
+    frame = tables.diagonal_vs_offdiagonal
+    claims = {
+        metric: transfer_effect_claim(frame[frame["metric"] == metric])
+        for metric in ("delta_roc_auc", "delta_mcc")
+    }
+    return {metric: claim for metric, claim in claims.items() if claim["n"]}
+
+
+_DELTA_LABELS_TEX: Mapping[str, str] = MappingProxyType(
+    {"delta_roc_auc": r"$\Delta$ ROC-AUC", "delta_mcc": r"$\Delta$ MCC"}
+)
+
+
+def _executive_comparison_items(tables: ReportTables) -> list[str]:
+    """One short headline per comparison present; details live in the blocks."""
+    items: list[str] = []
+    deltas = _delta_claims(tables)
+    if deltas:
+        parts = [
+            f"{_DELTA_LABELS_TEX[metric]} com {claim['negative_n']} de "
+            f"{claim['n']} estimativas negativas (mediana {_signed(claim['median'])})"
+            for metric, claim in deltas.items()
+        ]
+        items.append(
+            "Na comparação diagonal e fora da diagonal, no mesmo conjunto-alvo: "
+            + _join_pt(parts)
+            + r" (Seção~\ref{sec:resultado-transferencia})."
         )
-
-    shift = _median_comparison_estimate(tables.language_shift)
-    if shift is not None:
-        paragraphs.append(
-            "A mudança de relevância entre corpora/idiomas mantém o modelo e o "
-            "idioma de treino do probe fixos e troca o conjunto de avaliação. A "
-            f"mediana da distância Jensen--Shannon é {_num(shift)} bits; valores "
-            "maiores indicam perfis médios menos parecidos, sem isolar o idioma das "
-            "demais diferenças entre os corpora. Essa é uma mudança conjunta de "
-            r"corpus/idioma (Figura~\ref{fig:language_shift_intervals}; "
-            r"Tabela~\ref{tab:language-shift-summary})."
-        )
-
-    delta_auc = _median_comparison_estimate(
-        tables.diagonal_vs_offdiagonal, metric="delta_roc_auc"
-    )
-    delta_mcc = _median_comparison_estimate(
-        tables.diagonal_vs_offdiagonal, metric="delta_mcc"
-    )
-    if delta_auc is not None or delta_mcc is not None:
-        values = []
-        if delta_auc is not None:
-            values.append(rf"mediana de $\Delta$ ROC-AUC {_signed(delta_auc)}")
-        if delta_mcc is not None:
-            values.append(rf"mediana de $\Delta$ MCC {_signed(delta_mcc)}")
-        paragraphs.append(
-            "A comparação diagonal e fora da diagonal mede, no mesmo conjunto-alvo, "
-            "a diferença fora da diagonal menos diagonal. Os resultados resumidos "
-            "são: "
-            + _join_pt(values)
-            + r" (Figura~\ref{fig:diagonal_vs_offdiagonal}; "
-            r"Tabela~\ref{tab:diagonal-off-summary}). O sinal informa a direção da "
-            "mudança observada, não sua causa."
-        )
-
-    spectral = _median_comparison_estimate(tables.spectral_divergence)
-    if spectral is not None:
-        paragraphs.append(
-            "A divergência espectral compara sistemas diagonais completos entre "
-            "corpora/idiomas. A mediana da distância de Wasserstein é "
-            f"{_num(spectral)} Hz; ela resume o deslocamento da massa de relevância "
-            "no eixo de frequência, sem medir qualidade nem identificar uma causa "
-            r"(Figura~\ref{fig:spectral_divergence_by_layer}; "
-            r"Tabela~\ref{tab:spectral-divergence-summary})."
-        )
-
-    return paragraphs
+    if _has_comparison(tables, "encoder_agreement"):
+        claim = agreement_claim(tables.encoder_agreement)
+        if claim["n"]:
+            items.append(
+                "No acordo entre encoders, a fração de decisões iguais tem mediana "
+                f"{_num(claim['median'])}, com faixa de {_num(claim['minimum'])} a "
+                f"{_num(claim['maximum'])} "
+                r"(Seção~\ref{sec:resultado-acordo})."
+            )
+    if _has_comparison(tables, "language_shift"):
+        claim = _estimate_claim(tables.language_shift, group="all")
+        if claim["n"]:
+            items.append(
+                "Na mudança de relevância entre corpora/idiomas, com probe fixo, a "
+                f"distância Jensen--Shannon mediana é {_num(claim['median'])} bits "
+                r"(Seção~\ref{sec:resultado-relevancia})."
+            )
+    if _has_comparison(tables, "spectral_divergence"):
+        claim = _estimate_claim(tables.spectral_divergence, group="all")
+        if claim["n"]:
+            items.append(
+                "Na divergência espectral entre sistemas diagonais, a distância de "
+                f"Wasserstein mediana é {_num(claim['median'])} Hz "
+                r"(Seção~\ref{sec:resultado-espectral})."
+            )
+    return items
 
 
 def _executive_summary_section(tables: ReportTables) -> list[str]:
@@ -5877,7 +5927,6 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         (tables.xai_performance_association["status"] == "available").sum()
     )
     fidelity_stability = _executive_fidelity_stability_blurbs(tables)
-    comparisons = _comparison_result_paragraphs(tables)
     return [
         rf"\section{{{_SECTION_TITLES_PT[0]}}}",
         r"\label{sec:resumo}",
@@ -5891,19 +5940,143 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         f"reportado ({_num(best['mcc'])}) vem dessa mesma camada. A redução "
         "seleciona exclusivamente pela ROC-AUC e nunca maximiza o MCC em separado.",
         "",
+        *_itemize(_executive_comparison_items(tables)),
+        *fidelity_stability,
+        *([""] if fidelity_stability else []),
         f"A associação XAI$\\leftrightarrow$desempenho está disponível em "
         f"{available} de {len(tables.xai_performance_association)} célula(s); "
         "ela é descritiva, baseada em 12 camadas e sem interpretação causal.",
         "",
-        *[item for paragraph in comparisons for item in (paragraph, "")],
-        *fidelity_stability,
-        *([""] if fidelity_stability else []),
-        r"\input{tables/results_synthesis.tex}",
-        "",
     ]
 
 
-def _inventory_section(
+def _shared_and_exceptions(
+    values: Mapping[tuple[str, str], object],
+) -> tuple[object, list[tuple[str, str]]]:
+    """The most frequent value and the model/language pairs that differ from it."""
+    tallies: dict[object, int] = {}
+    for value in values.values():
+        tallies[value] = tallies.get(value, 0) + 1
+    shared = max(tallies, key=lambda value: tallies[value])
+    return shared, [key for key, value in values.items() if value != shared]
+
+
+def _role_count_text(declared: Mapping[str, int]) -> str:
+    return (
+        f"{sum(declared.values())} áudios selecionados no total "
+        f"(treino {declared['train']}, calibração {declared['calibration']}, "
+        f"teste {declared['test']}); a avaliação por camada usa o subconjunto de "
+        f"teste ({declared['test']} áudios)"
+    )
+
+
+def _xai_count_text(n: int, n_real: int, n_synthetic: int) -> str:
+    return (
+        f"o conjunto fixo de amostras XAI tem {n} áudios ({n_real} reais e "
+        f"{n_synthetic} sintéticos)"
+    )
+
+
+def _compact_protocol_counts(
+    tables: ReportTables, sources: Sequence[LoadedReportSource]
+) -> list[str]:
+    """One shared count statement plus the model/language pairs that differ."""
+    declared = {
+        key: tuple(sorted(value.items()))
+        for key, value in _role_counts(sources).items()
+    }
+    xai = {
+        (row.model, row.target): (int(row.n), int(row.n_real), int(row.n_synthetic))
+        for row in tables.cohort.drop_duplicates(["model", "target"]).itertuples(
+            index=False
+        )
+    }
+    parts: list[str] = []
+    exceptions: list[str] = []
+    if declared:
+        shared, differing = _shared_and_exceptions(declared)
+        parts.append(_role_count_text(dict(shared)))
+        exceptions += [
+            f"{_tt(model)}, {escape_latex(language)}: "
+            f"{_role_count_text(dict(declared[(model, language)]))}"
+            for model, language in differing
+        ]
+    elif sources:
+        parts.append("as contagens por papel não estão registradas no plano de execução")
+    if xai:
+        shared, differing = _shared_and_exceptions(xai)
+        parts.append(_xai_count_text(*shared))
+        exceptions += [
+            f"{_tt(model)}, {escape_latex(language)}: "
+            f"{_xai_count_text(*xai[(model, language)])}"
+            for model, language in differing
+        ]
+    if not parts:
+        return []
+    statement = "Em cada par modelo/idioma, " + "; ".join(parts) + "."
+    if exceptions:
+        return [statement + " Exceções:", "", *_itemize([f"{item}." for item in exceptions])]
+    return [statement, ""]
+
+
+def _ci_percent_tex() -> str:
+    return f"{100 * BOOTSTRAP_CI_LEVEL:.0f}\\%"
+
+
+def _glossary_items() -> list[str]:
+    return [
+        r"\textbf{Diagonal}: o probe é treinado e avaliado no mesmo idioma "
+        "(treino = avaliação).",
+        r"\textbf{Transferência}: célula fora da diagonal, em que o probe treinado "
+        "em um idioma é avaliado em outro; descreve uma mudança conjunta de "
+        "corpus/idioma.",
+        r"\textbf{ROC-AUC}: qualidade da ordenação dos escores, sem limiar; 0,5 "
+        "corresponde ao acaso e 1 à separação perfeita.",
+        r"\textbf{MCC}: correlação de Matthews das decisões no limiar fixo calibrado "
+        "no idioma de origem; vai de $-1$ a 1, com 0 próximo do acaso. A classe "
+        "positiva é sintético.",
+        r"\textbf{Intervalo bootstrap}: a unidade de reamostragem é o áudio; são "
+        + f"{BOOTSTRAP_RESAMPLES}"
+        + " reamostragens bootstrap estratificadas por classe, com semente base "
+        f"{BOOTSTRAP_SEED} combinada com um hash estável da identidade da "
+        f"comparação, e intervalo percentil de {_ci_percent_tex()}. Não são "
+        "realizados testes de hipótese e não são produzidos valores-p.",
+        r"\textbf{Relevância}: atribuição AttnLRP projetada em bandas mel por "
+        "DFT-LRP; a massa absoluta é normalizada por amostra e descreve o probe, "
+        "não uma pista acústica verificada.",
+    ]
+
+
+def _orientation_section(
+    tables: ReportTables, sources: Sequence[LoadedReportSource]
+) -> list[str]:
+    n_cells = len(tables.transfer_selection)
+    lines = [
+        rf"\section{{{_SECTION_TITLES_PT[1]}}}",
+        r"\label{sec:orientacao}",
+        "O estudo pergunta como a decisão de um probe linear sobre representações "
+        "de encoders de fala, que separa áudio real de sintético, se forma ao longo "
+        "das camadas e o que as explicações XAI revelam sobre ela quando o idioma "
+        f"de treino ou de avaliação muda. O desenho cruza {len(tables.models)} "
+        f"encoder(s), {len(tables.languages)} idioma(s) de treino e "
+        f"{len(tables.languages)} idioma(s) de avaliação, em {n_cells} "
+        "combinações, com uma avaliação por camada.",
+        "",
+        *_inventory_lines(tables, sources),
+        *_compact_protocol_counts(tables, sources),
+        "Os mapas usam sempre a mesma ordem de idiomas, com o idioma de treino nas "
+        "linhas e o idioma de avaliação nas colunas. Cada bloco de "
+        r"Resultados (Seção~\ref{sec:resultados}) traz uma pergunta, a figura, "
+        "até três achados, a interpretação, a principal cautela e o caminho até o "
+        "detalhe completo nos apêndices e CSVs.",
+        "",
+        r"\subsection*{Glossário}",
+        *_itemize(_glossary_items()),
+    ]
+    return lines
+
+
+def _inventory_lines(
     tables: ReportTables, sources: Sequence[LoadedReportSource]
 ) -> list[str]:
     ordered = sorted(sources, key=_source_sort_key)
@@ -5924,8 +6097,6 @@ def _inventory_section(
         )
     case_study = len(tables.models) == 1 and len(tables.languages) == 1
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[1]}}}",
-        r"\label{sec:escopo}",
         "Este relatório é gerado de forma determinística a partir de "
         "artefatos persistidos de execuções concluídas. A geração é somente "
         "leitura: nenhum encoder é carregado, nenhuma explicação é recalculada "
@@ -6060,7 +6231,7 @@ def _protocol_section(
         else []
     )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[2]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[5]}}}",
         r"\label{sec:protocolo}",
         *counts_intro,
         *_itemize(items),
@@ -6078,38 +6249,18 @@ def _protocol_section(
 def _performance_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    names = (
-        "performance_by_layer",
-        "fixed_threshold_by_layer",
-        "transfer_performance_heatmaps",
-    )
+    names = ("performance_by_layer", "fixed_threshold_by_layer")
     present = [name for name in names if name in figures]
-    if (
-        not present
-        and _aligned_probe_stability(tables).empty
-        and _aligned_layer_faithfulness(tables).empty
-    ):
-        return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[3]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[6]}}}",
         r"\label{sec:desempenho}",
+        "Perfis completos por camada de cada célula treino$\\rightarrow$avaliação. "
+        "Os valores por camada, incluindo EER diagnóstico, acurácia, MCC, TPR e "
+        f"FPR, estão nas tabelas abaixo e em {_csv_tex('performance_by_layer')}; "
+        "a camada selecionada por célula está em "
+        f"{_csv_tex('transfer_selected_layers')}.",
+        "",
     ]
-    for cell in _cells(tables):
-        rows = _cell_rows(tables.performance, cell)
-        best = rows.loc[rows["roc_auc"].idxmax()]
-        first = rows.loc[rows["layer"].idxmin()]
-        last = rows.loc[rows["layer"].idxmax()]
-        lines += [
-            f"Para {_cell_tex(cell)}, a maior ROC-AUC ({_num(best['roc_auc'])}) "
-            f"ocorre na camada {int(best['layer'])}; na camada "
-            f"{int(first['layer'])} a ROC-AUC é {_num(first['roc_auc'])} e na "
-            f"camada {int(last['layer'])} é {_num(last['roc_auc'])}. Na melhor "
-            f"camada, o EER diagnóstico é {_num(best['eer_diagnostic'] * 100, 1)}"
-            r"\% e, no limiar fixo, a acurácia é "
-            f"{_num(best['accuracy'])}, o MCC {_num(best['mcc'])}, a TPR "
-            f"{_num(best['tpr'])} e a FPR {_num(best['fpr'])}.",
-            "",
-        ]
     for name in present:
         lines += _figure_block(figures[name], tables)
     selected = tables.transfer_selection
@@ -6160,6 +6311,7 @@ def _performance_section(
     if fidelity_tex.strip():
         lines += [
             r"\subsection{Fidelidade por intervenção (camada 12, diagonal)}",
+            r"\label{sec:fidelidade}",
             "Comparações pareadas de comprehensividade (delete) entre faixas "
             r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
             "aleatórias com energia RMS igualada, com recomputação AttnLRP "
@@ -6174,11 +6326,6 @@ def _performance_section(
             "",
             _faithfulness_scope_note(aligned_fidelity),
             "",
-            *(
-                _figure_block(figures["layer_faithfulness_intervals"], tables)
-                if "layer_faithfulness_intervals" in figures
-                else []
-            ),
             r"\input{tables/layer_faithfulness_summary.tex}",
             "",
             _faithfulness_pattern_paragraph(
@@ -6214,35 +6361,51 @@ def _emergence_section(tables: ReportTables) -> list[str]:
     if tables.emergence.empty:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[4]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[7]}}}",
         r"\label{sec:emergencia}",
         "Os valores de início (onset) e consolidação são os persistidos pelo "
         "agregador do experimento, sem recálculo neste relatório.",
         "",
     ]
-    for row in tables.emergence.itertuples(index=False):
-        cell = (row.model, row.source, row.target)
-        onset = (
-            f"o início estimado da emergência é a camada {int(row.onset)}"
-            if not _is_missing(row.onset)
-            else "o início da emergência não foi identificado"
-        )
-        consolidation = (
-            f"a consolidação é a camada {int(row.consolidation)}"
-            if not _is_missing(row.consolidation)
-            else "a consolidação não foi identificada"
-        )
-        lines += [
-            f"Para {_cell_tex(cell)}, {onset} e {consolidation} "
-            f"(ROC-AUC final {_num(row.final_auc)}).",
-            "",
-        ]
-    lines += [r"\input{tables/emergence_layers.tex}", ""]
+    total = len(tables.emergence)
+    onset = _identified_layers_text(
+        tables.emergence["onset"],
+        total,
+        found="o início estimado da emergência foi identificado",
+        missing="o início da emergência não foi identificado",
+    )
+    consolidation = _identified_layers_text(
+        tables.emergence["consolidation"],
+        total,
+        found="a consolidação foi identificada",
+        missing="a consolidação não foi identificada",
+    )
+    lines += [
+        f"Em resumo, {onset}; {consolidation}. Os valores por célula, com a "
+        r"ROC-AUC final, estão na Tabela~\ref{tab:emergence} e em "
+        f"{_csv_tex('emergence_layers')}.",
+        "",
+        r"\input{tables/emergence_layers.tex}",
+        "",
+    ]
     return lines
 
 
-def _band_label(rows: pd.DataFrame, band: int) -> str:
-    return str(rows.loc[rows["band"] == band, "band_label"].iloc[0])
+def _identified_layers_text(
+    values: pd.Series, total: int, *, found: str, missing: str
+) -> str:
+    layers = [int(value) for value in values if not _is_missing(value)]
+    if not layers:
+        return missing if total == 1 else f"{missing} em nenhuma das {total} células"
+    span = (
+        f"na camada {layers[0]}"
+        if min(layers) == max(layers)
+        else f"entre as camadas {min(layers)} e {max(layers)}"
+    )
+    text = f"{found} em {len(layers)} de {total} célula(s), {span}"
+    if len(layers) < total:
+        text += f", e {missing} nas outras {total - len(layers)}"
+    return text
 
 
 def _relevance_section(
@@ -6253,43 +6416,14 @@ def _relevance_section(
     if not present:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[5]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[8]}}}",
         r"\label{sec:relevancia}",
+        "Relevância absoluta normalizada por camada e banda mel, no conjunto "
+        "fixo de amostras XAI. Os valores por célula, camada e banda estão em "
+        f"{_csv_tex('dft_band_relevance')} e, por classe verdadeira, em "
+        f"{_csv_tex('class_relevance')}.",
+        "",
     ]
-    overall_all = tables.band_relevance[
-        tables.band_relevance["measure"] == "absolute_normalized"
-    ]
-    by_class_all = tables.class_relevance[
-        (tables.class_relevance["grouping"] == "y_true")
-        & (tables.class_relevance["measure"] == "absolute_normalized")
-    ]
-    for cell in _cells(tables):
-        overall = _cell_rows(overall_all, cell)
-        by_band = overall.groupby("band")["mean"].mean()
-        top_band = int(by_band.idxmax())
-        peak = overall.loc[overall["mean"].idxmax()]
-        sentence = (
-            f"Para {_cell_tex(cell)}, a banda de maior relevância absoluta "
-            f"normalizada média sobre as camadas é "
-            f"{escape_latex(_band_label(overall, top_band))} (fração média da "
-            f"massa em banda {_num(by_band.loc[top_band])}); o pico ocorre na "
-            f"camada {int(peak['layer'])}, banda "
-            f"{escape_latex(peak['band_label'])} ({_num(peak['mean'])})."
-        )
-        classes = _cell_rows(by_class_all, cell)
-        wide = classes.pivot_table(
-            index=["layer", "band"], columns="group", values="mean", aggfunc="first"
-        )
-        if {0, 1} <= set(wide.columns):
-            diff = wide[1] - wide[0]
-            layer, band = diff.abs().idxmax()
-            sentence += (
-                " A maior diferença entre sintético e real "
-                f"({_signed(diff.loc[(layer, band)])}, em fração da massa em "
-                f"banda) ocorre na camada {int(layer)}, banda "
-                f"{escape_latex(_band_label(classes, int(band)))}."
-            )
-        lines += [sentence, ""]
     for name in present:
         lines += _figure_block(figures[name], tables)
     lines += [
@@ -6301,19 +6435,23 @@ def _relevance_section(
         "camadas.",
         "",
     ]
-    for row in tables.xai_performance_association.itertuples(index=False):
-        cell = (row.model, row.source, row.target)
-        if row.status == "available":
-            text = (
-                f"Para {_cell_tex(cell)}, $n={int(row.n_layers)}$ e "
-                f"$\\rho={_signed(row.rho)}$."
-            )
-        else:
-            text = (
-                f"Para {_cell_tex(cell)}, a associação está indisponível "
-                f"({escape_latex(row.status)}; n={int(row.n_layers)})."
-            )
-        lines += [text, ""]
+    association = tables.xai_performance_association
+    available = association[association["status"] == "available"]
+    summary = (
+        f"A associação está disponível em {len(available)} de {len(association)} "
+        "célula(s)"
+    )
+    if not available.empty:
+        rho = available["rho"].astype(float)
+        summary += (
+            f"; nelas, $\\rho$ tem mediana {_signed(rho.median())} e vai de "
+            f"{_signed(rho.min())} a {_signed(rho.max())}"
+        )
+    lines += [
+        summary + ". Os valores por célula e o motivo de cada indisponibilidade "
+        f"estão em {_csv_tex('xai_performance_association')}.",
+        "",
+    ]
     lines += [
         "Esta análise é descritiva, usa apenas n=12 camadas por célula quando "
         "disponível e não sustenta inferência nem interpretação causal.",
@@ -6328,21 +6466,34 @@ def _reorganization_section(
     if "decision_reorganization_by_layer" not in figures:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[6]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[9]}}}",
         r"\label{sec:reorganizacao}",
     ]
-    for cell in _cells(tables):
-        rows = _cell_rows(tables.transitions, cell)
-        low = rows.loc[rows["similarity_mean"].idxmin()]
-        lines += [
-            f"Para {_cell_tex(cell)}, a menor similaridade cosseno média entre "
-            f"camadas adjacentes ({_num(low['similarity_mean'])}) ocorre na "
-            f"transição {int(low['previous_layer'])}$\\rightarrow$"
-            f"{int(low['current_layer'])}, onde a variação L1 normalizada média "
-            f"é {_num(low['normalized_l1_change_mean'])}, estimada com "
-            f"{int(low['n'])} amostras.",
-            "",
+    lows = pd.DataFrame(
+        [
+            _cell_rows(tables.transitions, cell)
+            .sort_values("similarity_mean", kind="stable")
+            .iloc[0]
+            for cell in _cells(tables)
         ]
+    )
+    transitions = lows.groupby(
+        ["previous_layer", "current_layer"], sort=True
+    ).size()
+    (previous, current), count = max(
+        transitions.items(), key=lambda item: (item[1], -item[0][0])
+    )
+    low, high = _num(lows["similarity_mean"].min()), _num(lows["similarity_mean"].max())
+    span = f"é {low}" if low == high else f"vai de {low} a {high}"
+    lines += [
+        f"Nas {len(lows)} célula(s), a menor similaridade cosseno média entre "
+        f"camadas adjacentes {span}; a transição "
+        f"{int(previous)}$\\rightarrow${int(current)} concentra esse mínimo em "
+        f"{int(count)} delas. Os valores por transição, com a variação L1 "
+        r"normalizada e o número de amostras, estão em "
+        f"{_csv_tex('decision_reorganization')}.",
+        "",
+    ]
     lines += _figure_block(figures["decision_reorganization_by_layer"], tables)
     return lines
 
@@ -6370,21 +6521,19 @@ def _stdft_section(
     if "stdft_examples" not in figures:
         return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[7]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[10]}}}",
         r"\label{sec:stdft}",
     ]
-    for cell in _cells(tables):
-        rows = _cell_rows(tables.stdft_examples, cell)
-        if rows.empty:
-            continue
-        real = int((rows["y_true"] == 0).sum())
-        synthetic = int((rows["y_true"] == 1).sum())
-        lines += [
-            f"Para {_cell_tex(cell)}, o conjunto contém {len(rows)} exemplos "
-            f"STDFT em {rows['layer'].nunique()} camadas ({real} reais e "
-            f"{synthetic} sintéticos no total).",
-            "",
-        ]
+    examples = tables.stdft_examples
+    n_cells = len(examples[["model", "source", "target"]].drop_duplicates())
+    lines += [
+        f"O conjunto contém {len(examples)} exemplos STDFT em {n_cells} "
+        f"célula(s) e {examples['layer'].nunique()} camadas "
+        f"({int((examples['y_true'] == 0).sum())} reais e "
+        f"{int((examples['y_true'] == 1).sum())} sintéticos no total); a "
+        f"lista por célula está em {_csv_tex('stdft_examples')}.",
+        "",
+    ]
     shown = figures["stdft_examples"].cells
     lines += [
         "A figura mostra amostras de " + _join_pt([_cell_tex(c) for c in shown]) + ".",
@@ -6415,7 +6564,7 @@ def _conservation_section(
             f"camadas, limite {_sci(limit)} ({status})."
         )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[8]}}}",
+        rf"\section{{{_SECTION_TITLES_PT[11]}}}",
         r"\label{sec:conservacao}",
         "As verificações cobrem populações diferentes e obedecem a limites "
         f"próprios: três usam a tolerância de conservação ({tolerance}) e o "
@@ -6432,56 +6581,29 @@ def _conservation_section(
 def _comparisons_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    has_encoder = "encoder_agreement_heatmaps" in figures
-    main_figures = (
-        ("language_shift", "language_shift_intervals"),
-        ("diagonal_vs_offdiagonal", "diagonal_vs_offdiagonal"),
-        ("spectral_divergence", "spectral_divergence_by_layer"),
-    )
-    available = [
-        (table_name, figure_name)
-        for table_name, figure_name in main_figures
-        if figure_name in figures
-    ]
-    if not has_encoder and not available:
+    present = [name for name in COMPARISON_FAMILIES if _has_comparison(tables, name)]
+    if not present:
         return []
     lines = [
         rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
         r"\label{sec:comparacoes}",
-        "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
-        "A figura principal de acordo entre encoders mostra mapas de calor com a "
-        "mediana entre camadas; o detalhamento técnico mostra a mediana por camada "
-        "e a faixa interquartil entre células. As outras três figuras principais "
-        r"reproduzem estimativas e intervalos bootstrap persistidos "
-        r"(ci\_low--ci\_high); os resumos tabulares abaixo agregam medianas e "
-        "faixas entre linhas, enquanto os CSV e os perfis técnicos mantêm o "
-        "detalhe por grupo.",
+        "Resumos tabulares das quatro comparações bootstrap. As tabelas agregam "
+        r"medianas e faixas entre linhas; os limites \texttt{ci\_low}--"
+        r"\texttt{ci\_high} de cada grupo, camada e célula estão nos CSV "
+        "correspondentes. O contrato do intervalo bootstrap está no glossário "
+        r"(Seção~\ref{sec:orientacao}).",
         "",
-        "A unidade de reamostragem é o áudio. Quando a estatística é estimável, "
-        "o procedimento usa 2.000 reamostragens bootstrap estratificadas por "
-        "classe, semente base 42 combinada com um hash estável da identidade da "
-        r"comparação e intervalo percentil de 95\%. Não são realizados testes "
-        "de hipótese e não são produzidos valores-p.",
-        "",
-        "A comparação entre corpora/idiomas é apresentada em dois enquadramentos. "
-        "No primeiro, o probe fixo mantém modelo e idioma de treino e troca apenas "
-        "o conjunto de avaliação; no segundo, sistemas diagonais completos usam "
-        "em cada corpus/idioma o probe treinado no próprio conjunto. Como áudio, "
-        "corpus e idioma mudam em conjunto, os resultados descrevem uma mudança "
-        "conjunta de corpus/idioma e não um efeito causal do idioma.",
-        "",
-        *[
-            item
-            for paragraph in _comparison_result_paragraphs(tables)
-            for item in (paragraph, "")
-        ],
     ]
-    if has_encoder:
-        lines += _figure_block(figures["encoder_agreement_heatmaps"], tables)
-        lines += [r"\input{tables/encoder_agreement.tex}", ""]
-    for table_name, figure_name in available:
-        lines += _figure_block(figures[figure_name], tables)
-        lines += [rf"\input{{tables/{table_name}.tex}}", ""]
+    for name in present:
+        lines += [rf"\input{{tables/{name}.tex}}", ""]
+    if "diagonal_vs_offdiagonal" in figures:
+        lines += [
+            r"\subsection{Detalhe técnico diagonal versus fora da diagonal por camada}",
+            "Perfil por camada de $\\Delta$ ROC-AUC e $\\Delta$ MCC, além da camada "
+            "selecionada mostrada nos resultados principais.",
+            "",
+            *_figure_block(figures["diagonal_vs_offdiagonal"], tables),
+        ]
     if "encoder_agreement_by_layer" in figures:
         lines += [
             r"\subsection{Detalhe técnico do acordo por camada}",
@@ -6505,9 +6627,6 @@ def _comparison_technical_annex(
     if not technical_profiles:
         return []
     lines = [
-        # This is the sole appendix boundary until the complete appendix
-        # framework is introduced; future annex sections should follow it.
-        r"\appendix",
         r"\section{Perfis técnicos por grupo de classe}",
         r"\label{app:perfis-grupo-classe}",
         "Este anexo preserva as séries agregada, real e sintética das comparações "
@@ -6521,114 +6640,576 @@ def _comparison_technical_annex(
     return lines
 
 
-def _limitations_section(tables: ReportTables) -> list[str]:
-    limitations = [
-        "as explicações descrevem o probe linear sobre as representações do "
-        "encoder e não constituem uma verdade de referência sobre as pistas "
-        "acústicas do áudio sintético;",
-        "o mapa principal de acordo resume as camadas por mediana, enquanto o "
-        "detalhamento por camada mostra a faixa interquartil entre células e as "
-        "demais figuras reproduzem estimativas por comparação; os intervalos "
-        r"percentis de 95\% nos CSV quantificam apenas a variação "
-        "obtida ao reamostrar os áudios observados e não incluem novas execuções "
-        "do pipeline;",
-        "o recálculo de explicações, a seleção de amostras e o treinamento "
-        "dos probes não fazem parte deste relatório; todos os valores vêm dos "
-        "artefatos listados em \\texttt{report\\_manifest.json};",
-        "resultados fora da diagonal, quando existirem, são validação externa "
-        "sob mudança conjunta de corpus/idioma e não efeitos causais do idioma.",
+def _result_block(
+    tables: ReportTables,
+    figures: Mapping[str, FigureRecord],
+    *,
+    key: str,
+    heading: str,
+    question: str,
+    figure_names: Sequence[str],
+    findings: Sequence[str],
+    interpretation: str,
+    caution: str,
+    details: str,
+) -> list[str]:
+    if not 1 <= len(findings) <= 3:
+        raise ValueError(f"result block {key} needs one to three findings")
+    shown = [name for name in figure_names if name in figures]
+    references = _join_pt([rf"Figura~\ref{{fig:{name}}}" for name in shown])
+    lines = [
+        rf"\subsection{{{heading}}}",
+        rf"\label{{sec:resultado-{key}}}",
+        rf"\textbf{{Pergunta:}} {question}"
+        + (f" ({references})" if references else ""),
+        "",
     ]
-    if not tables.encoder_agreement.empty:
-        limitations.append(
-            "o acordo entre encoders mede proximidade de escores, decisões e "
-            "relevâncias nos mesmos áudios; acordo alto não torna os modelos "
-            "intercambiáveis e acordo baixo não aponta qual modelo está correto."
-        )
-    if not tables.language_shift.empty:
-        limitations.append(
-            "a mudança de relevância entre corpora/idiomas usa conjuntos de áudio "
-            "diferentes; mesmo com o probe fixo, as fontes de variação do "
-            "procedimento não isolam o efeito do idioma."
-        )
-    if not tables.diagonal_vs_offdiagonal.empty:
-        limitations.append(
-            "a comparação diagonal e fora da diagonal mantém fixo o conjunto-alvo, "
-            "mas também troca o conjunto usado para treinar o probe; o delta é "
-            "descritivo e não identifica a origem da diferença."
-        )
-    if not tables.spectral_divergence.empty:
-        limitations.append(
-            "a divergência espectral em Hz resume o deslocamento entre perfis "
-            "médios de relevância de sistemas diagonais completos; não mede "
-            "desempenho nem separa corpus de idioma."
-        )
-    if not tables.probe_stability.empty:
-        limitations.append(
-            "quando presente, a tabela de variabilidade por reamostragem "
-            "estratificada do treino do probe quantifica sensibilidade à "
-            "amostra finita de treino (bootstrap estratificado); não avalia "
-            "estabilidade das explicações XAI, nem estabilidade ponta-a-ponta "
-            "de sementes do experimento completo, nem substitui recomputação de "
-            "AttnLRP/DFT-LRP."
-        )
-    if not tables.layer_faithfulness.empty:
-        limitations.append(
-            "quando presente, a subseção de fidelidade por intervenção resume "
-            "experimentos controlados na camada~12 diagonal com filtragem STFT; "
-            "não substitui auditoria causal, não cobre outras camadas e não "
-            "valida transferência off-diagonal."
-        )
+    for name in shown:
+        lines += _figure_block(figures[name], tables, compact_scope=True)
     return [
-        rf"\section{{{_SECTION_TITLES_PT[9]}}}",
+        *lines,
+        r"\textbf{Resultado:}",
+        *_itemize(findings),
+        rf"\textbf{{Interpretação:}} {interpretation}",
+        "",
+        rf"\textbf{{Cautela:}} {caution}",
+        "",
+        rf"\textit{{Detalhe completo:}} {details}",
+        "",
+    ]
+
+
+def _range_text(claim: Mapping[str, float | int], unit: str = "") -> str:
+    suffix = f" {unit}" if unit else ""
+    return (
+        f"mediana {_num(claim['median'])}{suffix} em {claim['n']} estimativas, "
+        f"com faixa de {_num(claim['minimum'])} a {_num(claim['maximum'])}{suffix}"
+    )
+
+
+def _extremes_text(medians: pd.Series, label, unit: str = "") -> str | None:
+    """Range of group medians as a predicate, or None for a single group."""
+    if len(medians) < 2:
+        return None
+    suffix = f" {unit}" if unit else ""
+    low, high = medians.idxmin(), medians.idxmax()
+    if _num(medians[low]) == _num(medians[high]):
+        return f"é {_num(medians[low])}{suffix} em todos"
+    return (
+        f"vai de {_num(medians[low])}{suffix} ({escape_latex(label(low))}) a "
+        f"{_num(medians[high])}{suffix} ({escape_latex(label(high))})"
+    )
+
+
+def _layer_trend(medians: pd.Series, unit: str) -> tuple[str | None, str]:
+    """Median at the first and last layer, and the observed direction."""
+    if len(medians) < 2:
+        return None, ""
+    first, last = medians.index.min(), medians.index.max()
+    a, b = float(medians[first]), float(medians[last])
+    finding = (
+        f"Na camada {int(first)}, a mediana é {_num(a)} {unit}; na camada "
+        f"{int(last)}, {_num(b)} {unit}."
+    )
+    if b > a:
+        direction = "A mediana aumenta da primeira para a última camada."
+    elif b < a:
+        direction = "A mediana diminui da primeira para a última camada."
+    else:
+        direction = "A mediana é igual na primeira e na última camada."
+    return finding, direction
+
+
+def _selection_text(label: str, frame: pd.DataFrame) -> str:
+    if len(frame) == 1:
+        row = frame.iloc[0]
+        return (
+            f"{label}, a ROC-AUC selecionada é {_num(row['roc_auc'])} e o MCC da "
+            f"mesma camada é {_num(row['mcc'])}."
+        )
+    return (
+        f"{label} ({len(frame)}), a ROC-AUC selecionada tem mediana "
+        f"{_num(frame['roc_auc'].median())} (de {_num(frame['roc_auc'].min())} a "
+        f"{_num(frame['roc_auc'].max())}) e o MCC da mesma camada tem mediana "
+        f"{_num(frame['mcc'].median())} (de {_num(frame['mcc'].min())} a "
+        f"{_num(frame['mcc'].max())})."
+    )
+
+
+def _overview_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    selected = tables.transfer_selection
+    diagonal = selected[selected["source"] == selected["target"]]
+    off_diagonal = selected[selected["source"] != selected["target"]]
+    best = selected.loc[selected["roc_auc"].idxmax()]
+    findings = []
+    if len(diagonal) > 1:
+        findings.append(_selection_text("Nas células diagonais", diagonal))
+    if not off_diagonal.empty:
+        findings.append(_selection_text("Nas células de transferência", off_diagonal))
+    findings.append(
+        f"A maior ROC-AUC selecionada é {_num(best['roc_auc'])}, na camada "
+        f"{int(best['selected_layer'])} de "
+        f"{_cell_tex((best['model'], best['source'], best['target']))}; o MCC "
+        f"dessa camada é {_num(best['mcc'])}."
+    )
+    interpretation = (
+        "A ROC-AUC descreve a ordenação dos escores sem limiar, e o MCC descreve "
+        "as decisões no limiar calibrado na origem; lidas na mesma camada, as duas "
+        "medidas separam perda de ordenação de perda de calibração."
+    )
+    if not off_diagonal.empty and not diagonal.empty:
+        gap = float(off_diagonal["roc_auc"].median() - diagonal["roc_auc"].median())
+        position = "abaixo" if gap < 0 else "acima" if gap > 0 else "no mesmo nível"
+        interpretation += (
+            " A mediana da ROC-AUC de transferência fica "
+            + (f"{_num(abs(gap))} {position} da" if gap else f"{position} da")
+            + " mediana diagonal; o bloco seguinte compara cada transferência com "
+            "o sistema diagonal do mesmo conjunto-alvo."
+        )
+    elif off_diagonal.empty:
+        interpretation += (
+            " Com apenas a diagonal, o mapa descreve a separação dentro de cada "
+            "idioma, sem informação sobre transferência."
+        )
+    return _result_block(
+        tables,
+        figures,
+        key="desempenho",
+        heading="Visão geral do desempenho",
+        question=(
+            "quão bem o probe linear separa áudio real de sintético em cada "
+            "combinação de idioma de treino e de avaliação?"
+        ),
+        figure_names=("transfer_performance_heatmaps",),
+        findings=findings,
+        interpretation=interpretation,
+        caution=(
+            "a camada de cada célula é escolhida pela maior ROC-AUC no próprio "
+            "conjunto de teste, o que torna o valor exibido otimista; o MCC vem "
+            "dessa camada e não é maximizado separadamente."
+        ),
+        details=(
+            rf"Apêndice~\ref{{sec:desempenho}}; {_csv_tex('transfer_selected_layers')} "
+            f"e {_csv_tex('performance_by_layer')}."
+        ),
+    )
+
+
+def _transfer_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    deltas = _delta_claims(tables)
+    if not deltas:
+        return []
+    findings = [
+        f"{claim['negative_n']} de {claim['n']} estimativas de "
+        f"{_DELTA_LABELS_TEX[metric]} são negativas; {claim['ci_below_zero_n']} "
+        f"de {claim['n']} intervalos ficam inteiramente abaixo de zero e "
+        f"{claim['ci_above_zero_n']} de {claim['n']} intervalos ficam "
+        f"inteiramente acima de zero (mediana {_signed(claim['median'])}, todas "
+        "as camadas)."
+        for metric, claim in deltas.items()
+    ]
+    selected = {
+        metric: transfer_effect_claim(selected_transfer_effects(tables, metric))
+        for metric in deltas
+    }
+    selected_parts = [
+        f"{claim['negative_n']} de {claim['n']} {_DELTA_LABELS_TEX[metric]}"
+        for metric, claim in selected.items()
+        if claim["n"]
+    ]
+    if selected_parts:
+        findings.append(
+            "Na camada selecionada de cada célula, mostrada nas figuras, são "
+            f"negativos {_join_pt(selected_parts)}."
+        )
+    interpretation = (
+        r"Um $\Delta$ negativo indica desempenho menor fora da diagonal do que no "
+        "sistema diagonal avaliado no mesmo conjunto-alvo."
+    )
+    shares = {
+        metric: claim["negative_n"] / claim["n"] for metric, claim in deltas.items()
+    }
+    if max(shares.values()) <= 0.5:
+        interpretation += (
+            " Nenhuma das medidas tem maioria de estimativas negativas; neste "
+            "conjunto, a transferência não se traduz em queda predominante."
+        )
+    elif len(shares) == 2:
+        auc_share, mcc_share = shares["delta_roc_auc"], shares["delta_mcc"]
+        if mcc_share > auc_share:
+            interpretation += (
+                " Quedas de MCC são proporcionalmente mais frequentes que quedas "
+                "de ROC-AUC, o que sugere que parte da perda está no limiar "
+                "calibrado na origem, e não apenas na ordenação dos escores."
+            )
+        elif mcc_share < auc_share:
+            interpretation += (
+                " Quedas de ROC-AUC são proporcionalmente mais frequentes que "
+                "quedas de MCC, o que situa a perda já na ordenação dos escores."
+            )
+        else:
+            interpretation += (
+                " Quedas de ROC-AUC e de MCC têm a mesma frequência relativa."
+            )
+    return _result_block(
+        tables,
+        figures,
+        key="transferencia",
+        heading="Quanto o desempenho cai na transferência?",
+        question=(
+            "quanto muda o desempenho quando o probe treinado em um idioma é "
+            "avaliado em outro, em relação ao sistema diagonal do mesmo "
+            "conjunto-alvo?"
+        ),
+        figure_names=("transfer_delta_roc_auc", "transfer_delta_mcc"),
+        findings=findings,
+        interpretation=interpretation,
+        caution=(
+            r"cada $\Delta$ troca ao mesmo tempo o conjunto de treino do probe e o "
+            "par corpus/idioma; o sinal descreve a direção da mudança observada, "
+            "não sua causa. Os intervalos reamostram áudios do conjunto-alvo e não "
+            "incluem a variação de novos treinos do probe."
+        ),
+        details=(
+            r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:diagonal-off-summary}); "
+            f"{_csv_tex('diagonal_vs_offdiagonal')}."
+        ),
+    )
+
+
+def _agreement_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    if not _has_comparison(tables, "encoder_agreement"):
+        return []
+    frame = tables.encoder_agreement
+    claim = agreement_claim(frame)
+    if not claim["n"]:
+        return []
+    findings = [f"A fração de decisões iguais tem {_range_text(claim)}."]
+    kappa = _estimate_claim(frame, metric="cohen_kappa")
+    if kappa["n"]:
+        findings.append(
+            "O kappa de Cohen, que desconta o acordo esperado ao acaso, tem "
+            f"{_range_text(kappa)}."
+        )
+    pairs = _extremes_text(
+        _median_by(frame, ["model_a", "model_b"], metric="prediction_agreement"),
+        lambda pair: _pair_pretty(*pair),
+    )
+    if pairs:
+        findings.append(
+            f"Por par de modelos, a mediana da fração de decisões iguais {pairs}."
+        )
+    by_layer = (
+        r"; o perfil por camada está na Figura~\ref{fig:encoder_agreement_by_layer}"
+        if "encoder_agreement_by_layer" in figures
+        else ""
+    )
+    return _result_block(
+        tables,
+        figures,
+        key="acordo",
+        heading="Até que ponto os encoders concordam?",
+        question=(
+            "encoders diferentes, avaliados nos mesmos áudios e condições, tomam "
+            "as mesmas decisões e apontam relevâncias parecidas?"
+        ),
+        figure_names=("encoder_agreement_heatmaps",),
+        findings=findings,
+        interpretation=(
+            "A faixa mostra quanto o acordo varia entre células e camadas; a "
+            "mediana, sozinha, esconde essa heterogeneidade. Quando dois modelos "
+            "acertam a maior parte dos áudios, a fração de decisões iguais sobe "
+            "mesmo sem estratégia comum, por isso o kappa complementa a leitura."
+        ),
+        caution=(
+            "acordo alto não torna os modelos intercambiáveis e acordo baixo não "
+            "aponta qual modelo está correto; cada métrica tem escala própria e não "
+            "deve ser comparada com as demais."
+        ),
+        details=(
+            r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:encoder-agreement-summary}"
+            + by_layer
+            + f"); {_csv_tex('encoder_agreement')}."
+        ),
+    )
+
+
+def _profiles_detail(figures: Mapping[str, FigureRecord], name: str) -> str:
+    return (
+        r"séries real e sintética no Apêndice~\ref{app:perfis-grupo-classe}; "
+        if name in figures
+        else ""
+    )
+
+
+def _relevance_shift_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    if not _has_comparison(tables, "language_shift"):
+        return []
+    frame = tables.language_shift
+    claim = _estimate_claim(frame, group="all")
+    if not claim["n"]:
+        return []
+    findings = [
+        "Com o probe fixo, a distância Jensen--Shannon do grupo agregado tem "
+        f"{_range_text(claim, 'bits')}."
+    ]
+    models = _extremes_text(
+        _median_by(frame, ["model"], group="all"), _model_name, "bits"
+    )
+    if models:
+        findings.append(f"Por modelo, a mediana {models}.")
+    trend, direction = _layer_trend(_median_by(frame, ["layer"], group="all"), "bits")
+    if trend:
+        findings.append(trend)
+    return _result_block(
+        tables,
+        figures,
+        key="relevancia",
+        heading="Como a relevância muda entre corpora e idiomas?",
+        question=(
+            "com modelo, idioma de treino e probe fixos, quanto muda o perfil de "
+            "relevância ao trocar o conjunto de avaliação?"
+        ),
+        figure_names=("language_shift_intervals",),
+        findings=findings,
+        interpretation=(
+            "Distância maior indica perfis médios de relevância menos parecidos "
+            "entre os conjuntos-alvo. Como o probe é o mesmo, a diferença vem dos "
+            "áudios avaliados, e não de um novo treino. " + direction
+        ).strip(),
+        caution=(
+            "corpus, áudio e idioma mudam juntos; a distância não isola um efeito "
+            "do idioma e não mede desempenho."
+        ),
+        details=(
+            _profiles_detail(figures, "language_shift")
+            + r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:language-shift-summary}); "
+            f"{_csv_tex('language_shift')}."
+        ),
+    )
+
+
+def _spectral_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    if not _has_comparison(tables, "spectral_divergence"):
+        return []
+    frame = tables.spectral_divergence
+    claim = _estimate_claim(frame, group="all")
+    if not claim["n"]:
+        return []
+    findings = [
+        "Entre sistemas diagonais, a distância de Wasserstein do grupo agregado "
+        f"tem {_range_text(claim, 'Hz')}."
+    ]
+    pairs = _extremes_text(
+        _median_by(frame, ["language_a", "language_b"], group="all"),
+        lambda pair: _language_pair_pretty(*pair),
+        "Hz",
+    )
+    if pairs:
+        findings.append(f"Por par de idiomas, a mediana {pairs}.")
+    trend, direction = _layer_trend(_median_by(frame, ["layer"], group="all"), "Hz")
+    if trend:
+        findings.append(trend)
+    return _result_block(
+        tables,
+        figures,
+        key="espectral",
+        heading="Quanto a relevância se desloca em frequência?",
+        question=(
+            "entre sistemas diagonais de idiomas distintos, quanto se desloca a "
+            "massa de relevância ao longo do eixo de frequência?"
+        ),
+        figure_names=("spectral_divergence_by_layer",),
+        findings=findings,
+        interpretation=(
+            "O valor em Hz resume quanto a massa de relevância precisaria se "
+            "deslocar no eixo de frequência para que os perfis médios coincidissem. "
+            "Cada sistema usa o próprio probe e o próprio conjunto, então a "
+            "distância reúne diferenças de treino e de dados. " + direction
+        ).strip(),
+        caution=(
+            "distância maior não significa modelo melhor nem pior, não separa "
+            "corpus de idioma e não identifica a causa do deslocamento."
+        ),
+        details=(
+            _profiles_detail(figures, "spectral_divergence")
+            + r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:spectral-divergence-summary}); "
+            f"{_csv_tex('spectral_divergence')}."
+        ),
+    )
+
+
+def _faithfulness_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    aligned = _aligned_layer_faithfulness(tables)
+    claim = faithfulness_claim(aligned)
+    if claim.empty:
+        return []
+    items = [
+        f"{escape_latex(_model_name(row.model))}: {row.ci_above_zero_n} de "
+        f"{row.total} intervalos inteiramente acima de zero e "
+        f"{row.ci_below_zero_n} de {row.total} inteiramente abaixo de zero"
+        for row in claim.itertuples(index=False)
+    ]
+    findings = (
+        [f"{item}." for item in items]
+        if len(items) <= 3
+        else [_join_pt(items) + "."]
+    )
+    interpretation = (
+        "Um intervalo inteiramente acima de zero sugere que, neste protocolo, "
+        "remover as faixas mais relevantes segundo o DFT-LRP altera mais a decisão "
+        "do que remover o controle (faixas aleatórias ou menos relevantes)."
+    )
+    ranked = claim.sort_values("ci_above_zero_n", ascending=False, kind="stable")
+    if len(ranked) > 1 and ranked.iloc[0]["ci_above_zero_n"] > ranked.iloc[1]["ci_above_zero_n"]:
+        leader = ranked.iloc[0]
+        interpretation += (
+            f" {escape_latex(_model_name(leader['model']))} reúne mais sinais "
+            "positivos, o que indica maior concordância entre explicação e "
+            "intervenção nesse modelo, não superioridade do modelo."
+        )
+    layers = _join_pt([str(int(value)) for value in sorted(aligned["layer"].unique())])
+    pairs = _join_pt([str(int(value)) for value in sorted(aligned["n_pairs"].unique())])
+    return _result_block(
+        tables,
+        figures,
+        key="fidelidade",
+        heading="As faixas apontadas sustentam a decisão?",
+        question=(
+            "remover as faixas apontadas como mais relevantes altera mais o escore "
+            "do que remover faixas de controle?"
+        ),
+        figure_names=("layer_faithfulness_intervals",),
+        findings=findings,
+        interpretation=interpretation,
+        caution=(
+            f"escopo restrito à camada {layers} das células diagonais, com {pairs} "
+            "pares por classe e contagens sem correção para comparações múltiplas. "
+            "A intervenção STFT controlada não implica causalidade no mundo real e "
+            "não se estende a outras camadas nem à transferência."
+        ),
+        details=(
+            r"Apêndice~\ref{sec:fidelidade} (Tabela~\ref{tab:layer-faithfulness-summary}); "
+            f"{_csv_tex('layer_faithfulness_summary')}."
+        ),
+    )
+
+
+def _main_results_section(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    blocks = (
+        _overview_block,
+        _transfer_block,
+        _agreement_block,
+        _relevance_shift_block,
+        _spectral_block,
+        _faithfulness_block,
+    )
+    lines = [
+        rf"\section{{{_SECTION_TITLES_PT[2]}}}",
+        r"\label{sec:resultados}",
+        "Os resultados vão do padrão global de desempenho para as explicações e, "
+        "por fim, para a fidelidade das explicações. Cada bloco responde a uma "
+        "pergunta; os valores citados são derivados das tabelas do bundle.",
+        "",
+    ]
+    for block in blocks:
+        lines += block(tables, figures)
+    lines += [
+        r"\subsection{Síntese}",
+        r"A Tabela~\ref{tab:results-synthesis} reúne, para cada pergunta, a "
+        "evidência usada, o resultado e a cautela correspondente.",
+        "",
+        r"\input{tables/results_synthesis.tex}",
+        "",
+    ]
+    return lines
+
+
+def _cross_cutting_limitations_section(tables: ReportTables) -> list[str]:
+    limitations = [
+        "As explicações descrevem o probe linear sobre as representações do "
+        "encoder e não constituem verdade de referência sobre as pistas acústicas "
+        "do áudio sintético.",
+        "Toda comparação entre idiomas, quando presente, reflete uma mudança "
+        "conjunta de corpus/idioma: áudio, corpus e idioma mudam juntos, e as "
+        "fontes de variação do procedimento não isolam o efeito do idioma.",
+        f"Os intervalos percentis de {_ci_percent_tex()} quantificam apenas a "
+        "variação obtida ao reamostrar os áudios observados; não incluem novas execuções do pipeline "
+        "nem substituem testes de hipótese.",
+        "O relatório não recalcula explicações, não seleciona amostras e não "
+        "treina probes; todos os valores vêm dos artefatos listados em "
+        f"{_tt_breakable(_MANIFEST_NAME)}.",
+    ]
+    return [
+        rf"\section{{{_SECTION_TITLES_PT[3]}}}",
         r"\label{sec:limitacoes}",
-        "Limitações desta edição:",
+        "As cautelas específicas acompanham cada resultado. Valem para todo o "
+        "relatório:",
         "",
         *_itemize(limitations),
     ]
 
 
-def _conclusion_section(tables: ReportTables) -> list[str]:
+def _short_conclusion_section(tables: ReportTables) -> list[str]:
     selected = tables.transfer_selection
     off_diagonal = selected[selected["source"] != selected["target"]]
+    lines = [
+        rf"\section{{{_SECTION_TITLES_PT[4]}}}",
+        r"\label{sec:conclusao}",
+        "O relatório separa discriminação sem limiar de comportamento no limiar "
+        "fixo e mantém ROC-AUC e MCC vinculados à mesma camada selecionada.",
+    ]
     if off_diagonal.empty:
-        transfer = (
+        lines.append(
             "Como o relatório contém apenas a diagonal, os resultados sustentam "
             "somente a descrição do caso carregado, não uma conclusão de transferência."
         )
     else:
-        transfer = (
-            "As células fora da diagonal documentam transferência sob mudança "
-            "de corpus/idioma; diferenças de ROC-AUC e das métricas no limiar "
-            "não identificam um efeito causal do idioma."
+        deltas = _delta_claims(tables)
+        negative = [
+            _DELTA_LABELS_TEX[metric]
+            for metric, claim in deltas.items()
+            if 2 * claim["negative_n"] > claim["n"]
+        ]
+        if negative:
+            lines.append(
+                f"Na maioria das estimativas de {_join_pt(negative)}, o desempenho "
+                "fora da diagonal fica abaixo do sistema diagonal do mesmo "
+                "conjunto-alvo."
+            )
+        lines.append(
+            "As células fora da diagonal documentam transferência sob mudança de "
+            "corpus/idioma; diferenças de ROC-AUC e das métricas no limiar não "
+            "identificam um efeito causal do idioma."
         )
-    available = tables.xai_performance_association[
-        tables.xai_performance_association["status"] == "available"
-    ]
-    association = (
-        "A associação entre concentração espectral e ROC-AUC permaneceu "
-        "indisponível onde faltaram 12 camadas válidas."
-        if available.empty
-        else (
-            "As associações XAI$\\leftrightarrow$desempenho são resumos "
-            "descritivos de n=12 e não permitem interpretação causal."
+    if not _aligned_layer_faithfulness(tables).empty or any(
+        _has_comparison(tables, name)
+        for name in ("encoder_agreement", "language_shift", "spectral_divergence")
+    ):
+        lines.append(
+            "As análises de explicação descrevem como a relevância do probe varia "
+            "entre encoders, conjuntos e camadas; não são pistas acústicas verificadas."
         )
-    )
-    extra = _conclusion_fidelity_stability_paragraphs(tables)
-    comparisons = _comparison_result_paragraphs(tables)
-    return [
-        rf"\section{{{_SECTION_TITLES_PT[10]}}}",
-        r"\label{sec:conclusao}",
-        "O relatório separa discriminação sem limiar de comportamento no limiar "
-        "fixo e mantém ROC-AUC e MCC vinculados à mesma camada selecionada.",
+    lines += [
+        r"A Tabela~\ref{tab:results-synthesis} reúne as respostas e as cautelas "
+        "de cada pergunta.",
         "",
-        *[item for paragraph in comparisons for item in (paragraph, "")],
-        transfer,
-        "",
-        association,
-        "",
-        *extra,
-        *([""] if extra else []),
     ]
+    return lines
 
 
 def write_report_tex(
@@ -6657,17 +7238,23 @@ def write_report_tex(
         r"urlcolor=blue!50!black}",
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{0.6em}",
+        r"\setlength{\emergencystretch}{3em}",
         rf"\title{{{title}}}",
         r"\author{}",
         r"\date{}",
         "",
         r"\begin{document}",
         r"\maketitle",
+        r"\tableofcontents",
         "",
     ]
     sections = (
         _executive_summary_section(tables),
-        _inventory_section(tables, sources),
+        _orientation_section(tables, sources),
+        _main_results_section(tables, available),
+        _cross_cutting_limitations_section(tables),
+        _short_conclusion_section(tables),
+        [r"\appendix", ""],
         _protocol_section(tables, sources),
         _performance_section(tables, available),
         _emergence_section(tables),
@@ -6676,8 +7263,6 @@ def write_report_tex(
         _stdft_section(tables, available),
         _conservation_section(tables, available),
         _comparisons_section(tables, available),
-        _limitations_section(tables),
-        _conclusion_section(tables),
         _comparison_technical_annex(tables, available),
     )
     for section in sections:
@@ -6907,19 +7492,6 @@ def _executive_fidelity_stability_blurbs(tables: ReportTables) -> list[str]:
                 "como cheque de robustez, não como incerteza ponta-a-ponta."
             )
     return blurbs
-
-
-def _conclusion_fidelity_stability_paragraphs(tables: ReportTables) -> list[str]:
-    paragraphs: list[str] = []
-    aligned_fidelity = _aligned_layer_faithfulness(tables)
-    if not aligned_fidelity.empty:
-        counts = faithfulness_aggregate_counts(aligned_fidelity)
-        paragraphs.append(_faithfulness_pattern_paragraph(counts))
-    aligned_stability = _aligned_probe_stability(tables)
-    if not aligned_stability.empty:
-        summary = probe_stability_aggregate_by_model(aligned_stability)
-        paragraphs.append(_probe_stability_pattern_paragraph(summary))
-    return paragraphs
 
 
 def _layer_faithfulness_tex(tables: ReportTables) -> str:
