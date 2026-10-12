@@ -3435,27 +3435,37 @@ def _figure_fixed_threshold(plt, tables, figures_dir):
 def _figure_transfer_heatmaps(plt, tables, figures_dir):
     name = "transfer_performance_heatmaps"
     models = tables.models
-    languages = tables.languages
+    languages = tuple(
+        language
+        for language in ("eng", "por", "zho")
+        if language in tables.languages
+    )
     fig, axes = plt.subplots(
-        len(models),
         2,
-        figsize=(_FIGURE_WIDTH, 2.75 * len(models) + 0.45),
+        len(models),
+        figsize=(_FIGURE_WIDTH, 5.4),
         squeeze=False,
         constrained_layout=True,
     )
     frame = tables.transfer_selection
     images = {}
-    for row_index, model in enumerate(models):
-        model_rows = frame[frame["model"] == model]
-        for column_index, (metric, title, limits, cmap) in enumerate(
-            (
-                ("roc_auc", "ROC-AUC na camada selecionada", (0.0, 1.0), "viridis"),
-                ("mcc", "MCC na mesma camada", (-1.0, 1.0), "coolwarm"),
-            )
-        ):
+    metrics = (
+        ("roc_auc", "ROC-AUC na camada selecionada", (0.0, 1.0), "viridis"),
+        ("mcc", "MCC na mesma camada", (-1.0, 1.0), "coolwarm"),
+    )
+    for row_index, (metric, metric_title, limits, cmap) in enumerate(metrics):
+        for column_index, model in enumerate(models):
             ax = axes[row_index, column_index]
+            model_rows = frame[frame["model"] == model]
             matrix = (
                 model_rows.pivot(index="source", columns="target", values=metric)
+                .reindex(index=languages, columns=languages)
+                .to_numpy(dtype=np.float64)
+            )
+            selected_layers = (
+                model_rows.pivot(
+                    index="source", columns="target", values="selected_layer"
+                )
                 .reindex(index=languages, columns=languages)
                 .to_numpy(dtype=np.float64)
             )
@@ -3480,17 +3490,18 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
             ax.set_xlabel("Idioma de avaliação")
             ax.set_ylabel("Idioma de treino")
             ax.set_title(
-                f"{_model_name(model)} — {title}",
+                f"{_model_name(model)} — {metric_title}",
                 fontsize=8,
             )
             for source_index in range(len(languages)):
                 for target_index in range(len(languages)):
                     value = matrix[source_index, target_index]
-                    if np.isfinite(value):
+                    selected_layer = selected_layers[source_index, target_index]
+                    if np.isfinite(value) and np.isfinite(selected_layer):
                         ax.text(
                             target_index,
                             source_index,
-                            f"{value:.2f}",
+                            f"{value:.2f}\nC{int(selected_layer)}",
                             ha="center",
                             va="center",
                             fontsize=7,
@@ -3501,10 +3512,10 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
                             ),
                         )
     for metric, image in images.items():
-        column = 0 if metric == "roc_auc" else 1
+        row = 0 if metric == "roc_auc" else 1
         fig.colorbar(
             image,
-            ax=axes[:, column].tolist(),
+            ax=axes[row, :].tolist(),
             shrink=0.8,
             label="ROC-AUC" if metric == "roc_auc" else "MCC",
         )
@@ -3527,6 +3538,128 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
     )
     fig.suptitle(record.title, fontsize=9)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_transfer_effect(
+    plt,
+    tables: ReportTables,
+    figures_dir: Path,
+    *,
+    metric: str,
+):
+    specifications = {
+        "delta_roc_auc": (
+            "transfer_delta_roc_auc",
+            "Efeito de transferência em ROC-AUC",
+            "Δ ROC-AUC (fora da diagonal − diagonal)",
+            "ROC-AUC",
+        ),
+        "delta_mcc": (
+            "transfer_delta_mcc",
+            "Efeito de transferência em MCC",
+            "Δ MCC (fora da diagonal − diagonal)",
+            "MCC",
+        ),
+    }
+    if metric not in specifications:
+        raise ValueError(f"unsupported transfer effect metric: {metric}")
+    name, heading, xlabel, metric_label = specifications[metric]
+    frame = selected_transfer_effects(tables, metric)
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but no selected effects exist")
+
+    models = tuple(model for model in tables.models if model in set(frame["model"]))
+    fig, axes = plt.subplots(
+        1,
+        len(models),
+        figsize=(_FIGURE_WIDTH, 2.5),
+        squeeze=False,
+        sharex=True,
+    )
+    for column, model in enumerate(models):
+        ax = axes[0, column]
+        model_rows = frame[frame["model"] == model].sort_values(
+            ["source", "target"], kind="stable"
+        )
+        positions = np.arange(len(model_rows))
+        estimates = model_rows["estimate"].to_numpy(dtype=np.float64)
+        low = model_rows["ci_low"].to_numpy(dtype=np.float64)
+        high = model_rows["ci_high"].to_numpy(dtype=np.float64)
+        finite_intervals = (
+            np.isfinite(estimates) & np.isfinite(low) & np.isfinite(high)
+        )
+        if finite_intervals.any():
+            ax.errorbar(
+                estimates[finite_intervals],
+                positions[finite_intervals],
+                xerr=np.vstack(
+                    (
+                        estimates[finite_intervals] - low[finite_intervals],
+                        high[finite_intervals] - estimates[finite_intervals],
+                    )
+                ),
+                fmt="o",
+                markersize=4,
+                capsize=2,
+                linewidth=1.0,
+            )
+        estimate_only = np.isfinite(estimates) & ~finite_intervals
+        if estimate_only.any():
+            ax.plot(
+                estimates[estimate_only],
+                positions[estimate_only],
+                marker="x",
+                linestyle="none",
+                color="0.35",
+            )
+        ax.axvline(0.0, color="0.45", linestyle="--", linewidth=0.8)
+        ax.set_yticks(positions)
+        ax.set_yticklabels(
+            [
+                _transfer_pretty(str(row.source), str(row.target))
+                for row in model_rows.itertuples(index=False)
+            ]
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_title(_model_name(model), fontsize=8)
+        ax.invert_yaxis()
+
+    cells = tuple(
+        frame[["model", "source", "target"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    record = _record(
+        tables,
+        name,
+        (),
+        heading=heading,
+        description=(
+            f"Efeito {metric_label} fora da diagonal menos o sistema diagonal "
+            "correspondente, com estimativa pontual e intervalo bootstrap de 95%. "
+            "A linha vertical marca efeito zero."
+        ),
+        metric=f"Δ {metric_label} fora da diagonal − diagonal",
+        units="adimensional",
+        transformation=(
+            "uma linha por transferência fora da diagonal na camada selecionada "
+            "pela ROC-AUC da própria célula; intervalo percentil bootstrap de 95%"
+        ),
+        cells=cells,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    fig.subplots_adjust(left=0.14, right=0.98, top=0.82, bottom=0.25, wspace=0.35)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_transfer_delta_roc_auc(plt, tables, figures_dir):
+    return _figure_transfer_effect(
+        plt, tables, figures_dir, metric="delta_roc_auc"
+    )
+
+
+def _figure_transfer_delta_mcc(plt, tables, figures_dir):
+    return _figure_transfer_effect(plt, tables, figures_dir, metric="delta_mcc")
 
 
 def _grid_shape(count: int, max_columns: int = 3) -> tuple[int, int]:
@@ -4617,6 +4750,8 @@ _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
     "transfer_performance_heatmaps": _figure_transfer_heatmaps,
+    "transfer_delta_roc_auc": _figure_transfer_delta_roc_auc,
+    "transfer_delta_mcc": _figure_transfer_delta_mcc,
     "dft_relevance_heatmap": _figure_heatmap,
     "class_relevance_by_layer": _figure_class_relevance,
     "decision_reorganization_by_layer": _figure_reorganization,
@@ -4629,8 +4764,6 @@ _FIGURE_BUILDERS = {
 }
 _DEFERRED_FIGURE_FAMILIES = frozenset(
     {
-        "transfer_delta_roc_auc",
-        "transfer_delta_mcc",
         "encoder_agreement_heatmaps",
         "encoder_agreement_by_layer",
         "language_shift_intervals",

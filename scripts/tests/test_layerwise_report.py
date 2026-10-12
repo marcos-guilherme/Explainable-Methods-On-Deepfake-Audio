@@ -3057,6 +3057,16 @@ def _capture_figures(tables, directory):
                 {
                     "ticks": [float(value) for value in ax.get_xticks()],
                     "labels": [item.get_text() for item in labels],
+                    "ylabels": [
+                        item.get_text()
+                        for item in ax.get_yticklabels()
+                        if item.get_text()
+                    ],
+                    "title": ax.get_title(),
+                    "xlabel": ax.get_xlabel(),
+                    "ylabel": ax.get_ylabel(),
+                    "texts": [item.get_text() for item in ax.texts],
+                    "array": np.asarray(ax.images[0].get_array()).copy(),
                     "boxes": [
                         (
                             item.get_window_extent(renderer).x0,
@@ -4324,6 +4334,84 @@ def full_comparison_tex(full_comparison_tables, tmp_path_factory) -> str:
     return _read_text(path)
 
 
+@pytest.mark.parametrize(
+    ("family", "metric"),
+    (
+        ("transfer_delta_roc_auc", "ROC-AUC"),
+        ("transfer_delta_mcc", "MCC"),
+    ),
+)
+def test_transfer_effect_figures_show_selected_effects_and_zero_reference(
+    full_comparison_tables, tmp_path, family, metric, monkeypatch
+):
+    zero_lines = []
+    import matplotlib.pyplot as plt
+
+    original = plt.Axes.axvline
+
+    def spy(self, x, *args, **kwargs):
+        zero_lines.append(float(x))
+        return original(self, x, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "axvline", spy)
+    records, captured = _capture_figures(
+        full_comparison_tables, tmp_path / family
+    )
+    assert family in captured
+    assert 0.0 in zero_lines
+    assert metric in "\n".join(captured[family]["texts"])
+    assert next(r for r in records if r.name == family).units == "adimensional"
+
+
+def test_transfer_heatmap_caption_keeps_train_rows_evaluation_columns_and_shared_layers(
+    full_comparison_tables, tmp_path
+):
+    records, captured = _capture_figures(
+        full_comparison_tables, tmp_path / "overview"
+    )
+    panels = captured["transfer_performance_heatmaps"]["heatmaps"]
+    models = full_comparison_tables.models
+    languages = tuple(
+        language
+        for language in ("eng", "por", "zho")
+        if language in full_comparison_tables.languages
+    )
+    assert len(panels) == 2 * len(models)
+
+    for metric_row, (metric, metric_label) in enumerate(
+        (("roc_auc", "ROC-AUC"), ("mcc", "MCC"))
+    ):
+        row_panels = panels[
+            metric_row * len(models) : (metric_row + 1) * len(models)
+        ]
+        for model, panel in zip(models, row_panels):
+            expected = (
+                full_comparison_tables.transfer_selection.query("model == @model")
+                .pivot(index="source", columns="target", values=metric)
+                .reindex(index=languages, columns=languages)
+                .to_numpy(dtype=np.float64)
+            )
+            assert np.allclose(panel["array"], expected)
+            assert panel["xlabel"] == "Idioma de avaliação"
+            assert panel["ylabel"] == "Idioma de treino"
+            assert metric_label in panel["title"]
+            selected_layers = (
+                full_comparison_tables.transfer_selection.query("model == @model")
+                .pivot(index="source", columns="target", values="selected_layer")
+                .reindex(index=languages, columns=languages)
+                .to_numpy(dtype=int)
+            )
+            assert [
+                int(text.rsplit("C", 1)[1]) for text in panel["texts"]
+            ] == selected_layers.ravel().tolist()
+
+    assert next(
+        record
+        for record in records
+        if record.name == "transfer_performance_heatmaps"
+    ).transformation.endswith("sem maximizar o MCC independentemente")
+
+
 def test_full_report_executive_summary_reports_all_four_comparisons_from_data(
     full_comparison_tables, full_comparison_tex
 ):
@@ -4436,18 +4524,26 @@ def test_single_model_keeps_eight_figure_families_without_dangling_comparisons(
     assert set(_COMPARISON_FAMILIES).isdisjoint(eng_tables.planned_figures)
 
 
-def test_render_emits_eight_new_comparison_artifacts(full_comparison_tables, tmp_path):
+def test_render_emits_comparison_and_transfer_effect_artifacts(
+    full_comparison_tables, tmp_path
+):
     figures_dir = tmp_path / "figures"
     records = render_report_figures(full_comparison_tables, figures_dir)
     names = {path.name for path in figures_dir.iterdir()}
+    rendered_comparisons = _COMPARISON_FAMILIES + (
+        "transfer_delta_roc_auc",
+        "transfer_delta_mcc",
+    )
     expected = {
         f"{name}.{suffix}"
-        for name in _COMPARISON_FAMILIES
+        for name in rendered_comparisons
         for suffix in ("pdf", "png")
     }
     assert expected <= names
-    assert tuple(record.name for record in records) == _TWELVE_FAMILIES
-    for name in _COMPARISON_FAMILIES:
+    assert tuple(record.name for record in records) == (
+        _TWELVE_FAMILIES + rendered_comparisons[-2:]
+    )
+    for name in rendered_comparisons:
         for suffix in ("pdf", "png"):
             path = figures_dir / f"{name}.{suffix}"
             assert path.stat().st_size > 0
