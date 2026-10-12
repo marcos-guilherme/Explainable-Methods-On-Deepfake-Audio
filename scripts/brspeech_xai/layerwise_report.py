@@ -5406,13 +5406,15 @@ _SECTION_TITLES_PT: tuple[str, ...] = (
     "Resultados",
     "Limitações transversais",
     "Conclusão",
+)
+_APPENDIX_TITLES_PT: tuple[str, ...] = (
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
-    "Emergência estimada da decisão do detector",
+    "Emergência e reorganização da decisão",
     "Relevância em frequência ao longo das camadas",
-    "Reorganização da decisão entre camadas",
-    "Exemplos tempo-frequência STDFT selecionados",
-    "Conservação e qualidade numérica",
+    _COMPARISON_SECTION_TITLE,
+    "Fidelidade das explicações",
+    "Exemplos STDFT e conservação numérica",
 )
 _NOT_AVAILABLE = "n/d"
 _FIT_WIDTH_OPEN = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%"
@@ -5614,11 +5616,9 @@ def _report_title(tables: ReportTables) -> str:
     )
 
 
-def _figure_block(
-    record: FigureRecord, tables: ReportTables, *, compact_scope: bool = False
-) -> list[str]:
+def _figure_block(record: FigureRecord, tables: ReportTables) -> list[str]:
     pdf = next(name for name in record.files if name.endswith(".pdf"))
-    caption = _caption_pt(record, tables, compact_scope=compact_scope)
+    caption = _caption_pt(record, tables)
     return [
         r"\begin{figure}[H]",
         r"\centering",
@@ -5631,26 +5631,6 @@ def _figure_block(
 
 
 def _caption_scope(record: FigureRecord) -> str:
-    """Name each model once, followed by its language pairs."""
-    pairs: dict[str, list[str]] = {}
-    for model, origin, target in record.cells:
-        pairs.setdefault(model, []).append(
-            f"{escape_latex(origin)}$\\rightarrow${escape_latex(target)}"
-        )
-    if len(pairs) == 1:
-        ((model, languages),) = pairs.items()
-        return (
-            f" Modelo: {_tt(model)}. "
-            f"Idioma (treino$\\rightarrow$avaliação): {'; '.join(languages)}."
-        )
-    listed = "; ".join(
-        f"{_tt(model)}: {', '.join(languages)}"
-        for model, languages in pairs.items()
-    )
-    return f" Modelos e idiomas (treino$\\rightarrow$avaliação): {listed}."
-
-
-def _compact_caption_scope(record: FigureRecord) -> str:
     """Name each model and language once, without listing every cell."""
     models = list(dict.fromkeys(model for model, _, _ in record.cells))
     languages = [
@@ -5667,26 +5647,24 @@ def _compact_caption_scope(record: FigureRecord) -> str:
     )
 
 
-def _caption_pt(
-    record: FigureRecord, tables: ReportTables, *, compact_scope: bool = False
-) -> str:
+def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
     band_range = escape_latex(_band_range_text(tables))
-    scope = (
-        _compact_caption_scope(record) if compact_scope else _caption_scope(record)
-    )
+    scope = _caption_scope(record)
     if record.name == "performance_by_layer":
         body = (
-            "ROC-AUC (sem limiar, adimensional de 0 a 1) e EER diagnóstico "
-            "(em \\%) de um probe linear em cada camada do encoder, avaliados no "
-            "conjunto de teste do idioma-alvo; a linha tracejada marca o acaso "
-            "(ROC-AUC 0,5)."
+            "Pergunta: como a separação muda ao longo das camadas? "
+            "ROC-AUC (sem limiar, de 0 a 1) e EER diagnóstico (em \\%) do probe "
+            "linear por camada, no teste do idioma-alvo; a linha tracejada marca "
+            "o acaso (ROC-AUC 0,5). Limite principal: um único conjunto de teste "
+            "por célula, sem intervalo de confiança."
         )
     elif record.name == "fixed_threshold_by_layer":
         body = (
-            "Acurácia, MCC, TPR e FPR no limiar fixo calibrado no idioma de "
-            "origem. A classe positiva é sintético (rótulo 1): TPR é a fração "
-            "de amostras sintéticas detectadas e FPR a fração de amostras reais "
-            "marcadas como sintéticas."
+            "Pergunta: como o limiar calibrado na origem se comporta em cada "
+            "camada? Acurácia, MCC, TPR e FPR no limiar fixo; a classe positiva "
+            "é sintético (rótulo 1), TPR é a fração de sintéticos detectados e "
+            "FPR a de reais marcados como sintéticos. Limite principal: o limiar "
+            "não é recalibrado no idioma de avaliação."
         )
     elif record.name == "transfer_performance_heatmaps":
         body = (
@@ -5718,9 +5696,9 @@ def _caption_pt(
             "áudios e condições? As linhas representam o idioma de treino e as "
             "colunas representam o idioma de avaliação; cada célula mostra a "
             f"mediana entre as {_layer_count(tables.encoder_agreement)} camadas, "
-            "em escala própria para cada métrica. "
-            "Acordo alto não torna os modelos intercambiáveis e não indica qual "
-            "modelo está correto."
+            "em escala própria para cada métrica. Limite principal: acordo alto "
+            "não torna os modelos intercambiáveis e não indica qual modelo está "
+            "correto."
         )
     elif record.name == "language_shift_intervals":
         body = (
@@ -5759,32 +5737,71 @@ def _caption_pt(
         )
     elif record.name == "dft_relevance_heatmap":
         body = (
-            "Média sobre o conjunto fixo de amostras da relevância AttnLRP absoluta "
-            "normalizada após a DFT, por camada e banda de frequência mel "
-            f"({band_range}). A massa dentro da banda de cada amostra soma 1; "
-            "os valores são frações da massa em banda, não do espectro inteiro."
+            "Pergunta: em que bandas de frequência cada camada concentra a "
+            "relevância? Média, no conjunto fixo de amostras XAI, da relevância "
+            "AttnLRP absoluta normalizada após a DFT, por camada e banda mel "
+            f"({band_range}); a massa em banda de cada amostra soma 1. Limite "
+            "principal: os valores são frações da massa em banda, não do "
+            "espectro inteiro."
         )
     elif record.name == "class_relevance_by_layer":
         body = (
-            "Relevância média absoluta normalizada de amostras reais e "
-            "sintéticas e sua diferença (sintético $-$ real), por camada; a "
-            f"massa dentro da banda ({band_range}) soma 1 por amostra."
+            "Pergunta: a relevância difere entre áudio real e sintético? "
+            "Relevância média absoluta normalizada por classe verdadeira e a "
+            "diferença sintético $-$ real, por camada; a massa em banda "
+            f"({band_range}) soma 1 por amostra. Limite principal: médias "
+            "descritivas, sem intervalo de confiança."
         )
     elif record.name == "decision_reorganization_by_layer":
         body = (
-            "Similaridade cosseno e variação L1 normalizada (adimensionais) da "
-            "massa temporal de relevância da decisão final entre camadas "
-            "adjacentes; média e intervalo normal de 95\\% sobre as amostras."
+            "Pergunta: entre quais camadas adjacentes a relevância da decisão "
+            "final mais se reorganiza? Similaridade cosseno e variação L1 "
+            "normalizada (adimensionais) da massa temporal de relevância; média "
+            "e intervalo normal de 95\\% sobre as amostras. Limite principal: "
+            "descreve a relevância, não a representação interna do encoder."
         )
     elif record.name == "stdft_examples":
         body = (
-            "Mapas tempo-frequência de relevância STDFT-LRP (janela de Hann de "
-            "512 amostras, passo 256) de uma amostra real e uma sintética na "
-            "primeira, na intermediária e na última camada, em escala "
-            "simétrica comum."
+            "Pergunta: como a relevância se distribui no tempo e na frequência? "
+            "Mapas STDFT-LRP (janela de Hann de 512 amostras, passo 256) de uma "
+            "amostra real e uma sintética na primeira, na intermediária e na "
+            "última camada, em escala simétrica comum. Limite principal: "
+            "exemplos ilustrativos, não representativos do conjunto."
         )
     elif record.name == "conservation_diagnostics":
         body = _conservation_caption(tables)
+    elif record.name == "diagonal_vs_offdiagonal":
+        body = (
+            "Pergunta: a diferença de desempenho na transferência depende da "
+            r"camada? $\Delta$ ROC-AUC e $\Delta$ MCC (fora da diagonal menos "
+            "diagonal, no mesmo conjunto-alvo) por camada, com intervalo "
+            f"bootstrap de {_ci_percent_tex()} persistido e referência em zero. "
+            "Limite principal: corpus e idioma mudam juntos."
+        )
+    elif record.name == "encoder_agreement_by_layer":
+        body = (
+            "Pergunta: o acordo entre encoders muda ao longo das camadas? Uma "
+            "curva por par de modelos para acordos de desempenho (Spearman do "
+            "escore, fração de decisões iguais, kappa) e de explicação "
+            "(cosseno, distância JS), em eixos separados; a faixa mostra os "
+            "quartis entre células. Limite principal: a faixa não substitui os "
+            "intervalos bootstrap do CSV."
+        )
+    elif record.name == "language_shift":
+        body = (
+            "Pergunta: a mudança de relevância difere entre áudio real e "
+            "sintético? Distância Jensen--Shannon (bits) entre pares de "
+            "idiomas-alvo por camada, com probe fixo, para os grupos agregado, "
+            "real e sintético. Limite principal: corpus, áudio e idioma mudam "
+            "juntos."
+        )
+    elif record.name == "spectral_divergence":
+        body = (
+            "Pergunta: o deslocamento em frequência difere entre áudio real e "
+            "sintético? Distância de Wasserstein (Hz) entre sistemas diagonais "
+            "por camada, para os grupos agregado, real e sintético. Limite "
+            "principal: não separa corpus de idioma nem identifica a causa."
+        )
     else:
         body = escape_latex(record.title)
     return body + scope
@@ -5819,18 +5836,14 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
 
 
 def _conservation_caption(tables: ReportTables) -> str:
-    scopes = _conservation_scopes(tables)
-    listed = "; ".join(
-        f"({index}) {text}" for index, text in enumerate(scopes.values(), start=1)
-    )
     return (
-        "Quatro verificações com escopos e limites distintos, em escala "
-        "logarítmica: o resíduo bias-zeroed vale para uma única amostra de "
-        "validação e não para o conjunto inteiro; o resíduo da DFT cobre o "
-        "conjunto fixo de amostras XAI; o "
-        "resíduo da STDFT cobre apenas o subconjunto STDFT; o recálculo do "
-        "score é aceito pela regra rtol/atol, não pela tolerância de "
-        f"conservação. Escopos: {listed}."
+        "Pergunta: as explicações conservam o escore dentro das tolerâncias? "
+        "Quatro verificações por camada, em escala logarítmica, cada uma com "
+        "seu limite: resíduo bias-zeroed em uma amostra de validação, resíduos "
+        "da DFT no conjunto fixo de amostras XAI e da STDFT no subconjunto "
+        "STDFT, e recálculo do escore pela regra rtol/atol. Limite principal: "
+        "as populações diferem, então os painéis não são comparáveis entre si; "
+        "os escopos estão listados no texto."
     )
 
 
@@ -6196,7 +6209,15 @@ def _inventory_lines(
     return lines
 
 
-def _protocol_section(
+def _provenance(text: str) -> list[str]:
+    return [rf"\textit{{Proveniência:}} {text}", ""]
+
+
+def _appendix_section(index: int, label: str) -> list[str]:
+    return [rf"\section{{{_APPENDIX_TITLES_PT[index]}}}", rf"\label{{{label}}}"]
+
+
+def _protocol_appendix(
     tables: ReportTables, sources: Sequence[LoadedReportSource]
 ) -> list[str]:
     counts = _role_counts(sources)
@@ -6266,8 +6287,14 @@ def _protocol_section(
         else []
     )
     return [
-        rf"\section{{{_SECTION_TITLES_PT[5]}}}",
-        r"\label{sec:protocolo}",
+        *_appendix_section(0, "app:protocolo"),
+        *_provenance(
+            "planos de execução dos experimentos listados em "
+            f"{_tt_breakable(_MANIFEST_NAME)}; bordas das bandas em "
+            f"{_csv_tex('band_edges')}, com a origem de cada borda em "
+            f"{_csv_tex('band_edge_provenance')}; conjunto fixo de amostras XAI "
+            f"por camada em {_csv_tex('cohort_by_layer')}."
+        ),
         *counts_intro,
         *_itemize(items),
         "Cada camada do encoder (blocos Transformer "
@@ -6281,20 +6308,26 @@ def _protocol_section(
     ]
 
 
-def _performance_section(
+def _performance_appendix(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
     names = ("performance_by_layer", "fixed_threshold_by_layer")
     present = [name for name in names if name in figures]
+    stability_tex = _probe_stability_tex(tables)
+    stability_csv = (
+        f"; variabilidade do probe em {_csv_tex('probe_stability_by_layer')}"
+        if stability_tex.strip()
+        else ""
+    )
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[6]}}}",
-        r"\label{sec:desempenho}",
-        "Perfis completos por camada de cada célula treino$\\rightarrow$avaliação. "
-        "Os valores por camada, incluindo EER diagnóstico, acurácia, MCC, TPR e "
-        f"FPR, estão nas tabelas abaixo e em {_csv_tex('performance_by_layer')}; "
-        "a camada selecionada por célula está em "
-        f"{_csv_tex('transfer_selected_layers')}.",
-        "",
+        *_appendix_section(1, "app:desempenho"),
+        *_provenance(
+            "métricas por camada (ROC-AUC, EER diagnóstico, acurácia, MCC, TPR "
+            f"e FPR) em {_csv_tex('performance_by_layer')}; camada selecionada "
+            f"por célula em {_csv_tex('transfer_selected_layers')}"
+            + stability_csv
+            + "."
+        ),
     ]
     for name in present:
         lines += _figure_block(figures[name], tables)
@@ -6339,35 +6372,6 @@ def _performance_section(
             "",
         ]
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
-    stability_tex = _probe_stability_tex(tables)
-    fidelity_tex = _layer_faithfulness_tex(tables)
-    aligned_fidelity = _aligned_layer_faithfulness(tables)
-    aligned_stability = _aligned_probe_stability(tables)
-    if fidelity_tex.strip():
-        lines += [
-            rf"\subsection{{Fidelidade por intervenção (camada {FINAL_LAYER}, diagonal)}}",
-            r"\label{sec:fidelidade}",
-            "Comparações pareadas de comprehensividade (delete) entre faixas "
-            r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
-            "aleatórias com energia RMS igualada, com recomputação AttnLRP "
-            r"$\rightarrow$ STDFT sobre o subconjunto fixo de amostras XAI. "
-            "Valores positivos de top-minus-random ou top-minus-bottom "
-            "sugerem, com cautela, que as faixas mais relevantes segundo o "
-            "DFT-LRP sustentam mais o escore do probe do que controles; a filtragem "
-            "STFT e o reescalonamento RMS são fontes de variação introduzidas "
-            "pelo procedimento e não autorizam alegação causal no mundo real. "
-            f"Escopo restrito à camada~{FINAL_LAYER} com origem=destino; não extrapolar "
-            "para outras camadas ou células fora da diagonal.",
-            "",
-            _faithfulness_scope_note(aligned_fidelity),
-            "",
-            r"\input{tables/layer_faithfulness_summary.tex}",
-            "",
-            _faithfulness_pattern_paragraph(
-                faithfulness_aggregate_counts(aligned_fidelity)
-            ),
-            "",
-        ]
     if stability_tex.strip():
         lines += [
             r"\subsection{Variabilidade por reamostragem estratificada do treino do probe}",
@@ -6385,43 +6389,74 @@ def _performance_section(
             r"\input{tables/probe_stability_by_layer.tex}",
             "",
             _probe_stability_pattern_paragraph(
-                probe_stability_aggregate_by_model(aligned_stability)
+                probe_stability_aggregate_by_model(_aligned_probe_stability(tables))
             ),
             "",
         ]
     return lines
 
 
-def _emergence_section(tables: ReportTables) -> list[str]:
-    if tables.emergence.empty:
-        return []
+def _emergence_appendix(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[7]}}}",
-        r"\label{sec:emergencia}",
-        "Os valores de início (onset) e consolidação são os persistidos pelo "
-        "agregador do experimento, sem recálculo neste relatório.",
-        "",
+        *_appendix_section(2, "app:emergencia"),
+        *_provenance(
+            "início (onset) e consolidação persistidos pelo agregador do "
+            f"experimento, sem recálculo, em {_csv_tex('emergence_layers')}; "
+            "similaridade e variação L1 entre camadas adjacentes, com o número "
+            f"de amostras, em {_csv_tex('decision_reorganization')}."
+        ),
     ]
-    total = len(tables.emergence)
-    onset = _identified_layers_text(
-        tables.emergence["onset"],
-        total,
-        found="o início estimado da emergência foi identificado",
-        missing="o início da emergência não foi identificado",
+    if tables.emergence.empty:
+        lines += ["Não há estimativa de emergência nesta edição.", ""]
+    else:
+        total = len(tables.emergence)
+        onset = _identified_layers_text(
+            tables.emergence["onset"],
+            total,
+            found="o início estimado da emergência foi identificado",
+            missing="o início da emergência não foi identificado",
+        )
+        consolidation = _identified_layers_text(
+            tables.emergence["consolidation"],
+            total,
+            found="a consolidação foi identificada",
+            missing="a consolidação não foi identificada",
+        )
+        lines += [
+            f"Em resumo, {onset}; {consolidation}. Os valores por célula, com a "
+            r"ROC-AUC final, estão na Tabela~\ref{tab:emergence}.",
+            "",
+            r"\input{tables/emergence_layers.tex}",
+            "",
+        ]
+    lines += [r"\subsection{Reorganização da decisão entre camadas}"]
+    if "decision_reorganization_by_layer" not in figures:
+        return [*lines, "A figura de reorganização não foi gerada nesta edição.", ""]
+    lows = pd.DataFrame(
+        [
+            _cell_rows(tables.transitions, cell)
+            .sort_values("similarity_mean", kind="stable")
+            .iloc[0]
+            for cell in _cells(tables)
+        ]
     )
-    consolidation = _identified_layers_text(
-        tables.emergence["consolidation"],
-        total,
-        found="a consolidação foi identificada",
-        missing="a consolidação não foi identificada",
+    transitions = lows.groupby(
+        ["previous_layer", "current_layer"], sort=True
+    ).size()
+    (previous, current), count = max(
+        transitions.items(), key=lambda item: (item[1], -item[0][0])
     )
+    low, high = _num(lows["similarity_mean"].min()), _num(lows["similarity_mean"].max())
+    span = f"é {low}" if low == high else f"vai de {low} a {high}"
     lines += [
-        f"Em resumo, {onset}; {consolidation}. Os valores por célula, com a "
-        r"ROC-AUC final, estão na Tabela~\ref{tab:emergence} e em "
-        f"{_csv_tex('emergence_layers')}.",
+        f"Nas {len(lows)} célula(s), a menor similaridade cosseno média entre "
+        f"camadas adjacentes {span}; a transição "
+        f"{int(previous)}$\\rightarrow${int(current)} concentra esse mínimo em "
+        f"{int(count)} delas.",
         "",
-        r"\input{tables/emergence_layers.tex}",
-        "",
+        *_figure_block(figures["decision_reorganization_by_layer"], tables),
     ]
     return lines
 
@@ -6443,24 +6478,23 @@ def _identified_layers_text(
     return text
 
 
-def _relevance_section(
+def _relevance_appendix(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
     names = ("dft_relevance_heatmap", "class_relevance_by_layer")
-    present = [name for name in names if name in figures]
-    if not present:
-        return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[8]}}}",
-        r"\label{sec:relevancia}",
-        "Relevância absoluta normalizada por camada e banda mel, no conjunto "
-        "fixo de amostras XAI. Os valores por célula, camada e banda estão em "
-        f"{_csv_tex('dft_band_relevance')} e, por classe verdadeira, em "
-        f"{_csv_tex('class_relevance')}.",
-        "",
+        *_appendix_section(3, "app:relevancia"),
+        *_provenance(
+            "relevância absoluta normalizada por célula, camada e banda mel, "
+            f"no conjunto fixo de amostras XAI, em {_csv_tex('dft_band_relevance')} "
+            f"e, por classe verdadeira, em {_csv_tex('class_relevance')}; "
+            "associação entre concentração espectral e ROC-AUC em "
+            f"{_csv_tex('xai_performance_association')}."
+        ),
     ]
-    for name in present:
-        lines += _figure_block(figures[name], tables)
+    for name in names:
+        if name in figures:
+            lines += _figure_block(figures[name], tables)
     lines += [
         r"\subsection{Associação descritiva entre XAI e desempenho}",
         "A concentração espectral de cada camada é definida como a maior massa "
@@ -6483,54 +6517,106 @@ def _relevance_section(
             f"{_signed(rho.min())} a {_signed(rho.max())}"
         )
     lines += [
-        summary + ". Os valores por célula e o motivo de cada indisponibilidade "
-        f"estão em {_csv_tex('xai_performance_association')}.",
-        "",
-    ]
-    lines += [
-        f"Esta análise é descritiva, usa apenas n={len(LAYER_ORDER)} camadas por célula quando "
-        "disponível e não sustenta inferência nem interpretação causal.",
+        summary + "; o CSV registra o motivo de cada indisponibilidade. "
+        f"Esta análise é descritiva, usa apenas n={len(LAYER_ORDER)} camadas por "
+        "célula quando disponível e não sustenta inferência nem interpretação "
+        "causal.",
         "",
     ]
     return lines
 
 
-def _reorganization_section(
+def _comparisons_appendix(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    if "decision_reorganization_by_layer" not in figures:
-        return []
-    lines = [
-        rf"\section{{{_SECTION_TITLES_PT[9]}}}",
-        r"\label{sec:reorganizacao}",
-    ]
-    lows = pd.DataFrame(
-        [
-            _cell_rows(tables.transitions, cell)
-            .sort_values("similarity_mean", kind="stable")
-            .iloc[0]
-            for cell in _cells(tables)
+    present = [name for name in COMPARISON_FAMILIES if _has_comparison(tables, name)]
+    lines = _appendix_section(4, "app:comparacoes")
+    if not present:
+        return [
+            *lines,
+            *_provenance(
+                "nesta edição não há comparação entre modelos ou idiomas; "
+                "nenhum CSV de comparação foi gerado."
+            ),
         ]
-    )
-    transitions = lows.groupby(
-        ["previous_layer", "current_layer"], sort=True
-    ).size()
-    (previous, current), count = max(
-        transitions.items(), key=lambda item: (item[1], -item[0][0])
-    )
-    low, high = _num(lows["similarity_mean"].min()), _num(lows["similarity_mean"].max())
-    span = f"é {low}" if low == high else f"vai de {low} a {high}"
     lines += [
-        f"Nas {len(lows)} célula(s), a menor similaridade cosseno média entre "
-        f"camadas adjacentes {span}; a transição "
-        f"{int(previous)}$\\rightarrow${int(current)} concentra esse mínimo em "
-        f"{int(count)} delas. Os valores por transição, com a variação L1 "
-        r"normalizada e o número de amostras, estão em "
-        f"{_csv_tex('decision_reorganization')}.",
+        *_provenance(
+            "limites \\texttt{ci\\_low}--\\texttt{ci\\_high} de cada grupo, camada "
+            "e célula em "
+            + _join_pt([_csv_tex(name) for name in present])
+            + r"; o contrato do intervalo bootstrap está no glossário "
+            r"(Seção~\ref{sec:orientacao})."
+        ),
+        "As tabelas agregam medianas e faixas entre linhas; os valores por "
+        "linha ficam nos CSV.",
         "",
     ]
-    lines += _figure_block(figures["decision_reorganization_by_layer"], tables)
+    for name in present:
+        lines += [rf"\input{{tables/{name}.tex}}", ""]
+    if "diagonal_vs_offdiagonal" in figures:
+        lines += [
+            r"\subsection{Diagonal versus fora da diagonal por camada}",
+            *_figure_block(figures["diagonal_vs_offdiagonal"], tables),
+        ]
+    if "encoder_agreement_by_layer" in figures:
+        lines += [
+            r"\subsection{Acordo entre encoders por camada}",
+            *_figure_block(figures["encoder_agreement_by_layer"], tables),
+        ]
+    profiles = [
+        name for name in ("language_shift", "spectral_divergence") if name in figures
+    ]
+    if profiles:
+        lines += [
+            r"\subsection{Perfis técnicos por grupo de classe}",
+            r"\label{app:perfis-grupo-classe}",
+            "Séries agregada, real e sintética da mudança de relevância e da "
+            "divergência espectral; complementam as figuras principais.",
+            "",
+        ]
+        for name in profiles:
+            lines += _figure_block(figures[name], tables)
     return lines
+
+
+def _faithfulness_appendix(tables: ReportTables) -> list[str]:
+    lines = _appendix_section(5, "app:fidelidade")
+    aligned = _aligned_layer_faithfulness(tables)
+    if not _layer_faithfulness_tex(tables).strip():
+        return [
+            *lines,
+            *_provenance(
+                "nesta edição não há artefatos de intervenção sobre as faixas "
+                "relevantes; nenhum CSV de fidelidade foi gerado."
+            ),
+        ]
+    return [
+        *lines,
+        *_provenance(
+            "diferenças pareadas por modelo, célula diagonal, classe e $k$, com "
+            "intervalos bootstrap e número de pares, em "
+            f"{_csv_tex('layer_faithfulness_summary')}."
+        ),
+        rf"\subsection{{Fidelidade por intervenção (camada {FINAL_LAYER}, diagonal)}}",
+        "Comparações pareadas de comprehensividade (delete) entre faixas "
+        r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
+        "aleatórias com energia RMS igualada, com recomputação AttnLRP "
+        r"$\rightarrow$ STDFT sobre o subconjunto fixo de amostras XAI. "
+        "Valores positivos de top-minus-random ou top-minus-bottom "
+        "sugerem, com cautela, que remover as faixas mais relevantes segundo o "
+        "DFT-LRP altera mais o escore do probe do que remover os controles; a "
+        "filtragem STFT e o reescalonamento RMS são fontes de variação "
+        "introduzidas pelo procedimento e não autorizam alegação causal no "
+        f"mundo real. Escopo restrito à camada~{FINAL_LAYER} com origem=destino; "
+        "não extrapolar para outras camadas ou células fora da diagonal.",
+        "",
+        _faithfulness_scope_note(aligned),
+        "",
+        r"\input{tables/layer_faithfulness_summary.tex}",
+        "",
+        _faithfulness_pattern_paragraph(faithfulness_aggregate_counts(aligned)),
+        "",
+    ]
 
 
 def _abbreviation_note(tables: ReportTables) -> list[str]:
@@ -6543,136 +6629,89 @@ def _abbreviation_note(tables: ReportTables) -> list[str]:
         return []
     return [
         "Os identificadores de amostra longos aparecem abreviados (início, "
-        "reticências e fim); os identificadores completos estão em "
-        r"\texttt{tables/stdft\_examples.csv} e "
-        r"\texttt{tables/conservation\_by\_layer.csv}.",
+        "reticências e fim); os identificadores completos estão nos CSV.",
         "",
     ]
 
 
-def _stdft_section(
+def _stdft_conservation_appendix(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    if "stdft_examples" not in figures:
-        return []
     lines = [
-        rf"\section{{{_SECTION_TITLES_PT[10]}}}",
-        r"\label{sec:stdft}",
-    ]
-    examples = tables.stdft_examples
-    n_cells = len(examples[["model", "source", "target"]].drop_duplicates())
-    lines += [
-        f"O conjunto contém {len(examples)} exemplos STDFT em {n_cells} "
-        f"célula(s) e {examples['layer'].nunique()} camadas "
-        f"({int((examples['y_true'] == 0).sum())} reais e "
-        f"{int((examples['y_true'] == 1).sum())} sintéticos no total); a "
-        f"lista por célula está em {_csv_tex('stdft_examples')}.",
-        "",
-    ]
-    shown = figures["stdft_examples"].cells
-    lines += [
-        "A figura mostra amostras de " + _join_pt([_cell_tex(c) for c in shown]) + ".",
-        "",
+        *_appendix_section(6, "app:stdft-conservacao"),
+        *_provenance(
+            f"exemplos STDFT por célula, camada e classe em {_csv_tex('stdft_examples')}; "
+            "verificações de conservação por célula e camada, com tolerâncias e "
+            f"a amostra de validação, em {_csv_tex('conservation_by_layer')}."
+        ),
         *_abbreviation_note(tables),
+        r"\subsection{Exemplos tempo-frequência STDFT}",
     ]
-    lines += _figure_block(figures["stdft_examples"], tables)
+    if "stdft_examples" in figures:
+        examples = tables.stdft_examples
+        n_cells = len(examples[["model", "source", "target"]].drop_duplicates())
+        shown = figures["stdft_examples"].cells
+        lines += [
+            f"O conjunto contém {len(examples)} exemplos STDFT em {n_cells} "
+            f"célula(s) e {examples['layer'].nunique()} camadas "
+            f"({int((examples['y_true'] == 0).sum())} reais e "
+            f"{int((examples['y_true'] == 1).sum())} sintéticos no total). "
+            "A figura mostra amostras de "
+            + _join_pt([_cell_tex(c) for c in shown])
+            + ".",
+            "",
+            *_figure_block(figures["stdft_examples"], tables),
+        ]
+    else:
+        lines += ["A figura de exemplos não foi gerada nesta edição.", ""]
+    lines += [r"\subsection{Conservação e qualidade numérica}"]
+    if "conservation_diagnostics" in figures:
+        series = build_conservation_series(tables)
+        scopes = _conservation_scopes(tables)
+        tolerance = _sci(tables.conservation["tolerance"].min())
+        items = []
+        for panel in dict.fromkeys(series["panel"]):
+            rows = series[series["panel"] == panel]
+            worst = float(rows["value"].max())
+            limit = float(rows["limit"].iloc[0])
+            status = "dentro do limite" if worst <= limit else "acima do limite"
+            scope = scopes[panel]
+            items.append(
+                f"{scope[0].upper()}{scope[1:]}: máximo {_sci(worst)} sobre as "
+                f"camadas, limite {_sci(limit)} ({status})."
+            )
+        lines += [
+            "As verificações cobrem populações diferentes e obedecem a limites "
+            f"próprios: três usam a tolerância de conservação ({tolerance}) e o "
+            "recálculo do score usa a razão rtol/atol, com limite 1.",
+            "",
+            *_itemize(items),
+            *_figure_block(figures["conservation_diagnostics"], tables),
+        ]
+    if _conservation_tex(tables):
+        lines += [r"\input{tables/conservation_by_layer.tex}", ""]
     return lines
 
 
-def _conservation_section(
-    tables: ReportTables, figures: Mapping[str, FigureRecord]
+def _appendices(
+    tables: ReportTables,
+    figures: Mapping[str, FigureRecord],
+    sources: Sequence[LoadedReportSource],
 ) -> list[str]:
-    if "conservation_diagnostics" not in figures:
-        return []
-    series = build_conservation_series(tables)
-    scopes = _conservation_scopes(tables)
-    tolerance = _sci(tables.conservation["tolerance"].min())
-    items = []
-    for panel in dict.fromkeys(series["panel"]):
-        rows = series[series["panel"] == panel]
-        worst = float(rows["value"].max())
-        limit = float(rows["limit"].iloc[0])
-        status = "dentro do limite" if worst <= limit else "acima do limite"
-        scope = scopes[panel]
-        items.append(
-            f"{scope[0].upper()}{scope[1:]}: máximo {_sci(worst)} sobre as "
-            f"camadas, limite {_sci(limit)} ({status})."
-        )
+    """Appendices A–G: complete tables, detail figures and CSV provenance."""
     return [
-        rf"\section{{{_SECTION_TITLES_PT[11]}}}",
-        r"\label{sec:conservacao}",
-        "As verificações cobrem populações diferentes e obedecem a limites "
-        f"próprios: três usam a tolerância de conservação ({tolerance}) e o "
-        "recálculo do score usa a razão rtol/atol, com limite 1.",
+        r"\clearpage",
+        r"\appendix",
+        r"\label{appendix:start}",
         "",
-        *_itemize(items),
-        *_abbreviation_note(tables),
-        *_figure_block(figures["conservation_diagnostics"], tables),
-        r"\input{tables/conservation_by_layer.tex}",
-        "",
+        *_protocol_appendix(tables, sources),
+        *_performance_appendix(tables, figures),
+        *_emergence_appendix(tables, figures),
+        *_relevance_appendix(tables, figures),
+        *_comparisons_appendix(tables, figures),
+        *_faithfulness_appendix(tables),
+        *_stdft_conservation_appendix(tables, figures),
     ]
-
-
-def _comparisons_section(
-    tables: ReportTables, figures: Mapping[str, FigureRecord]
-) -> list[str]:
-    present = [name for name in COMPARISON_FAMILIES if _has_comparison(tables, name)]
-    if not present:
-        return []
-    lines = [
-        rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
-        r"\label{sec:comparacoes}",
-        "Resumos tabulares das quatro comparações bootstrap. As tabelas agregam "
-        r"medianas e faixas entre linhas; os limites \texttt{ci\_low}--"
-        r"\texttt{ci\_high} de cada grupo, camada e célula estão nos CSV "
-        "correspondentes. O contrato do intervalo bootstrap está no glossário "
-        r"(Seção~\ref{sec:orientacao}).",
-        "",
-    ]
-    for name in present:
-        lines += [rf"\input{{tables/{name}.tex}}", ""]
-    if "diagonal_vs_offdiagonal" in figures:
-        lines += [
-            r"\subsection{Detalhe técnico diagonal versus fora da diagonal por camada}",
-            "Perfil por camada de $\\Delta$ ROC-AUC e $\\Delta$ MCC, além da camada "
-            "selecionada mostrada nos resultados principais.",
-            "",
-            *_figure_block(figures["diagonal_vs_offdiagonal"], tables),
-        ]
-    if "encoder_agreement_by_layer" in figures:
-        lines += [
-            r"\subsection{Detalhe técnico do acordo por camada}",
-            "Perfil completo por camada preservado para inspeção técnica; a faixa "
-            "mostra os quartis entre células treino$\\rightarrow$avaliação e não "
-            "substitui os intervalos bootstrap mantidos no CSV.",
-            "",
-            *_figure_block(figures["encoder_agreement_by_layer"], tables),
-        ]
-    return lines
-
-
-def _comparison_technical_annex(
-    tables: ReportTables, figures: Mapping[str, FigureRecord]
-) -> list[str]:
-    technical_profiles = [
-        name
-        for name in ("language_shift", "spectral_divergence")
-        if name in figures
-    ]
-    if not technical_profiles:
-        return []
-    lines = [
-        r"\section{Perfis técnicos por grupo de classe}",
-        r"\label{app:perfis-grupo-classe}",
-        "Este anexo preserva as séries agregada, real e sintética das comparações "
-        "de mudança de relevância e divergência espectral. Os perfis complementam "
-        "as figuras principais sem transformar camadas ou limites de confiança "
-        "em distribuições amostrais.",
-        "",
-    ]
-    for name in technical_profiles:
-        lines += _figure_block(figures[name], tables)
-    return lines
 
 
 def _result_block(
@@ -6700,7 +6739,7 @@ def _result_block(
         "",
     ]
     for name in shown:
-        lines += _figure_block(figures[name], tables, compact_scope=True)
+        lines += _figure_block(figures[name], tables)
     return [
         *lines,
         r"\textbf{Resultado:}",
@@ -6827,7 +6866,7 @@ def _overview_block(
             "dessa camada e não é maximizado separadamente."
         ),
         details=(
-            rf"Apêndice~\ref{{sec:desempenho}}; {_csv_tex('transfer_selected_layers')} "
+            rf"Apêndice~\ref{{app:desempenho}}; {_csv_tex('transfer_selected_layers')} "
             f"e {_csv_tex('performance_by_layer')}."
         ),
     )
@@ -6911,7 +6950,7 @@ def _transfer_block(
             "incluem a variação de novos treinos do probe."
         ),
         details=(
-            r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:diagonal-off-summary}); "
+            r"Apêndice~\ref{app:comparacoes} (Tabela~\ref{tab:diagonal-off-summary}); "
             f"{_csv_tex('diagonal_vs_offdiagonal')}."
         ),
     )
@@ -6969,7 +7008,7 @@ def _agreement_block(
             "deve ser comparada com as demais."
         ),
         details=(
-            r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:encoder-agreement-summary}"
+            r"Apêndice~\ref{app:comparacoes} (Tabela~\ref{tab:encoder-agreement-summary}"
             + by_layer
             + f"); {_csv_tex('encoder_agreement')}."
         ),
@@ -7027,7 +7066,7 @@ def _relevance_shift_block(
         ),
         details=(
             _profiles_detail(figures, "language_shift")
-            + r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:language-shift-summary}); "
+            + r"Apêndice~\ref{app:comparacoes} (Tabela~\ref{tab:language-shift-summary}); "
             f"{_csv_tex('language_shift')}."
         ),
     )
@@ -7079,7 +7118,7 @@ def _spectral_block(
         ),
         details=(
             _profiles_detail(figures, "spectral_divergence")
-            + r"Apêndice~\ref{sec:comparacoes} (Tabela~\ref{tab:spectral-divergence-summary}); "
+            + r"Apêndice~\ref{app:comparacoes} (Tabela~\ref{tab:spectral-divergence-summary}); "
             f"{_csv_tex('spectral_divergence')}."
         ),
     )
@@ -7150,7 +7189,7 @@ def _faithfulness_block(
             "não se estende a outras camadas nem à transferência."
         ),
         details=(
-            r"Apêndice~\ref{sec:fidelidade} (Tabela~\ref{tab:layer-faithfulness-summary}); "
+            r"Apêndice~\ref{app:fidelidade} (Tabela~\ref{tab:layer-faithfulness-summary}); "
             f"{_csv_tex('layer_faithfulness_summary')}."
         ),
     )
@@ -7313,16 +7352,7 @@ def write_report_tex(
         _main_results_section(tables, available),
         _cross_cutting_limitations_section(tables),
         _short_conclusion_section(tables),
-        [r"\appendix", ""],
-        _protocol_section(tables, sources),
-        _performance_section(tables, available),
-        _emergence_section(tables),
-        _relevance_section(tables, available),
-        _reorganization_section(tables, available),
-        _stdft_section(tables, available),
-        _conservation_section(tables, available),
-        _comparisons_section(tables, available),
-        _comparison_technical_annex(tables, available),
+        _appendices(tables, available, sources),
     )
     for section in sections:
         lines += section

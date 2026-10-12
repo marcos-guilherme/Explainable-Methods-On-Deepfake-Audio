@@ -1746,11 +1746,11 @@ _SECTION_TITLES = (
     "Conclusão",
     "Dados e protocolo de avaliação",
     "Desempenho ao longo das camadas",
-    "Emergência estimada da decisão do detector",
+    "Emergência e reorganização da decisão",
     "Relevância em frequência ao longo das camadas",
-    "Reorganização da decisão entre camadas",
-    "Exemplos tempo-frequência STDFT selecionados",
-    "Conservação e qualidade numérica",
+    "Comparações entre modelos e idiomas",
+    "Fidelidade das explicações",
+    "Exemplos STDFT e conservação numérica",
 )
 _BUNDLE_TABLES = (
     "performance_by_layer",
@@ -2079,7 +2079,7 @@ def test_multi_source_bundle_is_independent_of_source_order(
     assert "HuBERT Base" in tex and "WavLM Base" in tex
     assert "WavLM Base+" not in tex
     assert "não estão disponíveis" in tex
-    assert _sections(tex) == [*_SECTION_TITLES, "Comparações entre modelos e idiomas"]
+    assert _sections(tex) == list(_SECTION_TITLES)
 
 
 # --- scientific text ---
@@ -2275,7 +2275,7 @@ def test_consolidated_scope_does_not_claim_comparisons_are_unavailable(
     assert "não identificam um efeito causal do idioma" in tex
 
 
-def test_tex_omits_a_section_when_its_figure_is_unavailable(
+def test_tex_keeps_the_appendix_section_when_its_figure_is_unavailable(
     eng_tables, eng_loaded, eng_figures, tmp_path
 ):
     figures = [record for record in eng_figures if record.name != "stdft_examples"]
@@ -2284,10 +2284,10 @@ def test_tex_omits_a_section_when_its_figure_is_unavailable(
     write_report_tex(path, eng_tables, figures, [eng_loaded])
 
     tex = _read_text(path)
-    assert "stdft_examples" not in tex
-    assert _sections(tex) == [
-        title for title in _SECTION_TITLES if "STDFT" not in title
-    ]
+    assert "figures/stdft_examples" not in tex
+    assert r"\label{fig:stdft_examples}" not in tex
+    assert "A figura de exemplos não foi gerada nesta edição." in tex
+    assert _sections(tex) == list(_SECTION_TITLES)
 
 
 def test_tex_escapes_text_that_comes_from_the_result_artifacts(
@@ -3864,7 +3864,7 @@ def test_inventory_header_is_compact(eng_tex):
 
 
 def test_section_title_is_short_and_babel_is_brazilian(eng_tex):
-    assert "Reorganização da decisão entre camadas" in _sections(eng_tex)
+    assert r"\subsection{Reorganização da decisão entre camadas}" in eng_tex
     assert "consecutivas" not in "".join(_sections(eng_tex))
     assert max(len(title) for title in _sections(eng_tex)) <= 56
     assert r"\usepackage[brazilian]{babel}" in eng_tex
@@ -5172,8 +5172,10 @@ def test_comparison_narrative_explains_method_and_links_each_result(
     for family in ("diagonal_vs_offdiagonal", "encoder_agreement_by_layer"):
         assert rf"\label{{fig:{family}}}" in section
         assert rf"\label{{fig:{family}}}" not in body
+    head, profiles = section.split(r"\subsection{Perfis técnicos por grupo de classe}", 1)
     for family in ("language_shift", "spectral_divergence"):
-        assert rf"\label{{fig:{family}}}" not in section
+        assert rf"\label{{fig:{family}}}" not in head
+        assert rf"\label{{fig:{family}}}" in profiles
     for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
         assert rf"\input{{tables/{family}.tex}}" not in body
@@ -5550,7 +5552,7 @@ def test_report_structure_places_legacy_group_profiles_in_single_technical_annex
     assert r"\label{fig:spectral_divergence}" not in main
     assert r"\label{fig:language_shift}" in annex
     assert r"\label{fig:spectral_divergence}" in annex
-    assert r"\section{Perfis técnicos por grupo de classe}" in annex
+    assert r"\subsection{Perfis técnicos por grupo de classe}" in annex
 
 
 def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(
@@ -6384,3 +6386,202 @@ def test_different_target_languages_may_use_different_xai_sample_ids(tmp_path):
     )
     assert "por-target-only" in por_ids
     assert eng_ids != por_ids
+
+
+# ---------------------------------------------------------------------------
+# Task 7: complete technical detail in navigable appendices
+# ---------------------------------------------------------------------------
+
+_APPENDIX_LABELS = (
+    "app:protocolo",
+    "app:desempenho",
+    "app:emergencia",
+    "app:relevancia",
+    "app:comparacoes",
+    "app:fidelidade",
+    "app:stdft-conservacao",
+)
+
+
+def _appendix(tex: str) -> str:
+    return tex.split(r"\appendix", 1)[1]
+
+
+def test_full_report_appendices_preserve_every_detail_family(
+    full_comparison_tex,
+):
+    appendix = full_comparison_tex.split(r"\appendix", 1)[1]
+    for label in _APPENDIX_LABELS:
+        assert rf"\label{{{label}}}" in appendix
+    for table in (
+        "performance_by_layer",
+        "emergence_layers",
+        "encoder_agreement",
+        "language_shift",
+        "diagonal_vs_offdiagonal",
+        "spectral_divergence",
+        "conservation_by_layer",
+    ):
+        assert rf"\input{{tables/{table}.tex}}" in appendix
+
+
+def test_full_csv_schemas_are_unchanged(full_comparison_tables, tmp_path):
+    write_report_tables(full_comparison_tables, tmp_path / "tables")
+    for family in _COMPARISON_FAMILIES:
+        actual = pd.read_csv(tmp_path / "tables" / f"{family}.csv")
+        expected = getattr(full_comparison_tables, family)
+        assert tuple(actual.columns) == tuple(expected.columns)
+        assert len(actual) == len(expected)
+    for name, attribute in report_module._TABLE_CSVS:
+        actual = pd.read_csv(tmp_path / "tables" / f"{name}.csv")
+        expected = getattr(full_comparison_tables, attribute)
+        assert tuple(actual.columns) == tuple(expected.columns), name
+        assert len(actual) == len(expected), name
+
+
+def test_appendix_has_one_boundary_after_conclusion_with_start_label(
+    full_comparison_tex, eng_tex
+):
+    for tex in (full_comparison_tex, eng_tex):
+        assert tex.count(r"\appendix") == 1
+        assert tex.count(r"\label{appendix:start}") == 1
+        assert "\\clearpage\n\\appendix\n\\label{appendix:start}\n" in tex
+        main = tex.split(r"\appendix", 1)[0]
+        assert main.rindex(r"\label{sec:conclusao}") > main.rindex(
+            r"\label{sec:limitacoes}"
+        )
+
+
+def test_appendix_has_seven_labelled_sections_in_a_to_g_order(
+    full_comparison_tex, eng_tex
+):
+    for tex in (full_comparison_tex, eng_tex):
+        appendix = _appendix(tex)
+        sections = _sections(appendix)
+        assert sections == list(report_module._APPENDIX_TITLES_PT)
+        assert len(sections) == 7
+        labels = re.findall(r"\\section\{[^}]*\}\n\\label\{([^}]*)\}", appendix)
+        assert labels == list(_APPENDIX_LABELS)
+
+
+def test_every_reference_resolves_to_exactly_one_label(full_comparison_tex, eng_tex):
+    for tex in (full_comparison_tex, eng_tex):
+        labels = re.findall(r"\\label\{([^}]*)\}", tex)
+        assert len(labels) == len(set(labels)), sorted(
+            label for label in set(labels) if labels.count(label) > 1
+        )
+        references = set(re.findall(r"\\ref\{([^}]*)\}", tex))
+        # Table labels live in the \input fragments, not in report.tex.
+        missing = {
+            ref
+            for ref in references - set(labels)
+            if not ref.startswith("tab:")
+        }
+        assert not missing
+
+
+def test_main_body_detail_links_point_to_appendix_labels(full_comparison_tex):
+    main = _main_body(full_comparison_tex)
+    for label in ("app:desempenho", "app:comparacoes", "app:fidelidade"):
+        assert rf"Apêndice~\ref{{{label}}}" in main
+    for legacy in (
+        "sec:protocolo",
+        "sec:desempenho",
+        "sec:emergencia",
+        "sec:relevancia",
+        "sec:reorganizacao",
+        "sec:stdft",
+        "sec:conservacao",
+        "sec:comparacoes",
+        "sec:fidelidade",
+    ):
+        assert legacy not in full_comparison_tex, legacy
+    assert r"\ref{app:perfis-grupo-classe}" in main
+    assert r"\label{app:perfis-grupo-classe}" in _appendix(full_comparison_tex)
+
+
+def test_appendix_inputs_every_detail_table_fragment_once(
+    full_comparison_tables, full_comparison_tex, tmp_path
+):
+    written = write_report_tables(full_comparison_tables, tmp_path / "tables")
+    appendix = _appendix(full_comparison_tex)
+    fragments = [Path(name).stem for name in written if name.endswith(".tex")]
+    assert "layer_faithfulness_summary" in fragments
+    for stem in fragments:
+        directive = rf"\input{{tables/{stem}.tex}}"
+        assert full_comparison_tex.count(directive) == 1, stem
+        if stem != "results_synthesis":
+            assert directive in appendix, stem
+
+
+def test_appendix_points_to_every_csv_once_per_family(
+    full_comparison_tables, full_comparison_tex, tmp_path
+):
+    written = write_report_tables(full_comparison_tables, tmp_path / "tables")
+    appendix = _appendix(full_comparison_tex)
+    for name in written:
+        if not name.endswith(".csv") or name == "results_synthesis.csv":
+            continue
+        assert report_module._csv_tex(Path(name).stem) in appendix, name
+
+
+def test_appendix_shows_every_detail_figure_exactly_once(
+    full_comparison_tables, full_comparison_tex, tmp_path
+):
+    figures = render_report_figures(full_comparison_tables, tmp_path / "figures")
+    appendix = _appendix(full_comparison_tex)
+    main_figures = set(_MAIN_RESULT_FIGURES)
+    for record in figures:
+        label = rf"\label{{fig:{record.name}}}"
+        assert full_comparison_tex.count(label) == 1, record.name
+        if record.name not in main_figures:
+            assert label in appendix, record.name
+
+
+def test_appendix_sections_open_with_a_provenance_paragraph(full_comparison_tex):
+    appendix = _appendix(full_comparison_tex)
+    for label in _APPENDIX_LABELS:
+        after = appendix.split(rf"\label{{{label}}}", 1)[1].lstrip("\n")
+        assert after.startswith(r"\textit{Proveniência:}"), label
+
+
+def test_single_source_appendix_keeps_stable_sections_with_unavailable_notes(
+    eng_tex,
+):
+    appendix = _appendix(eng_tex)
+    comparisons = appendix.split(r"\label{app:comparacoes}", 1)[1].split(
+        r"\section{", 1
+    )[0]
+    assert "não há comparação" in comparisons
+    fidelity = appendix.split(r"\label{app:fidelidade}", 1)[1].split(
+        r"\section{", 1
+    )[0]
+    assert r"\input{tables/layer_faithfulness_summary.tex}" not in fidelity
+
+
+def test_all_captions_state_question_encoding_and_limit_without_inventory(
+    full_comparison_tex, eng_tex
+):
+    for tex in (full_comparison_tex, eng_tex):
+        for caption in _captions(tex):
+            if caption.startswith("Inventário"):
+                continue
+            assert caption.startswith("Pergunta:"), caption[:80]
+            assert "Limite principal:" in caption, caption[:80]
+            assert r"Idioma (treino$\rightarrow$avaliação):" not in caption
+            assert r"Modelos e idiomas (treino$\rightarrow$avaliação):" not in caption
+            assert "Escopos: (1)" not in caption
+
+
+def test_full_comparison_manifest_lists_each_artifact_once_sorted(
+    two_model_roots, tmp_path
+):
+    output = tmp_path / "bundle"
+    generate_report_bundle(list(two_model_roots), output)
+    manifest = json.loads(_read_text(output / "report_manifest.json"))
+    listed = [item["path"] for item in manifest["generated_files"]]
+    assert listed == sorted(listed)
+    assert len(listed) == len(set(listed))
+    on_disk = [p for p in _bundle_files(output) if p != "report_manifest.json"]
+    assert listed == on_disk
+    assert {Path(p).suffix for p in listed} >= {".pdf", ".png", ".csv", ".tex"}
