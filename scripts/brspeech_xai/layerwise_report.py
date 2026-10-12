@@ -4309,6 +4309,25 @@ _XAI_ENCODER_METRICS: tuple[tuple[str, str, str], ...] = (
     ("relevance_cosine_similarity", "Similaridade cosseno", "cosseno"),
     ("relevance_jensen_shannon_distance", "Distância JS", "bits"),
 )
+_ENCODER_HEATMAP_METRICS: tuple[
+    tuple[str, str, tuple[float, float], str], ...
+] = (
+    ("prediction_agreement", "Acordo de decisão", (0.0, 1.0), "viridis"),
+    ("cohen_kappa", "Kappa de Cohen", (-1.0, 1.0), "coolwarm"),
+    ("score_spearman", "Spearman do score", (-1.0, 1.0), "coolwarm"),
+    (
+        "relevance_cosine_similarity",
+        "Similaridade cosseno",
+        (-1.0, 1.0),
+        "coolwarm",
+    ),
+    (
+        "relevance_jensen_shannon_distance",
+        "Distância JS",
+        (0.0, 1.0),
+        "magma",
+    ),
+)
 
 
 def _layer_axis_dynamic(ax, layers: Sequence[int]) -> None:
@@ -4481,8 +4500,124 @@ def _finalize_comparison_line_figure(
     )
 
 
-def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
-    name = "encoder_agreement"
+def encoder_agreement_heatmap_data(frame: pd.DataFrame) -> pd.DataFrame:
+    """Collapse finite encoder-agreement estimates to layer medians."""
+    keys = ("model_a", "model_b", "source", "target", "metric")
+    finite = frame[np.isfinite(frame["estimate"].to_numpy(dtype=np.float64))]
+    if finite.empty:
+        return pd.DataFrame(columns=(*keys, "estimate"))
+    return (
+        finite.groupby(list(keys), sort=True, as_index=False)["estimate"]
+        .median()
+        .reset_index(drop=True)
+    )
+
+
+def _figure_encoder_agreement_heatmaps(
+    plt, tables: ReportTables, figures_dir: Path
+):
+    name = "encoder_agreement_heatmaps"
+    frame = encoder_agreement_heatmap_data(tables.encoder_agreement)
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    pairs = sorted(
+        {
+            (str(row.model_a), str(row.model_b))
+            for row in frame[["model_a", "model_b"]].drop_duplicates().itertuples(
+                index=False
+            )
+        }
+    )
+    languages = tuple(
+        language
+        for language in ("eng", "por", "zho")
+        if language in set(frame["source"]) | set(frame["target"])
+    )
+    fig, axes = plt.subplots(
+        len(_ENCODER_HEATMAP_METRICS),
+        len(pairs),
+        figsize=(_FIGURE_WIDTH, 2.25 * len(_ENCODER_HEATMAP_METRICS)),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    for row_index, (metric, label, limits, cmap) in enumerate(
+        _ENCODER_HEATMAP_METRICS
+    ):
+        for column_index, (model_a, model_b) in enumerate(pairs):
+            ax = axes[row_index, column_index]
+            rows = frame[
+                (frame["model_a"] == model_a)
+                & (frame["model_b"] == model_b)
+                & (frame["metric"] == metric)
+            ]
+            matrix = (
+                rows.pivot(index="source", columns="target", values="estimate")
+                .reindex(index=languages, columns=languages)
+                .to_numpy(dtype=np.float64)
+            )
+            image = ax.imshow(
+                matrix,
+                vmin=limits[0],
+                vmax=limits[1],
+                cmap=cmap,
+                aspect="equal",
+            )
+            ax.set_xticks(range(len(languages)))
+            ax.set_xticklabels(
+                [_language_name(item).capitalize() for item in languages],
+                rotation=30,
+                ha="right",
+            )
+            ax.set_yticks(range(len(languages)))
+            ax.set_yticklabels(
+                [_language_name(item).capitalize() for item in languages]
+            )
+            ax.set_xlabel("Idioma de avaliação")
+            ax.set_ylabel("Idioma de treino")
+            ax.set_title(
+                f"{_pair_pretty(model_a, model_b)} — {label}",
+                fontsize=8,
+            )
+            midpoint = (limits[0] + limits[1]) / 2.0
+            for source_index in range(len(languages)):
+                for target_index in range(len(languages)):
+                    value = matrix[source_index, target_index]
+                    if np.isfinite(value):
+                        ax.text(
+                            target_index,
+                            source_index,
+                            f"{value:.2f}",
+                            ha="center",
+                            va="center",
+                            fontsize=7,
+                            color="white" if value < midpoint else "black",
+                        )
+            fig.colorbar(image, ax=ax, shrink=0.75, label=label)
+    layer_count = tables.encoder_agreement["layer"].nunique()
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Acordo entre encoders por idioma",
+        description=(
+            "Mapas por par de modelos e métrica, com idioma de treino nas linhas "
+            "e idioma de avaliação nas colunas. "
+            f"Cada célula é a mediana entre {layer_count} camadas."
+        ),
+        metric="acordo entre encoders (desempenho e explicação)",
+        units="fração, κ, ρ, cosseno e bits, cada métrica em sua própria escala",
+        transformation=(
+            "mediana das estimativas finitas entre as 12 camadas para cada par "
+            "de modelos, idioma de treino, idioma de avaliação e métrica"
+        ),
+    )
+    fig.suptitle(record.title, fontsize=9)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_encoder_agreement_lines(
+    plt, tables: ReportTables, figures_dir: Path, name: str
+):
     frame = tables.encoder_agreement
     if frame.empty:
         raise ValueError(f"{name} figure requested but the comparison table is empty")
@@ -4550,6 +4685,20 @@ def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
     fig.suptitle(record.title, fontsize=9, y=0.98)
     _finalize_comparison_line_figure(fig, axes, bottom=0.20)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
+def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
+    return _figure_encoder_agreement_lines(
+        plt, tables, figures_dir, "encoder_agreement"
+    )
+
+
+def _figure_encoder_agreement_by_layer(
+    plt, tables: ReportTables, figures_dir: Path
+):
+    return _figure_encoder_agreement_lines(
+        plt, tables, figures_dir, "encoder_agreement_by_layer"
+    )
 
 
 def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
@@ -4750,14 +4899,14 @@ _FIGURE_BUILDERS = {
     "stdft_examples": _figure_stdft,
     "conservation_diagnostics": _figure_conservation,
     "encoder_agreement": _figure_encoder_agreement,
+    "encoder_agreement_heatmaps": _figure_encoder_agreement_heatmaps,
+    "encoder_agreement_by_layer": _figure_encoder_agreement_by_layer,
     "language_shift": _figure_language_shift,
     "diagonal_vs_offdiagonal": _figure_diagonal_vs_offdiagonal,
     "spectral_divergence": _figure_spectral_divergence,
 }
 _DEFERRED_FIGURE_FAMILIES = frozenset(
     {
-        "encoder_agreement_heatmaps",
-        "encoder_agreement_by_layer",
         "language_shift_intervals",
         "spectral_divergence_by_layer",
         "layer_faithfulness_intervals",

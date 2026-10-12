@@ -4334,6 +4334,38 @@ def full_comparison_tex(full_comparison_tables, tmp_path_factory) -> str:
     return _read_text(path)
 
 
+def test_encoder_agreement_heatmap_uses_layer_medians(full_comparison_tables):
+    result = report_module.encoder_agreement_heatmap_data(
+        full_comparison_tables.encoder_agreement
+    )
+    key = (
+        (result["model_a"] == "hubert_base")
+        & (result["model_b"] == "wavlm_base")
+        & (result["source"] == "eng")
+        & (result["target"] == "por")
+        & (result["metric"] == "prediction_agreement")
+    )
+    source = full_comparison_tables.encoder_agreement.query(
+        "model_a == 'hubert_base' and model_b == 'wavlm_base' "
+        "and source == 'eng' and target == 'por' "
+        "and metric == 'prediction_agreement'"
+    )
+    assert result.loc[key, "estimate"].item() == pytest.approx(
+        source["estimate"].median()
+    )
+
+
+def test_encoder_agreement_heatmaps_do_not_share_incompatible_scales(
+    full_comparison_tables, tmp_path
+):
+    _, captured = _capture_figures(
+        full_comparison_tables, tmp_path / "agreement"
+    )
+    text = "\n".join(captured["encoder_agreement_heatmaps"]["texts"])
+    for label in ("Acordo de decisão", "Kappa", "Spearman", "Distância JS"):
+        assert label in text
+
+
 @pytest.mark.parametrize(
     ("family", "metric"),
     (
@@ -4620,6 +4652,8 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     rendered_comparisons = _COMPARISON_FAMILIES + (
         "transfer_delta_roc_auc",
         "transfer_delta_mcc",
+        "encoder_agreement_heatmaps",
+        "encoder_agreement_by_layer",
     )
     expected = {
         f"{name}.{suffix}"
@@ -4628,7 +4662,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     }
     assert expected <= names
     assert tuple(record.name for record in records) == (
-        _TWELVE_FAMILIES + rendered_comparisons[-2:]
+        _TWELVE_FAMILIES + rendered_comparisons[-4:]
     )
     for name in rendered_comparisons:
         for suffix in ("pdf", "png"):
@@ -4763,6 +4797,9 @@ def test_full_comparison_bundle_manifest_lists_twelve_families_in_order(
     stems = [Path(item).stem for item in figure_paths]
     assert stems == sorted(stems)
     for name in _TWELVE_FAMILIES:
+        assert f"figures/{name}.pdf" in figure_paths
+        assert f"figures/{name}.png" in figure_paths
+    for name in ("encoder_agreement_heatmaps", "encoder_agreement_by_layer"):
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
     tex = _read_text(output / "report.tex")
