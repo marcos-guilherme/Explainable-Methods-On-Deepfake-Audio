@@ -1699,6 +1699,10 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
         "language_shift",
         "diagonal_vs_offdiagonal",
         "spectral_divergence",
+        "transfer_delta_roc_auc",
+        "transfer_delta_mcc",
+        "language_shift_intervals",
+        "spectral_divergence_by_layer",
     )
     assert tuple(record.name for record in records) == expected
     assert len(list((tmp_path / "figs").iterdir())) == len(expected) * 2
@@ -4715,6 +4719,8 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
         "transfer_delta_mcc",
         "encoder_agreement_heatmaps",
         "encoder_agreement_by_layer",
+        "language_shift_intervals",
+        "spectral_divergence_by_layer",
     )
     expected = {
         f"{name}.{suffix}"
@@ -4723,7 +4729,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     }
     assert expected <= names
     assert tuple(record.name for record in records) == (
-        _BASE_RENDERED_FAMILIES + rendered_comparisons[-4:]
+        _BASE_RENDERED_FAMILIES + rendered_comparisons[3:]
     )
     for name in rendered_comparisons:
         for suffix in ("pdf", "png"):
@@ -4795,12 +4801,63 @@ def test_diagonal_figure_includes_zero_reference_and_transfer_labels(
     assert "Δ" in joined or "delta" in joined.lower() or "ROC-AUC" in joined
 
 
-def test_spectral_divergence_figure_uses_hz_axis(
+def test_language_shift_main_figure_uses_points_and_persisted_intervals(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    calls = []
+    import matplotlib.pyplot as plt
+
+    original = plt.Axes.errorbar
+
+    def spy(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        return original(self, *args, **kwargs)
+
+    tables = dataclasses.replace(
+        full_comparison_tables, planned_figures=("language_shift_intervals",)
+    )
+    monkeypatch.setattr(plt.Axes, "errorbar", spy)
+    records = render_report_figures(tables, tmp_path / "shift")
+
+    assert calls
+    record = next(r for r in records if r.name == "language_shift_intervals")
+    assert "violin" not in record.transformation.lower()
+    assert "ci_low" in record.transformation
+
+
+def test_spectral_divergence_keeps_hz_and_layer_on_separate_axes(
     full_comparison_tables, tmp_path
 ):
-    _, captured = _capture_figures(full_comparison_tables, tmp_path / "spec")
-    joined = "\n".join(captured["spectral_divergence"]["texts"])
-    assert "Hz" in joined
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        planned_figures=("spectral_divergence_by_layer",),
+    )
+    _, captured = _capture_figures(tables, tmp_path / "spectral")
+    text = "\n".join(captured["spectral_divergence_by_layer"]["texts"])
+    assert "Hz" in text
+    assert "Camada" in text
+
+
+def test_shift_and_spectral_main_captions_state_question_encoding_and_limit(
+    full_comparison_tex,
+):
+    for name in ("language_shift_intervals", "spectral_divergence_by_layer"):
+        figure = full_comparison_tex.split(rf"\label{{fig:{name}}}", 1)[0].rsplit(
+            r"\begin{figure}[H]", 1
+        )[1]
+        assert "Pergunta:" in figure
+        assert "Limite principal:" in figure
+    assert r"\texttt{ci\_low}--\texttt{ci\_high}" in full_comparison_tex
+    assert "distância maior não significa resultado melhor nem pior" in full_comparison_tex
+
+
+def test_report_references_redesigned_main_figures(
+    full_comparison_tex,
+):
+    assert r"Figura~\ref{fig:language_shift_intervals}" in full_comparison_tex
+    assert r"Figura~\ref{fig:spectral_divergence_by_layer}" in full_comparison_tex
+    assert r"Figura~\ref{fig:language_shift};" not in full_comparison_tex
+    assert r"Figura~\ref{fig:spectral_divergence};" not in full_comparison_tex
 
 
 def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(
@@ -4839,7 +4896,7 @@ def test_comparison_summary_tex_column_counts_are_consistent(
             assert stripped.count("&") + 1 == columns, (family, stripped)
 
 
-def test_full_comparison_bundle_manifest_lists_twelve_families_in_order(
+def test_full_comparison_bundle_manifest_lists_figure_families_in_order(
     full_comparison_tables, tmp_path
 ):
     roots = []
@@ -4864,6 +4921,9 @@ def test_full_comparison_bundle_manifest_lists_twelve_families_in_order(
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
     for name in ("encoder_agreement_heatmaps", "encoder_agreement_by_layer"):
+        assert f"figures/{name}.pdf" in figure_paths
+        assert f"figures/{name}.png" in figure_paths
+    for name in ("language_shift_intervals", "spectral_divergence_by_layer"):
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
     tex = _read_text(output / "report.tex")
@@ -4906,7 +4966,7 @@ def test_multiple_languages_add_language_comparison_figures(tmp_path):
     )
     assert tables.planned_figures == expected
     records = render_report_figures(tables, tmp_path / "figs")
-    assert tuple(record.name for record in records) == expected[:11]
+    assert tuple(record.name for record in records) == expected
 
 
 def test_multiple_models_add_encoder_agreement_figure(tmp_path):

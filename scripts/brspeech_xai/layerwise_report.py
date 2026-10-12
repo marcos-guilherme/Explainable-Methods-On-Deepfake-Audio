@@ -4759,6 +4759,90 @@ def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
+def _figure_language_shift_intervals(
+    plt, tables: ReportTables, figures_dir: Path
+) -> FigureRecord:
+    name = "language_shift_intervals"
+    frame = tables.language_shift
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    frame = frame[frame["group"] == "all"]
+    models = sorted(set(frame["model"]))
+    sources = sorted(set(frame["source"]))
+    fig, axes = plt.subplots(
+        len(models),
+        len(sources),
+        figsize=(_FIGURE_WIDTH, 2.0 * len(models) + 0.8),
+        squeeze=False,
+        sharex=True,
+    )
+    for row, model in enumerate(models):
+        for column, source in enumerate(sources):
+            ax = axes[row, column]
+            subset = frame[(frame["model"] == model) & (frame["source"] == source)]
+            for (target_a, target_b), pair_frame in subset.groupby(
+                ["target_a", "target_b"], sort=True
+            ):
+                ordered = pair_frame.sort_values("layer")
+                layers = ordered["layer"].to_numpy(dtype=int)
+                estimate = ordered["estimate"].to_numpy(dtype=np.float64)
+                low = ordered["ci_low"].to_numpy(dtype=np.float64)
+                high = ordered["ci_high"].to_numpy(dtype=np.float64)
+                point_mask = np.isfinite(estimate)
+                interval_mask = (
+                    point_mask & np.isfinite(low) & np.isfinite(high)
+                )
+                label = _language_pair_pretty(str(target_a), str(target_b))
+                point_color = None
+                if point_mask.any():
+                    points = ax.errorbar(
+                        layers[point_mask],
+                        estimate[point_mask],
+                        fmt="o",
+                        markersize=3.0,
+                        linestyle="none",
+                        label=label,
+                    )
+                    point_color = points.lines[0].get_color()
+                    _layer_axis_dynamic(ax, layers[point_mask])
+                if interval_mask.any():
+                    ax.vlines(
+                        layers[interval_mask],
+                        low[interval_mask],
+                        high[interval_mask],
+                        linewidth=1.0,
+                        color=point_color,
+                    )
+            if row == 0:
+                ax.set_title(f"Probe fixo · {_language_name(source)}", fontsize=8)
+            if column == 0:
+                ax.set_ylabel(f"{_model_name(model)}\nJS (bits)", fontsize=7)
+            else:
+                ax.set_ylabel("JS (bits)", fontsize=7)
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Mudança de relevância com intervalos persistidos",
+        description=(
+            "Estimativas pontuais da distância de Jensen–Shannon para o grupo "
+            "agregado, com uma haste por intervalo bootstrap persistido."
+        ),
+        metric="distância JS entre idiomas-alvo",
+        units="bits (logaritmo base 2)",
+        transformation=(
+            "pontos = estimate e hastes = ci_low–ci_high persistidos para cada "
+            "par e camada do grupo all; nenhuma distribuição ou densidade é "
+            "inferida dos intervalos"
+        ),
+    )
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(
+        fig, axes, legend_title="Par de idiomas-alvo"
+    )
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
 def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path):
     name = "diagonal_vs_offdiagonal"
     frame = tables.diagonal_vs_offdiagonal
@@ -4883,6 +4967,69 @@ def _figure_spectral_divergence(plt, tables: ReportTables, figures_dir: Path):
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
+def _figure_spectral_divergence_by_layer(
+    plt, tables: ReportTables, figures_dir: Path
+) -> FigureRecord:
+    name = "spectral_divergence_by_layer"
+    frame = tables.spectral_divergence
+    if frame.empty:
+        raise ValueError(f"{name} figure requested but the comparison table is empty")
+    frame = frame[frame["group"] == "all"]
+    models = sorted(set(frame["model"]))
+    pairs = sorted(
+        {
+            (str(row.language_a), str(row.language_b))
+            for row in frame[["language_a", "language_b"]]
+            .drop_duplicates()
+            .itertuples(index=False)
+        }
+    )
+    fig, axes = plt.subplots(
+        len(models),
+        len(pairs),
+        figsize=(_FIGURE_WIDTH, 2.0 * len(models) + 0.6),
+        squeeze=False,
+        sharex=True,
+    )
+    for row, model in enumerate(models):
+        model_frame = frame[frame["model"] == model]
+        for column, (language_a, language_b) in enumerate(pairs):
+            ax = axes[row, column]
+            pair_frame = model_frame[
+                (model_frame["language_a"] == language_a)
+                & (model_frame["language_b"] == language_b)
+            ]
+            _plot_persisted_bootstrap_ci(ax, pair_frame)
+            if row == 0:
+                ax.set_title(
+                    f"{_language_pair_pretty(language_a, language_b)} (diag.)",
+                    fontsize=8,
+                )
+            if column == 0:
+                ax.set_ylabel(f"{_model_name(model)}\nWasserstein (Hz)", fontsize=7)
+            else:
+                ax.set_ylabel("Wasserstein (Hz)", fontsize=7)
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Divergência espectral por camada",
+        description=(
+            "Distância de Wasserstein entre espectros de relevância dos sistemas "
+            "diagonais, em pequenos múltiplos por modelo e par de idiomas."
+        ),
+        metric="Wasserstein entre distribuições espectrais",
+        units="Hz (suporte nos centros de banda registrados)",
+        transformation=(
+            "camada no eixo x e estimate em Hz no eixo y para o grupo all; "
+            "faixa = ci_low–ci_high bootstrap persistido da mesma linha"
+        ),
+    )
+    fig.suptitle(record.title, fontsize=9, y=0.98)
+    _finalize_comparison_line_figure(fig, axes, bottom=0.24)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
+
+
 _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
@@ -4897,13 +5044,13 @@ _FIGURE_BUILDERS = {
     "encoder_agreement_heatmaps": _figure_encoder_agreement_heatmaps,
     "encoder_agreement_by_layer": _figure_encoder_agreement_by_layer,
     "language_shift": _figure_language_shift,
+    "language_shift_intervals": _figure_language_shift_intervals,
     "diagonal_vs_offdiagonal": _figure_diagonal_vs_offdiagonal,
     "spectral_divergence": _figure_spectral_divergence,
+    "spectral_divergence_by_layer": _figure_spectral_divergence_by_layer,
 }
 _DEFERRED_FIGURE_FAMILIES = frozenset(
     {
-        "language_shift_intervals",
-        "spectral_divergence_by_layer",
         "layer_faithfulness_intervals",
     }
 )
@@ -5269,6 +5416,25 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "Acordo alto não torna os modelos intercambiáveis e não indica qual "
             "modelo está correto."
         )
+    elif record.name == "language_shift_intervals":
+        body = (
+            "Pergunta: quanto muda a relevância ao trocar o conjunto-alvo com "
+            "modelo, idioma de treino e probe fixos? Pontos codificam a distância "
+            "Jensen--Shannon por camada e hastes reproduzem exclusivamente "
+            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
+            "agregado. Limite principal: corpus, áudio e idioma mudam juntos, "
+            "portanto a figura não isola um efeito causal do idioma."
+        )
+    elif record.name == "spectral_divergence_by_layer":
+        body = (
+            "Pergunta: quanto se desloca em frequência a massa de relevância "
+            "entre sistemas diagonais de idiomas distintos? A camada ocupa o eixo "
+            "horizontal e a distância de Wasserstein em Hz o vertical; a curva e "
+            r"a faixa reproduzem \texttt{estimate} e "
+            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
+            "agregado. Limite principal: distância maior não significa resultado "
+            "melhor nem pior e não identifica a causa do deslocamento."
+        )
     elif record.name == "dft_relevance_heatmap":
         body = (
             "Média sobre o conjunto fixo de amostras da relevância AttnLRP absoluta "
@@ -5383,7 +5549,7 @@ def _comparison_result_paragraphs(tables: ReportTables) -> list[str]:
             f"mediana da distância Jensen--Shannon é {_num(shift)} bits; valores "
             "maiores indicam perfis médios menos parecidos, sem isolar o idioma das "
             "demais diferenças entre os corpora. Essa é uma mudança conjunta de "
-            r"corpus/idioma (Figura~\ref{fig:language_shift}; "
+            r"corpus/idioma (Figura~\ref{fig:language_shift_intervals}; "
             r"Tabela~\ref{tab:language-shift-summary})."
         )
 
@@ -5416,7 +5582,7 @@ def _comparison_result_paragraphs(tables: ReportTables) -> list[str]:
             "corpora/idiomas. A mediana da distância de Wasserstein é "
             f"{_num(spectral)} Hz; ela resume o deslocamento da massa de relevância "
             "no eixo de frequência, sem medir qualidade nem identificar uma causa "
-            r"(Figura~\ref{fig:spectral_divergence}; "
+            r"(Figura~\ref{fig:spectral_divergence_by_layer}; "
             r"Tabela~\ref{tab:spectral-divergence-summary})."
         )
 
@@ -5988,12 +6154,17 @@ def _comparisons_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
     has_encoder = "encoder_agreement_heatmaps" in figures
-    names = [
-        name
-        for name in COMPARISON_FAMILIES
-        if name != "encoder_agreement" and name in figures
+    main_figures = (
+        ("language_shift", "language_shift_intervals"),
+        ("diagonal_vs_offdiagonal", "diagonal_vs_offdiagonal"),
+        ("spectral_divergence", "spectral_divergence_by_layer"),
+    )
+    available = [
+        (table_name, figure_name)
+        for table_name, figure_name in main_figures
+        if figure_name in figures
     ]
-    if not has_encoder and not names:
+    if not has_encoder and not available:
         return []
     lines = [
         rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
@@ -6001,10 +6172,11 @@ def _comparisons_section(
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
         "A figura principal de acordo entre encoders mostra mapas de calor com a "
         "mediana entre camadas; o detalhamento técnico mostra a mediana por camada "
-        "e a faixa interquartil entre células. As outras três figuras reproduzem as "
-        r"estimativas e os intervalos bootstrap persistidos (ci\_low--ci\_high) nas "
-        "figuras; os resumos tabulares abaixo agregam medianas e faixas entre "
-        "linhas, enquanto os CSV mantêm cada linha com IC completo.",
+        "e a faixa interquartil entre células. As outras três figuras principais "
+        r"reproduzem estimativas e intervalos bootstrap persistidos "
+        r"(ci\_low--ci\_high); os resumos tabulares abaixo agregam medianas e "
+        "faixas entre linhas, enquanto os CSV e os perfis técnicos mantêm o "
+        "detalhe por grupo.",
         "",
         "A unidade de reamostragem é o áudio. Quando a estatística é estimável, "
         "o procedimento usa 2.000 reamostragens bootstrap estratificadas por "
@@ -6028,9 +6200,9 @@ def _comparisons_section(
     if has_encoder:
         lines += _figure_block(figures["encoder_agreement_heatmaps"], tables)
         lines += [r"\input{tables/encoder_agreement.tex}", ""]
-    for name in names:
-        lines += _figure_block(figures[name], tables)
-        lines += [rf"\input{{tables/{name}.tex}}", ""]
+    for table_name, figure_name in available:
+        lines += _figure_block(figures[figure_name], tables)
+        lines += [rf"\input{{tables/{table_name}.tex}}", ""]
     if "encoder_agreement_by_layer" in figures:
         lines += [
             r"\subsection{Detalhe técnico do acordo por camada}",
@@ -6040,6 +6212,21 @@ def _comparisons_section(
             "",
             *_figure_block(figures["encoder_agreement_by_layer"], tables),
         ]
+    technical_profiles = [
+        name
+        for name in ("language_shift", "spectral_divergence")
+        if name in figures
+    ]
+    if technical_profiles:
+        lines += [
+            r"\subsection{Detalhe técnico por grupo de classe}",
+            "Os perfis a seguir preservam as séries agregada, real e sintética. "
+            "Eles complementam as figuras principais sem transformar camadas ou "
+            "limites de confiança em distribuições amostrais.",
+            "",
+        ]
+        for name in technical_profiles:
+            lines += _figure_block(figures[name], tables)
     return lines
 
 
@@ -6913,9 +7100,9 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
         )
         written.append("layer_faithfulness_summary.csv")
     for name in COMPARISON_FAMILIES:
-        if name not in tables.planned_figures:
-            continue
         frame = getattr(tables, name)
+        if name in tables.omitted_comparisons or frame.empty:
+            continue
         frame.to_csv(tables_dir / f"{name}.csv", index=False, lineterminator="\n")
         written.append(f"{name}.csv")
         builder = _COMPARISON_TEX_BUILDERS[name]
