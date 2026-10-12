@@ -4257,6 +4257,8 @@ def test_comparison_narrative_explains_method_and_links_each_result(
     for family in _COMPARISON_FAMILIES:
         assert rf"\label{{fig:{family}}}" in section
         assert rf"\input{{tables/{family}.tex}}" in section
+    assert r"ci\_low--ci\_high" in section
+    assert "ci_low--ci_high" not in section
     assert "mudança conjunta de corpus/idioma" in section
     assert "efeito causal do idioma" in section
 
@@ -4749,6 +4751,10 @@ def test_comparison_tex_summaries_use_readable_model_and_metric_labels(
     full_comparison_tables, tmp_path
 ):
     write_report_tables(full_comparison_tables, tmp_path / "tables")
+    comparison_tex = {
+        family: (tmp_path / "tables" / f"{family}.tex").read_text(encoding="utf-8")
+        for family in _COMPARISON_FAMILIES
+    }
     encoder_tex = (tmp_path / "tables" / "encoder_agreement.tex").read_text(
         encoding="utf-8"
     )
@@ -4760,6 +4766,10 @@ def test_comparison_tex_summaries_use_readable_model_and_metric_labels(
     assert "delta_roc_auc" not in diagonal_tex
     assert "HuBERT" in encoder_tex
     assert "ROC-AUC" in diagonal_tex or "roc" in diagonal_tex.lower()
+    assert all(
+        "ci_low" not in tex and "ci_high" not in tex
+        for tex in comparison_tex.values()
+    )
 
 
 @pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)

@@ -5583,7 +5583,7 @@ def _comparisons_section(
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
         "A figura de acordo entre encoders mostra a mediana por camada e a faixa "
         "interquartil entre células. As outras três figuras reproduzem as "
-        "estimativas e os intervalos bootstrap persistidos (ci_low--ci_high) nas "
+        r"estimativas e os intervalos bootstrap persistidos (ci\_low--ci\_high) nas "
         "figuras; os resumos tabulares abaixo agregam medianas e faixas entre "
         "linhas, enquanto os CSV mantêm cada linha com IC completo.",
         "",
@@ -6322,7 +6322,7 @@ def _encoder_agreement_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo do acordo entre encoders: mediana e extensão agregadas por par "
-        "de modelos e métrica (ci_low/ci_high por linha apenas no CSV). Detalhe "
+        "de modelos e métrica (limites por linha apenas no CSV). Detalhe "
         "completo em \\texttt{encoder\\_agreement.csv}.",
         "tab:encoder-agreement-summary",
         ["Par", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
@@ -6355,7 +6355,7 @@ def _language_shift_tex(tables: ReportTables) -> str:
     return _comparison_compact_table(
         "Resumo compacto da mudança de relevância entre idiomas-alvo (JS): mediana "
         "e faixa agregadas sobre linhas da tabela por modelo e grupo (não repete "
-        "ci_low/ci_high linha a linha). Detalhe completo em "
+        "os limites linha a linha). Detalhe completo em "
         "\\texttt{language\\_shift.csv}.",
         "tab:language-shift-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
@@ -6388,7 +6388,7 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
     return _comparison_compact_table(
         "Resumo compacto diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e "
         "$\\Delta$ MCC) por modelo e métrica: medianas e faixas agregadas, sem "
-        "repetir ci_low/ci_high linha a linha. Detalhe completo em "
+        "repetir os limites linha a linha. Detalhe completo em "
         "\\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
         "tab:diagonal-off-summary",
         ["Modelo", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
@@ -6420,7 +6420,7 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo compacto da divergência espectral (Wasserstein em Hz) por modelo "
-        "e grupo: medianas e faixas agregadas (ci_low/ci_high completos no CSV). "
+        "e grupo: medianas e faixas agregadas (limites completos no CSV). "
         "Detalhe completo em \\texttt{spectral\\_divergence.csv}.",
         "tab:spectral-divergence-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana (Hz)", "Faixa (Hz)", "Status (contagens)"],
