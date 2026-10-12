@@ -2583,6 +2583,104 @@ def test_official_docs_name_the_pretrained_only_wav2vec2_checkpoint(relative):
     )
 
 
+_LAYERWISE_REPORT_DOC_CONTRACT = re.compile(
+    r"<!--\s*layerwise-report-doc-contract\s*\n"
+    r"main-result-figures=(?P<figures>[^\n]+)\n"
+    r"stable-comparison-csv=(?P<csvs>[^\n]+)\n"
+    r"-->",
+    re.MULTILINE,
+)
+_STABLE_COMPARISON_CSV_BASENAMES = (
+    "encoder_agreement.csv",
+    "language_shift.csv",
+    "diagonal_vs_offdiagonal.csv",
+    "spectral_divergence.csv",
+    "transfer_selected_layers.csv",
+    "xai_performance_association.csv",
+)
+_LAYERWISE_REPORT_VM_GENERATE = (
+    "PYTHONPATH=scripts python -m brspeech_xai.layerwise_report \\\n"
+    "  --result /mnt/results/hubert_base__eng__layerwise_xai__full \\\n"
+    "  --output /mnt/results/layerwise_xai_report"
+)
+_LAYERWISE_REPORT_WINDOWS_BUILD = (
+    "Set-Location escrita\\relatorio-layerwise-xai\n.\\build_local.ps1"
+)
+
+
+def _layerwise_report_doc_section(relative: str, text: str) -> str:
+    if relative == "scripts/README.md":
+        marker = "## Relatório layer-wise atualizável"
+    else:
+        marker = "The didactic report keeps a question-driven main body"
+    start = text.index(marker)
+    return text[start:]
+
+
+def _parse_layerwise_report_doc_contract(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    match = _LAYERWISE_REPORT_DOC_CONTRACT.search(text)
+    assert match, "missing layerwise-report-doc-contract marker"
+    figures = tuple(name.strip() for name in match.group("figures").split(",") if name.strip())
+    csvs = tuple(name.strip() for name in match.group("csvs").split(",") if name.strip())
+    return figures, csvs
+
+
+def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
+    section = _layerwise_report_doc_section(relative, text)
+
+    assert "20 a 25 páginas" in section
+    assert "apêndices no mesmo PDF" in section
+    assert "sete figuras principais" in section
+    assert "não persistidos" in section and "draws bootstrap" in section
+
+    figures, csv_basenames = _parse_layerwise_report_doc_contract(text)
+    assert figures == report_module.MAIN_RESULT_FIGURES
+    assert csv_basenames == _STABLE_COMPARISON_CSV_BASENAMES
+    assert (
+        "permanecem estáveis" in section
+        or "remain stable" in section.lower()
+        or "schemas and filenames stay unchanged" in section.lower()
+    )
+
+    assert "transfer_selected_layers.csv" in section
+    assert "delta_roc_auc" in section and "delta_mcc" in section
+    assert "maximum ROC-AUC" in section or "maior ROC-AUC" in section
+    section_lower = section.lower()
+    assert "same layer" in section_lower or "mesma camada" in section_lower
+    assert "reutiliz" in section.lower() or "reuse" in section.lower()
+
+    assert _LAYERWISE_REPORT_VM_GENERATE in section
+    assert _LAYERWISE_REPORT_WINDOWS_BUILD in section
+    assert "nonstopmode" in section.lower()
+    assert "report.pdf" in section
+
+    assert "95" in section and (
+        "percentil" in section.lower() or "percentile" in section.lower()
+    )
+    assert (
+        "intervalo" in section.lower()
+        or "interval" in section.lower()
+        or "limites" in section.lower()
+    )
+    assert (
+        "estimativa" in section_lower
+        or "estimate" in section_lower
+        or "estimation" in section_lower
+        or "limits" in section_lower
+        or "limites" in section_lower
+    )
+    assert "reconstru" in section_lower or "reconstruction" in section_lower
+    assert "draws bootstrap are persisted" not in section_lower
+    assert "draws bootstrap persistidos" not in section_lower
+    assert "persistem os draws bootstrap" not in section_lower
+
+    assert "DOI" in section and ("editora" in section or "publisher" in section.lower())
+    assert "fonte primária" in section or "primary" in section.lower()
+    assert "Consensus" in section
+    assert "não reproduza" in section_lower or "do not copy" in section_lower
+    assert "aviso de uso" in section_lower or "usage notice" in section_lower
+
+
 def test_docs_describe_question_driven_body_and_same_pdf_appendices():
     texts = (_read_text(_REPO / "README.md"), _read_text(_SCRIPTS / "README.md"))
     for text in texts:
@@ -2590,6 +2688,11 @@ def test_docs_describe_question_driven_body_and_same_pdf_appendices():
         assert "apêndices no mesmo PDF" in text
         assert "sete figuras principais" in text
         assert "não persistidos" in text and "draws bootstrap" in text
+
+
+@pytest.mark.parametrize("relative", ["README.md", "scripts/README.md"])
+def test_docs_layerwise_report_semantic_contract(relative):
+    _assert_layerwise_report_doc_contract(relative, _read_text(_REPO / relative))
 
 
 # ---------------------------------------------------------------------------

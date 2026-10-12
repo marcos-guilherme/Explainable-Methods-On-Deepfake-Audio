@@ -279,6 +279,11 @@ trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
 conjunto LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
+<!-- layerwise-report-doc-contract
+main-result-figures=transfer_performance_heatmaps,transfer_delta_roc_auc,transfer_delta_mcc,encoder_agreement_heatmaps,language_shift_intervals,spectral_divergence_by_layer,layer_faithfulness_intervals
+stable-comparison-csv=encoder_agreement.csv,language_shift.csv,diagonal_vs_offdiagonal.csv,spectral_divergence.csv,transfer_selected_layers.csv,xai_performance_association.csv
+-->
+
 O **corpo principal** é orientado por perguntas e deve ocupar cerca de **20 a 25 páginas**
 no conjunto trilíngue completo. **Sete figuras principais** conduzem Resultados
 (uma pergunta por figura); perfis completos por célula e camada, matrizes
@@ -331,8 +336,8 @@ mudança conjunta de corpus/idioma; não atribuem efeito causal ao idioma.
 
 **Referências.** Candidatas sugeridas por busca ou ferramentas de IA devem ser
 conferidas na **fonte primária** (metadados de DOI/editora: título, ano,
-volume, páginas e pertinência) antes de entrarem na bibliografia. **Não**
-reproduza texto gerado pelo Consensus nem seu aviso de uso.
+volume, páginas e pertinência) antes de entrarem na bibliografia. **Não reproduza**
+texto gerado pelo Consensus nem seu aviso de uso.
 
 Na VM, informe cada diretório de resultado explicitamente (a opção `--result`
 pode ser repetida; nenhum diretório é varrido por padrão e identidades

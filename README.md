@@ -502,6 +502,11 @@ English-only case study that is already complete; it is separate from the future
 trilingual executions above, whose results will live in the `eng-por-zho`
 directories.
 
+<!-- layerwise-report-doc-contract
+main-result-figures=transfer_performance_heatmaps,transfer_delta_roc_auc,transfer_delta_mcc,encoder_agreement_heatmaps,language_shift_intervals,spectral_divergence_by_layer,layer_faithfulness_intervals
+stable-comparison-csv=encoder_agreement.csv,language_shift.csv,diagonal_vs_offdiagonal.csv,spectral_divergence.csv,transfer_selected_layers.csv,xai_performance_association.csv
+-->
+
 The didactic report keeps a question-driven main body (about **20 a 25 páginas**
 for the full trilingual bundle) and **sete figuras principais** in a
 fixed order: `transfer_performance_heatmaps`, `transfer_delta_roc_auc`,
@@ -512,7 +517,11 @@ and to the bundle CSVs so nothing published disappears from the
 PDF or tables. Seven appendix sections mirror protocol/provenance, full
 performance, emergence/reorganization, spectral relevance and XAI↔performance
 association, complete bootstrap comparison tables, detailed faithfulness, and
-STDFT/conservation examples. Existing CSV schemas and filenames stay unchanged.
+STDFT/conservation examples. Comparison CSV basenames (`encoder_agreement.csv`,
+`language_shift.csv`, `diagonal_vs_offdiagonal.csv`, `spectral_divergence.csv`,
+`transfer_selected_layers.csv`, `xai_performance_association.csv`) and their
+column schemas remain stable; the generator only adds synthesis tables and
+compact LaTeX.
 
 Generate the portable Portuguese LaTeX bundle on the VM from explicit result
 directories (repeat `--result` to add more; duplicate model/language/scope
@@ -540,12 +549,13 @@ validates their immutable generations, writes solely inside `--output`, and
 never loads an encoder or imports `torch`/`transformers`. Output is
 deterministic, and `report_manifest.json` records the consumed artifacts and
 generated files with relative paths and SHA-256 hashes. Each transfer heatmap
-cell selects the layer with maximum ROC-AUC and reports MCC from that same
-layer; `delta_roc_auc` and `delta_mcc` effect plots reuse that selected layer
+cell selects the layer with maximum ROC-AUC and reports MCC from that same layer;
+`delta_roc_auc` and `delta_mcc` effect plots reuse that selected layer
 (`transfer_selected_layers.csv`). Bootstrap comparisons use 2,000 stratified
-resamples with 95% percentile intervals; **draws bootstrap não persistidos**, so
-main-body figures show estimation dots/intervals rather than
-violin or density plots that would require stored draws. Single-model or
+resamples with 95% percentile intervals; point estimates and intervals are
+persisted in the bundle, but **draws bootstrap não persistidos**, so main-body
+figures show estimation dots/intervals rather than violin or density
+plots that would require stored draws or honest bootstrap reconstruction. Single-model or
 single-language inputs remain scoped as case studies; off-diagonal cells, when
 present, are described as transfer under corpus/language shift without causal
 language claims. Suggested bibliography entries from search or AI tools must be
