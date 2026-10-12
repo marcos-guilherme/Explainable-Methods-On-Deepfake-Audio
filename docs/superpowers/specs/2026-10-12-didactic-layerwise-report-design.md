@@ -6,7 +6,7 @@ Reorganizar o relatório trilíngue de XAI para que um leitor técnico não
 especialista em XAI compreenda primeiro os resultados principais, sem perder a
 rastreabilidade das 27 células, 12 camadas, três encoders e três idiomas.
 
-O corpo principal deve ocupar aproximadamente 20–25 páginas. Todos os resultados
+O corpo principal deve ocupar aproximadamente 16–20 páginas. Todos os resultados
 completos permanecem no mesmo PDF em apêndices e nos CSVs do bundle.
 
 ## Problema observado
@@ -183,7 +183,8 @@ serão redistribuídos.
 
 ## Critérios de aceitação
 
-1. Corpo principal entre 20 e 25 páginas no conjunto trilíngue completo.
+1. Corpo principal entre 16 e 20 páginas no conjunto trilíngue completo
+   (decisão do usuário: corpo conciso, sem conteúdo adicionado só para ganhar páginas).
 2. As sete figuras principais existem e obedecem aos contratos acima.
 3. Nenhuma célula, camada ou métrica atualmente publicada desaparece do PDF,
    apêndices ou CSVs.
