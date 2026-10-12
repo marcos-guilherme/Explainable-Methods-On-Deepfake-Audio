@@ -1724,6 +1724,7 @@ def test_multiple_models_add_encoder_agreement_without_language_figures(tmp_path
     assert tables.planned_figures == _EIGHT_FAMILIES + (
         "encoder_agreement",
         "encoder_agreement_heatmaps",
+        "encoder_agreement_by_layer",
     )
     assert set(tables.performance["model"]) == {"hubert_base", "wavlm_base"}
 
