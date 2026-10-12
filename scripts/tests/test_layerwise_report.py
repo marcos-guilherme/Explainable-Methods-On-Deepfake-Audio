@@ -3836,6 +3836,20 @@ def test_generation_writes_into_a_sibling_staging_directory(
     assert _siblings(parent) == ["report"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX permission bits")
+def test_published_bundle_directory_follows_the_process_umask(eng_root, tmp_path):
+    parent = tmp_path / "work"
+    parent.mkdir()
+    output = parent / "report"
+    previous = os.umask(0o022)
+    try:
+        generate_report_bundle([eng_root], output)
+    finally:
+        os.umask(previous)
+
+    assert output.stat().st_mode & 0o777 == 0o755
+
+
 def test_failure_while_swapping_restores_the_previous_bundle(
     eng_root, tmp_path, monkeypatch
 ):

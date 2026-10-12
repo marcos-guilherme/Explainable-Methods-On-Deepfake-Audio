@@ -8381,6 +8381,10 @@ def generate_report_bundle(
         tempfile.mkdtemp(prefix=f".{output.name}.new-", dir=output.parent)
     )
     try:
+        # mkdtemp is always 0700; publish with the mode a plain mkdir would get.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(staging, 0o777 & ~umask)
         _build_bundle(staging, tables, loaded)
         _verify_staged_bundle(staging)
         _publish_bundle(staging, output)
