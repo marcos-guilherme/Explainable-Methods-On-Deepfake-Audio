@@ -3329,6 +3329,12 @@ def _record(
 
 _LAYER_AXIS_LABEL = "Camada do encoder (índice do bloco Transformer)"
 _CLASS_NAMES_PT = {0: "real", 1: "sintético"}
+# Canonical binary-class order mirrors data.LABEL_NAMES without importing the
+# dataset module (and its optional I/O dependencies) into report generation.
+_TRUE_CLASS_ORDER = ("bonafide", "spoof")
+_TRUE_CLASS_NAMES_PT = MappingProxyType(
+    dict(zip(_TRUE_CLASS_ORDER, (_CLASS_NAMES_PT[0], _CLASS_NAMES_PT[1])))
+)
 _MIN_BAND_TICK_SPACING_IN = 0.34
 _HEATMAP_AXIS_SHARE = 0.55
 _MULTI_PANEL_XLABEL_Y = 0.115
@@ -5155,8 +5161,39 @@ def _figure_layer_faithfulness_intervals(
             f"{name} requires diagonal layer {FINAL_LAYER}, 8 samples per class, "
             "and both registered controls"
         )
-    models = tuple(model for model in tables.models if model in set(frame["model"]))
-    classes = tuple(sorted({str(value) for value in frame["true_class"]}))
+    models = tables.models
+    classes = tuple(
+        true_class
+        for true_class in _TRUE_CLASS_ORDER
+        if true_class in set(frame["true_class"])
+    )
+    if classes != _TRUE_CLASS_ORDER:
+        raise ValueError(
+            f"{name} requires canonical true classes "
+            f"{', '.join(_TRUE_CLASS_ORDER)}"
+        )
+    ks = tuple(sorted({int(value) for value in frame["k"]}))
+    incomplete = []
+    required_controls = set(comparisons)
+    for model in models:
+        for true_class in classes:
+            for k_value in ks:
+                group = frame[
+                    (frame["model"] == model)
+                    & (frame["true_class"] == true_class)
+                    & (frame["k"] == k_value)
+                ]
+                observed = set(group["comparison"])
+                if observed != required_controls:
+                    missing = ", ".join(sorted(required_controls - observed))
+                    incomplete.append(
+                        f"model={model}, true_class={true_class}, k={k_value}: "
+                        f"{missing or 'unexpected controls'}"
+                    )
+    if incomplete:
+        raise ValueError(
+            f"{name} missing required controls for " + "; ".join(incomplete)
+        )
     fig, axes = plt.subplots(
         len(classes),
         len(models),
@@ -5183,31 +5220,36 @@ def _figure_layer_faithfulness_intervals(
                 estimate = ordered["mean_difference"].to_numpy(dtype=np.float64)
                 low = ordered["ci_low"].to_numpy(dtype=np.float64)
                 high = ordered["ci_high"].to_numpy(dtype=np.float64)
-                k_values = ordered["k"].to_numpy(dtype=np.float64)
+                point_k = ordered["k"].to_numpy(dtype=np.float64)
                 mask = np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
                 if not mask.any():
                     continue
                 marker, color = styles[comparison]
-                y = k_values[mask] + offsets[comparison]
-                ax.errorbar(
+                y = point_k[mask] + offsets[comparison]
+                ax.hlines(
+                    y,
+                    low[mask],
+                    high[mask],
+                    color=color,
+                    linewidth=1.0,
+                )
+                ax.plot(
                     estimate[mask],
                     y,
-                    xerr=np.vstack(
-                        (estimate[mask] - low[mask], high[mask] - estimate[mask])
-                    ),
-                    fmt=marker,
+                    marker=marker,
                     color=color,
                     linestyle="none",
-                    capsize=2,
-                    markersize=4,
+                    markersize=4.0,
                     label=_FAITHFULNESS_COMPARISON_PT[comparison],
                 )
             ax.axvline(0.0, color="0.45", linewidth=0.8)
             if row == 0:
                 ax.set_title(_model_name(model), fontsize=8)
             if column == 0:
-                ax.set_ylabel(f"{true_class}\n$k$", fontsize=7)
-            ax.set_yticks(sorted({int(value) for value in frame["k"]}))
+                ax.set_ylabel(
+                    f"{_TRUE_CLASS_NAMES_PT[true_class]}\n$k$", fontsize=7
+                )
+            ax.set_yticks(ks)
             ax.set_xlabel("Diferença média pareada", fontsize=7)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
@@ -5232,13 +5274,17 @@ def _figure_layer_faithfulness_intervals(
         heading="Fidelidade por intervenção",
         description=(
             f"Camada {FINAL_LAYER}, escopo diagonal e oito amostras por classe; "
-            "diferenças pareadas top-minus-random e top-minus-bottom."
+            "diferenças pareadas top-minus-random e top-minus-bottom. Limite "
+            "principal: a intervenção STFT controlada não implica causalidade "
+            "no mundo real."
         ),
         metric="diferença média de comprehensividade",
         units="adimensional",
         transformation=(
-            "k no eixo vertical, mean_difference no horizontal e hastes iguais "
-            "a ci_low–ci_high persistidos; sem valores-p"
+            "colunas = modelos; linhas = classes verdadeiras (real, sintético); "
+            "k no eixo vertical e mean_difference no eixo horizontal; segmentos "
+            "horizontais = ci_low–ci_high persistidos e marcadores distintos "
+            "identificam os dois controles; sem valores-p"
         ),
         cells=cells,
     )
@@ -5653,11 +5699,13 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
         body = (
             "Pergunta: as faixas mais relevantes sustentam mais a decisão do que "
             "os controles? Células diagonais na camada 12, com oito amostras por "
-            "classe. O eixo vertical mostra $k$; pontos e hastes reproduzem "
-            r"\texttt{mean\_difference} e \texttt{ci\_low}--\texttt{ci\_high} "
-            "persistidos para top-minus-random e top-minus-bottom. Limite "
-            "principal: a intervenção STFT controlada não implica causalidade "
-            "no mundo real."
+            "classe. As colunas correspondem aos modelos e as linhas às classes "
+            "verdadeiras real e sintético. O eixo vertical mostra $k$ e o eixo "
+            r"horizontal mostra \texttt{mean\_difference}; os segmentos reproduzem "
+            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos, enquanto cores e "
+            "marcadores distinguem top-minus-random de top-minus-bottom. Limite "
+            "principal: a intervenção STFT controlada não implica causalidade no "
+            "mundo real."
         )
     elif record.name == "dft_relevance_heatmap":
         body = (

@@ -4147,8 +4147,100 @@ def test_faithfulness_figure_exposes_scope_zero_line_and_both_controls(
     assert "camada 12" in record.caption.lower()
     assert "diagonal" in record.caption.lower()
     assert "oito amostras por classe" in record.caption.lower()
+    assert "colunas" in record.caption.lower() and "modelos" in record.caption.lower()
+    assert "linhas" in record.caption.lower() and "classes" in record.caption.lower()
+    assert "eixo vertical" in record.caption.lower() and "k" in record.caption.lower()
+    assert "eixo horizontal" in record.caption.lower()
+    assert "marcadores" in record.caption.lower()
     assert "wilcoxon" not in text.lower()
     assert "wilcoxon" not in record.caption.lower()
+
+
+def test_faithfulness_figure_draws_exact_ci_segments_when_estimate_is_outside(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    frame = full_comparison_tables.layer_faithfulness.copy()
+    selected = (
+        (frame["model"] == full_comparison_tables.models[0])
+        & (frame["true_class"] == "bonafide")
+        & (frame["comparison"] == "top_minus_random")
+    )
+    row_index = frame.index[selected][0]
+    frame.loc[row_index, ["mean_difference", "ci_low", "ci_high"]] = [0.9, 0.1, 0.2]
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        layer_faithfulness=frame,
+        planned_figures=("layer_faithfulness_intervals",),
+    )
+    segments: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    points: list[tuple[np.ndarray, np.ndarray]] = []
+    original_hlines = plt.Axes.hlines
+    original_plot = plt.Axes.plot
+
+    def spy_hlines(self, y, xmin, xmax, *args, **kwargs):
+        segments.append(
+            (
+                np.atleast_1d(y).astype(float),
+                np.atleast_1d(xmin).astype(float),
+                np.atleast_1d(xmax).astype(float),
+            )
+        )
+        return original_hlines(self, y, xmin, xmax, *args, **kwargs)
+
+    def spy_plot(self, x, y, *args, **kwargs):
+        points.append(
+            (np.atleast_1d(x).astype(float), np.atleast_1d(y).astype(float))
+        )
+        return original_plot(self, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "hlines", spy_hlines)
+    monkeypatch.setattr(plt.Axes, "plot", spy_plot)
+    render_report_figures(tables, tmp_path / "outside_ci")
+
+    assert any(
+        np.isclose(low, 0.1).any() and np.isclose(high, 0.2).any()
+        for _y, low, high in segments
+    )
+    assert any(np.isclose(x, 0.9).any() for x, _y in points)
+
+
+def test_faithfulness_figure_uses_canonical_portuguese_true_class_rows(
+    full_comparison_tables, tmp_path
+):
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        planned_figures=("layer_faithfulness_intervals",),
+    )
+    _, captured = _capture_figures(tables, tmp_path / "class_order")
+    figure = captured["layer_faithfulness_intervals"]
+    axes = figure["axes"]
+    n_models = len(full_comparison_tables.models)
+    assert axes[0]["ylabel"].startswith("real\n")
+    assert axes[n_models]["ylabel"].startswith("sintético\n")
+    visible = "\n".join(figure["texts"]).lower()
+    assert "bonafide" not in visible
+    assert "spoof" not in visible
+
+
+def test_faithfulness_figure_rejects_missing_control_in_one_group(
+    full_comparison_tables, tmp_path
+):
+    frame = full_comparison_tables.layer_faithfulness
+    missing = (
+        (frame["model"] == full_comparison_tables.models[0])
+        & (frame["true_class"] == "bonafide")
+        & (frame["k"] == 1)
+        & (frame["comparison"] == "top_minus_bottom")
+    )
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        layer_faithfulness=frame.loc[~missing].copy(),
+        planned_figures=("layer_faithfulness_intervals",),
+    )
+    with pytest.raises(ValueError, match="missing required controls.*hubert_base"):
+        render_report_figures(tables, tmp_path / "missing_control")
 
 
 def test_results_synthesis_records_verified_transfer_counts(

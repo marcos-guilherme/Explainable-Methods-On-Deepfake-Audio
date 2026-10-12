@@ -107,3 +107,76 @@ Result: exit 0; no whitespace errors.
 No known Task 5 blocker. Verification was intentionally limited to the focused
 faithfulness, synthesis, table, manifest, and report-reference tests requested
 for this task; the complete report test module was not run.
+
+## Review-finding corrections
+
+Implemented all Task 5 review findings:
+
+- Replaced asymmetric `xerr` rendering with exact horizontal segments from
+  `ci_low` to `ci_high`, then overlaid the persisted estimate as a separate
+  point. This remains valid when the estimate lies outside its persisted CI.
+- Added the explicit canonical class order `bonafide`, `spoof`, mirroring the
+  project's binary label order, while rendering the visible Portuguese labels
+  `real`, `sintético`.
+- Added fail-closed validation that both required controls exist for every
+  expected model × true-class × `k` group.
+- Completed both figure-record and report captions with the row/column layout,
+  both axes, control encoding, diagonal/final-layer/eight-per-class scope, and
+  intervention limitation.
+
+### Review RED evidence
+
+Command:
+
+```bash
+PYTHONPATH=scripts .venv-report/bin/python -m pytest \
+  scripts/tests/test_layerwise_report.py -k \
+  "faithfulness_figure_draws_exact or canonical_portuguese_true_class or rejects_missing_control or faithfulness_figure_exposes_scope" -v
+```
+
+Result: exit 1; 4 failed, 333 deselected in 34.29s.
+
+- The caption lacked explicit model-column and true-class-row encoding.
+- Matplotlib rejected a negative `xerr` when an estimate lay outside the
+  persisted interval.
+- Visible row labels were raw lexical `bonafide`/`spoof`.
+- Removing one group's bottom control did not raise.
+
+### Review GREEN evidence
+
+Focused regression command:
+
+```bash
+PYTHONPATH=scripts .venv-report/bin/python -m pytest \
+  scripts/tests/test_layerwise_report.py -k \
+  "faithfulness_figure_draws_exact or canonical_portuguese_true_class or rejects_missing_control or faithfulness_figure_exposes_scope" -v
+```
+
+Result: exit 0; 4 passed, 333 deselected in 31.19s.
+
+Combined Task 5 command:
+
+```bash
+PYTHONPATH=scripts .venv-report/bin/python -m pytest \
+  scripts/tests/test_layerwise_report.py -k \
+  "faithfulness or results_synthesis or write_report_tables or full_comparison_bundle_manifest or report_references_redesigned_main_figures or render_emits_comparison_and_transfer_effect_artifacts" -q
+```
+
+Final result: exit 0; 17 passed, 320 deselected in 112.18s.
+
+### Review self-review
+
+- Segment endpoints are passed directly to `Axes.hlines`; no subtraction from
+  the estimate is used.
+- Point positions are passed independently to `Axes.plot`.
+- Required-control validation runs before figure creation and reports the
+  incomplete model, true class, and `k`.
+- Canonical class labels are independent of lexical sorting and raw class names
+  no longer appear as visible axis labels.
+- No generated bundle file was modified.
+
+### Review concerns
+
+No known remaining Task 5 review finding. As requested, verification remains
+focused on faithfulness, synthesis, table, manifest, and report-reference
+coverage rather than the entire report test module.
