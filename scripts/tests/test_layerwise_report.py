@@ -3082,7 +3082,18 @@ def _capture_figures(tables, directory):
                     "columns": ax.images[0].get_array().shape[1],
                 }
             )
-        captured[name] = {"texts": texts, "heatmaps": heatmaps}
+        captured[name] = {
+            "texts": texts,
+            "heatmaps": heatmaps,
+            "axes": [
+                {
+                    "title": ax.get_title(),
+                    "xlabel": ax.get_xlabel(),
+                    "ylabel": ax.get_ylabel(),
+                }
+                for ax in fig.axes
+            ],
+        }
         return original(fig, name, figures_dir)
 
     patch = pytest.MonkeyPatch()
@@ -4619,7 +4630,7 @@ def test_comparison_narrative_explains_method_and_links_each_result(
 ):
     section = full_comparison_tex.split(
         r"\section{Comparações entre modelos e idiomas}", 1
-    )[1]
+    )[1].split(r"\section{Limitações}", 1)[0]
     section_lower = section.lower()
 
     for phrase in (
@@ -4634,11 +4645,16 @@ def test_comparison_narrative_explains_method_and_links_each_result(
         "sistemas diagonais completos",
     ):
         assert phrase in section_lower
-    for family in _RENDERED_COMPARISON_FAMILIES + (
+    for family in (
+        "language_shift_intervals",
+        "diagonal_vs_offdiagonal",
+        "spectral_divergence_by_layer",
         "encoder_agreement_heatmaps",
         "encoder_agreement_by_layer",
     ):
         assert rf"\label{{fig:{family}}}" in section
+    for family in ("language_shift", "spectral_divergence"):
+        assert rf"\label{{fig:{family}}}" not in section
     for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
     assert r"\label{fig:encoder_agreement}" not in section
@@ -4804,25 +4820,76 @@ def test_diagonal_figure_includes_zero_reference_and_transfer_labels(
 def test_language_shift_main_figure_uses_points_and_persisted_intervals(
     full_comparison_tables, tmp_path, monkeypatch
 ):
-    calls = []
+    point_calls = []
+    interval_calls = []
     import matplotlib.pyplot as plt
 
-    original = plt.Axes.errorbar
+    original_errorbar = plt.Axes.errorbar
+    original_vlines = plt.Axes.vlines
 
-    def spy(self, *args, **kwargs):
-        calls.append((args, kwargs))
-        return original(self, *args, **kwargs)
+    def spy_errorbar(self, *args, **kwargs):
+        point_calls.append((args, kwargs))
+        return original_errorbar(self, *args, **kwargs)
+
+    def spy_vlines(self, *args, **kwargs):
+        interval_calls.append((args, kwargs))
+        return original_vlines(self, *args, **kwargs)
+
+    frame = full_comparison_tables.language_shift.iloc[:3].copy()
+    frame["group"] = ["all", "real", "synthetic"]
+    frame.loc[:, ["estimate", "ci_low", "ci_high"]] = [
+        [0.50, 0.60, 0.70],
+        [91.0, 92.0, 93.0],
+        [94.0, 95.0, 96.0],
+    ]
 
     tables = dataclasses.replace(
-        full_comparison_tables, planned_figures=("language_shift_intervals",)
+        full_comparison_tables,
+        language_shift=frame,
+        planned_figures=("language_shift_intervals",),
     )
-    monkeypatch.setattr(plt.Axes, "errorbar", spy)
+    monkeypatch.setattr(plt.Axes, "errorbar", spy_errorbar)
+    monkeypatch.setattr(plt.Axes, "vlines", spy_vlines)
     records = render_report_figures(tables, tmp_path / "shift")
 
-    assert calls
+    assert len(point_calls) == len(interval_calls) == 1
+    assert np.asarray(point_calls[0][0][0]).tolist() == [int(frame.iloc[0]["layer"])]
+    assert np.asarray(point_calls[0][0][1]).tolist() == pytest.approx([0.50])
+    assert np.asarray(interval_calls[0][0][1]).tolist() == pytest.approx([0.60])
+    assert np.asarray(interval_calls[0][0][2]).tolist() == pytest.approx([0.70])
+    assert not any(
+        value >= 90
+        for call in point_calls + interval_calls
+        for arg in call[0]
+        for value in np.atleast_1d(arg)
+        if np.issubdtype(np.asarray(value).dtype, np.number)
+    )
     record = next(r for r in records if r.name == "language_shift_intervals")
     assert "violin" not in record.transformation.lower()
     assert "ci_low" in record.transformation
+
+
+def test_language_shift_main_figure_has_canonical_model_rows_and_source_columns(
+    full_comparison_tables, tmp_path
+):
+    tables = dataclasses.replace(
+        full_comparison_tables, planned_figures=("language_shift_intervals",)
+    )
+    _, captured = _capture_figures(tables, tmp_path / "shift_layout")
+    axes = captured["language_shift_intervals"]["axes"]
+    sources = tuple(
+        language
+        for language in LANGUAGE_ORDER
+        if language in set(full_comparison_tables.language_shift["source"])
+    )
+    assert len(axes) == len(full_comparison_tables.models) * len(sources)
+    assert [axis["title"] for axis in axes[: len(sources)]] == [
+        f"Probe fixo · {report_module._language_name(source)}"
+        for source in sources
+    ]
+    for row, model in enumerate(full_comparison_tables.models):
+        first = axes[row * len(sources)]
+        assert first["ylabel"].startswith(report_module._model_name(model) + "\n")
 
 
 def test_spectral_divergence_keeps_hz_and_layer_on_separate_axes(
@@ -4838,6 +4905,75 @@ def test_spectral_divergence_keeps_hz_and_layer_on_separate_axes(
     assert "Camada" in text
 
 
+def test_spectral_main_uses_only_all_group_and_exact_persisted_values(
+    full_comparison_tables, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as plt
+
+    point_calls = []
+    interval_calls = []
+    original_plot = plt.Axes.plot
+    original_fill_between = plt.Axes.fill_between
+
+    def spy_plot(self, *args, **kwargs):
+        point_calls.append((args, kwargs))
+        return original_plot(self, *args, **kwargs)
+
+    def spy_fill_between(self, *args, **kwargs):
+        interval_calls.append((args, kwargs))
+        return original_fill_between(self, *args, **kwargs)
+
+    frame = full_comparison_tables.spectral_divergence.iloc[:3].copy()
+    frame["group"] = ["all", "real", "synthetic"]
+    frame.loc[:, ["estimate", "ci_low", "ci_high"]] = [
+        [50.0, 60.0, 70.0],
+        [9100.0, 9200.0, 9300.0],
+        [9400.0, 9500.0, 9600.0],
+    ]
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        spectral_divergence=frame,
+        planned_figures=("spectral_divergence_by_layer",),
+    )
+    monkeypatch.setattr(plt.Axes, "plot", spy_plot)
+    monkeypatch.setattr(plt.Axes, "fill_between", spy_fill_between)
+    render_report_figures(tables, tmp_path / "spectral_values")
+
+    assert len(point_calls) == len(interval_calls) == 1
+    assert np.asarray(point_calls[0][0][0]).tolist() == [int(frame.iloc[0]["layer"])]
+    assert np.asarray(point_calls[0][0][1]).tolist() == pytest.approx([50.0])
+    assert np.asarray(interval_calls[0][0][1]).tolist() == pytest.approx([60.0])
+    assert np.asarray(interval_calls[0][0][2]).tolist() == pytest.approx([70.0])
+
+
+def test_spectral_main_figure_has_canonical_model_rows_and_pair_columns(
+    full_comparison_tables, tmp_path
+):
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        planned_figures=("spectral_divergence_by_layer",),
+    )
+    _, captured = _capture_figures(tables, tmp_path / "spectral_layout")
+    axes = captured["spectral_divergence_by_layer"]["axes"]
+    pairs = sorted(
+        {
+            (str(row.language_a), str(row.language_b))
+            for row in full_comparison_tables.spectral_divergence[
+                ["language_a", "language_b"]
+            ]
+            .drop_duplicates()
+            .itertuples(index=False)
+        }
+    )
+    assert len(axes) == len(full_comparison_tables.models) * len(pairs)
+    assert [axis["title"] for axis in axes[: len(pairs)]] == [
+        f"{report_module._language_pair_pretty(*pair)} (diag.)" for pair in pairs
+    ]
+    for row, model in enumerate(full_comparison_tables.models):
+        first = axes[row * len(pairs)]
+        assert first["ylabel"].startswith(report_module._model_name(model) + "\n")
+
+
 def test_shift_and_spectral_main_captions_state_question_encoding_and_limit(
     full_comparison_tex,
 ):
@@ -4849,6 +4985,15 @@ def test_shift_and_spectral_main_captions_state_question_encoding_and_limit(
         assert "Limite principal:" in figure
     assert r"\texttt{ci\_low}--\texttt{ci\_high}" in full_comparison_tex
     assert "distância maior não significa resultado melhor nem pior" in full_comparison_tex
+    for phrase in (
+        "linhas correspondem aos modelos",
+        "colunas correspondem ao idioma de treino do probe",
+        "cada ponto codifica um par de idiomas-alvo em uma camada",
+        "colunas correspondem aos pares de idiomas",
+        "camada no eixo horizontal",
+        "Wasserstein em Hz no eixo vertical",
+    ):
+        assert phrase in full_comparison_tex
 
 
 def test_report_references_redesigned_main_figures(
@@ -4858,6 +5003,21 @@ def test_report_references_redesigned_main_figures(
     assert r"Figura~\ref{fig:spectral_divergence_by_layer}" in full_comparison_tex
     assert r"Figura~\ref{fig:language_shift};" not in full_comparison_tex
     assert r"Figura~\ref{fig:spectral_divergence};" not in full_comparison_tex
+
+
+def test_report_structure_places_legacy_group_profiles_in_single_technical_annex(
+    full_comparison_tex,
+):
+    main = full_comparison_tex.split(r"\appendix", 1)[0]
+    annex = full_comparison_tex.split(r"\appendix", 1)[1]
+    assert full_comparison_tex.count(r"\appendix") == 1
+    assert r"\label{fig:language_shift_intervals}" in main
+    assert r"\label{fig:spectral_divergence_by_layer}" in main
+    assert r"\label{fig:language_shift}" not in main
+    assert r"\label{fig:spectral_divergence}" not in main
+    assert r"\label{fig:language_shift}" in annex
+    assert r"\label{fig:spectral_divergence}" in annex
+    assert r"\section{Perfis técnicos por grupo de classe}" in annex
 
 
 def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(

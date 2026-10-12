@@ -4456,6 +4456,23 @@ def _language_pair_pretty(language_a: str, language_b: str) -> str:
     return f"{_language_name(language_a)}\u2194{_language_name(language_b)}"
 
 
+def _canonical_language_pairs(
+    frame: pd.DataFrame, first: str, second: str
+) -> tuple[tuple[str, str], ...]:
+    present = {
+        (str(row[0]), str(row[1]))
+        for row in frame[[first, second]].drop_duplicates().itertuples(
+            index=False, name=None
+        )
+    }
+    return tuple(
+        (language_a, language_b)
+        for index, language_a in enumerate(LANGUAGE_ORDER)
+        for language_b in LANGUAGE_ORDER[index + 1 :]
+        if (language_a, language_b) in present
+    )
+
+
 def _finalize_comparison_line_figure(
     fig,
     axes,
@@ -4767,8 +4784,13 @@ def _figure_language_shift_intervals(
     if frame.empty:
         raise ValueError(f"{name} figure requested but the comparison table is empty")
     frame = frame[frame["group"] == "all"]
-    models = sorted(set(frame["model"]))
-    sources = sorted(set(frame["source"]))
+    present_models = set(frame["model"])
+    present_sources = set(frame["source"])
+    models = tuple(model for model in tables.models if model in present_models)
+    sources = tuple(
+        language for language in LANGUAGE_ORDER if language in present_sources
+    )
+    target_pairs = _canonical_language_pairs(frame, "target_a", "target_b")
     fig, axes = plt.subplots(
         len(models),
         len(sources),
@@ -4780,9 +4802,13 @@ def _figure_language_shift_intervals(
         for column, source in enumerate(sources):
             ax = axes[row, column]
             subset = frame[(frame["model"] == model) & (frame["source"] == source)]
-            for (target_a, target_b), pair_frame in subset.groupby(
-                ["target_a", "target_b"], sort=True
-            ):
+            for target_a, target_b in target_pairs:
+                pair_frame = subset[
+                    (subset["target_a"] == target_a)
+                    & (subset["target_b"] == target_b)
+                ]
+                if pair_frame.empty:
+                    continue
                 ordered = pair_frame.sort_values("layer")
                 layers = ordered["layer"].to_numpy(dtype=int)
                 estimate = ordered["estimate"].to_numpy(dtype=np.float64)
@@ -4975,15 +5001,9 @@ def _figure_spectral_divergence_by_layer(
     if frame.empty:
         raise ValueError(f"{name} figure requested but the comparison table is empty")
     frame = frame[frame["group"] == "all"]
-    models = sorted(set(frame["model"]))
-    pairs = sorted(
-        {
-            (str(row.language_a), str(row.language_b))
-            for row in frame[["language_a", "language_b"]]
-            .drop_duplicates()
-            .itertuples(index=False)
-        }
-    )
+    present_models = set(frame["model"])
+    models = tuple(model for model in tables.models if model in present_models)
+    pairs = _canonical_language_pairs(frame, "language_a", "language_b")
     fig, axes = plt.subplots(
         len(models),
         len(pairs),
@@ -5419,8 +5439,10 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
     elif record.name == "language_shift_intervals":
         body = (
             "Pergunta: quanto muda a relevância ao trocar o conjunto-alvo com "
-            "modelo, idioma de treino e probe fixos? Pontos codificam a distância "
-            "Jensen--Shannon por camada e hastes reproduzem exclusivamente "
+            "modelo, idioma de treino e probe fixos? As linhas correspondem aos "
+            "modelos e as colunas correspondem ao idioma de treino do probe; "
+            "cada ponto codifica um par de idiomas-alvo em uma camada pela "
+            "distância Jensen--Shannon, e as hastes reproduzem exclusivamente "
             r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
             "agregado. Limite principal: corpus, áudio e idioma mudam juntos, "
             "portanto a figura não isola um efeito causal do idioma."
@@ -5428,9 +5450,10 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
     elif record.name == "spectral_divergence_by_layer":
         body = (
             "Pergunta: quanto se desloca em frequência a massa de relevância "
-            "entre sistemas diagonais de idiomas distintos? A camada ocupa o eixo "
-            "horizontal e a distância de Wasserstein em Hz o vertical; a curva e "
-            r"a faixa reproduzem \texttt{estimate} e "
+            "entre sistemas diagonais de idiomas distintos? As linhas correspondem "
+            "aos modelos e as colunas correspondem aos pares de idiomas; cada "
+            "painel mostra a camada no eixo horizontal e Wasserstein em Hz no eixo "
+            r"vertical. A curva e a faixa reproduzem \texttt{estimate} e "
             r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
             "agregado. Limite principal: distância maior não significa resultado "
             "melhor nem pior e não identifica a causa do deslocamento."
@@ -6212,21 +6235,33 @@ def _comparisons_section(
             "",
             *_figure_block(figures["encoder_agreement_by_layer"], tables),
         ]
+    return lines
+
+
+def _comparison_technical_annex(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
     technical_profiles = [
         name
         for name in ("language_shift", "spectral_divergence")
         if name in figures
     ]
-    if technical_profiles:
-        lines += [
-            r"\subsection{Detalhe técnico por grupo de classe}",
-            "Os perfis a seguir preservam as séries agregada, real e sintética. "
-            "Eles complementam as figuras principais sem transformar camadas ou "
-            "limites de confiança em distribuições amostrais.",
-            "",
-        ]
-        for name in technical_profiles:
-            lines += _figure_block(figures[name], tables)
+    if not technical_profiles:
+        return []
+    lines = [
+        # This is the sole appendix boundary until the complete appendix
+        # framework is introduced; future annex sections should follow it.
+        r"\appendix",
+        r"\section{Perfis técnicos por grupo de classe}",
+        r"\label{app:perfis-grupo-classe}",
+        "Este anexo preserva as séries agregada, real e sintética das comparações "
+        "de mudança de relevância e divergência espectral. Os perfis complementam "
+        "as figuras principais sem transformar camadas ou limites de confiança "
+        "em distribuições amostrais.",
+        "",
+    ]
+    for name in technical_profiles:
+        lines += _figure_block(figures[name], tables)
     return lines
 
 
@@ -6387,6 +6422,7 @@ def write_report_tex(
         _comparisons_section(tables, available),
         _limitations_section(tables),
         _conclusion_section(tables),
+        _comparison_technical_annex(tables, available),
     )
     for section in sections:
         lines += section
