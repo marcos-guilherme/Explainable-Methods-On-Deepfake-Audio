@@ -301,7 +301,9 @@ def _planned_figures(
 ) -> tuple[str, ...]:
     """Base figure families plus comparison figures whose tables are complete."""
     delivered = tuple(
-        name for name in COMPARISON_FAMILIES if name not in omitted_comparisons
+        name
+        for name in COMPARISON_FAMILIES
+        if name != "encoder_agreement" and name not in omitted_comparisons
     )
     additions: list[str] = []
     if "diagonal_vs_offdiagonal" not in omitted_comparisons:
@@ -4575,7 +4577,7 @@ def _figure_encoder_agreement_heatmaps(
             ax.set_xlabel("Idioma de avaliação")
             ax.set_ylabel("Idioma de treino")
             ax.set_title(
-                f"{_pair_pretty(model_a, model_b)} — {label}",
+                f"{_model_name(model_a)} × {_model_name(model_b)} — {label}",
                 fontsize=8,
             )
             midpoint = (limits[0] + limits[1]) / 2.0
@@ -4685,12 +4687,6 @@ def _figure_encoder_agreement_lines(
     fig.suptitle(record.title, fontsize=9, y=0.98)
     _finalize_comparison_line_figure(fig, axes, bottom=0.20)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
-
-
-def _figure_encoder_agreement(plt, tables: ReportTables, figures_dir: Path):
-    return _figure_encoder_agreement_lines(
-        plt, tables, figures_dir, "encoder_agreement"
-    )
 
 
 def _figure_encoder_agreement_by_layer(
@@ -4898,7 +4894,6 @@ _FIGURE_BUILDERS = {
     "decision_reorganization_by_layer": _figure_reorganization,
     "stdft_examples": _figure_stdft,
     "conservation_diagnostics": _figure_conservation,
-    "encoder_agreement": _figure_encoder_agreement,
     "encoder_agreement_heatmaps": _figure_encoder_agreement_heatmaps,
     "encoder_agreement_by_layer": _figure_encoder_agreement_by_layer,
     "language_shift": _figure_language_shift,
@@ -5265,6 +5260,15 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "ROC-AUC; são mostrados a ROC-AUC e o MCC dessa mesma camada, sem "
             "maximizar o MCC separadamente. Valores aparecem dentro das células."
         )
+    elif record.name == "encoder_agreement_heatmaps":
+        body = (
+            "Pergunta: em que medida encoders distintos concordam nos mesmos "
+            "áudios e condições? As linhas representam o idioma de treino e as "
+            "colunas representam o idioma de avaliação; cada célula mostra a "
+            "mediana entre as 12 camadas, em escala própria para cada métrica. "
+            "Acordo alto não torna os modelos intercambiáveis e não indica qual "
+            "modelo está correto."
+        )
     elif record.name == "dft_relevance_heatmap":
         body = (
             "Média sobre o conjunto fixo de amostras da relevância AttnLRP absoluta "
@@ -5365,7 +5369,9 @@ def _comparison_result_paragraphs(tables: ReportTables) -> list[str]:
             "O acordo entre encoders verifica se modelos distintos chegam às mesmas "
             "decisões nos mesmos áudios e células. A mediana da fração de predições "
             f"iguais é {_num(agreement)}; correlação de escores, kappa e proximidade "
-            r"das relevâncias completam a leitura na Figura~\ref{fig:encoder_agreement} "
+            r"das relevâncias completam a leitura na "
+            r"Figura~\ref{fig:encoder_agreement_heatmaps}; os perfis por camada "
+            r"estão na Figura~\ref{fig:encoder_agreement_by_layer} "
             r"e na Tabela~\ref{tab:encoder-agreement-summary}."
         )
 
@@ -5981,15 +5987,21 @@ def _conservation_section(
 def _comparisons_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    names = [name for name in COMPARISON_FAMILIES if name in figures]
-    if not names:
+    has_encoder = "encoder_agreement_heatmaps" in figures
+    names = [
+        name
+        for name in COMPARISON_FAMILIES
+        if name != "encoder_agreement" and name in figures
+    ]
+    if not has_encoder and not names:
         return []
     lines = [
         rf"\section{{{_COMPARISON_SECTION_TITLE}}}",
         r"\label{sec:comparacoes}",
         "Comparações cruzadas derivadas dos mesmos artefatos por amostra. "
-        "A figura de acordo entre encoders mostra a mediana por camada e a faixa "
-        "interquartil entre células. As outras três figuras reproduzem as "
+        "A figura principal de acordo entre encoders mostra mapas de calor com a "
+        "mediana entre camadas; o detalhamento técnico mostra a mediana por camada "
+        "e a faixa interquartil entre células. As outras três figuras reproduzem as "
         r"estimativas e os intervalos bootstrap persistidos (ci\_low--ci\_high) nas "
         "figuras; os resumos tabulares abaixo agregam medianas e faixas entre "
         "linhas, enquanto os CSV mantêm cada linha com IC completo.",
@@ -6013,9 +6025,21 @@ def _comparisons_section(
             for item in (paragraph, "")
         ],
     ]
+    if has_encoder:
+        lines += _figure_block(figures["encoder_agreement_heatmaps"], tables)
+        lines += [r"\input{tables/encoder_agreement.tex}", ""]
     for name in names:
         lines += _figure_block(figures[name], tables)
         lines += [rf"\input{{tables/{name}.tex}}", ""]
+    if "encoder_agreement_by_layer" in figures:
+        lines += [
+            r"\subsection{Detalhe técnico do acordo por camada}",
+            "Perfil completo por camada preservado para inspeção técnica; a faixa "
+            "mostra os quartis entre células treino$\\rightarrow$avaliação e não "
+            "substitui os intervalos bootstrap mantidos no CSV.",
+            "",
+            *_figure_block(figures["encoder_agreement_by_layer"], tables),
+        ]
     return lines
 
 
@@ -6024,8 +6048,9 @@ def _limitations_section(tables: ReportTables) -> list[str]:
         "as explicações descrevem o probe linear sobre as representações do "
         "encoder e não constituem uma verdade de referência sobre as pistas "
         "acústicas do áudio sintético;",
-        "a figura de acordo resume células por mediana e faixa interquartil, "
-        "enquanto as demais reproduzem estimativas por comparação; os intervalos "
+        "o mapa principal de acordo resume as camadas por mediana, enquanto o "
+        "detalhamento por camada mostra a faixa interquartil entre células e as "
+        "demais figuras reproduzem estimativas por comparação; os intervalos "
         r"percentis de 95\% nos CSV quantificam apenas a variação "
         "obtida ao reamostrar os áudios observados e não incluem novas execuções "
         "do pipeline;",

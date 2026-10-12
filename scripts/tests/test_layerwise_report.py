@@ -1722,7 +1722,6 @@ def test_multiple_models_add_encoder_agreement_without_language_figures(tmp_path
         assert tables.omitted_comparisons[name] == "single_language"
         assert name not in tables.planned_figures
     assert tables.planned_figures == _EIGHT_FAMILIES + (
-        "encoder_agreement",
         "encoder_agreement_heatmaps",
         "encoder_agreement_by_layer",
     )
@@ -3067,6 +3066,8 @@ def _capture_figures(tables, directory):
                     "ylabel": ax.get_ylabel(),
                     "texts": [item.get_text() for item in ax.texts],
                     "array": np.asarray(ax.images[0].get_array()).copy(),
+                    "clim": ax.images[0].get_clim(),
+                    "cmap": ax.images[0].get_cmap().name,
                     "boxes": [
                         (
                             item.get_window_extent(renderer).x0,
@@ -4180,7 +4181,8 @@ def test_report_fidelity_and_stability_use_compact_tables_and_cautious_prose(
 # Task 3 (comparisons): figures, CSVs and compact TeX summaries
 # ---------------------------------------------------------------------------
 
-_TWELVE_FAMILIES = _EIGHT_FAMILIES + _COMPARISON_FAMILIES
+_RENDERED_COMPARISON_FAMILIES = _COMPARISON_FAMILIES[1:]
+_BASE_RENDERED_FAMILIES = _EIGHT_FAMILIES + _RENDERED_COMPARISON_FAMILIES
 _MAIN_RESULT_FIGURES = (
     "transfer_performance_heatmaps",
     "transfer_delta_roc_auc",
@@ -4364,6 +4366,57 @@ def test_encoder_agreement_heatmaps_do_not_share_incompatible_scales(
     text = "\n".join(captured["encoder_agreement_heatmaps"]["texts"])
     for label in ("Acordo de decisão", "Kappa", "Spearman", "Distância JS"):
         assert label in text
+
+
+def test_encoder_agreement_heatmaps_use_metric_scales_and_canonical_layout(
+    full_comparison_tables, tmp_path
+):
+    _, captured = _capture_figures(
+        full_comparison_tables, tmp_path / "agreement_layout"
+    )
+    panels = captured["encoder_agreement_heatmaps"]["heatmaps"]
+    assert len(panels) == 5
+    expected = (
+        ("Acordo de decisão", (0.0, 1.0), "viridis"),
+        ("Kappa de Cohen", (-1.0, 1.0), "coolwarm"),
+        ("Spearman do score", (-1.0, 1.0), "coolwarm"),
+        ("Similaridade cosseno", (-1.0, 1.0), "coolwarm"),
+        ("Distância JS", (0.0, 1.0), "magma"),
+    )
+    for panel, (metric, limits, cmap) in zip(panels, expected):
+        assert metric in panel["title"]
+        assert "HuBERT Base × WavLM Base" in panel["title"]
+        assert panel["labels"] == ["Inglês", "Português"]
+        assert panel["ylabels"] == ["Inglês", "Português"]
+        assert panel["clim"] == pytest.approx(limits)
+        assert panel["cmap"] == cmap
+        finite = panel["array"][np.isfinite(panel["array"])]
+        assert sorted(panel["texts"]) == sorted(f"{value:.2f}" for value in finite)
+
+
+def test_report_uses_heatmaps_as_main_and_by_layer_as_technical_detail(
+    full_comparison_tex,
+):
+    assert (
+        r"\includegraphics[width=\linewidth]"
+        r"{figures/encoder_agreement_heatmaps.pdf}"
+    ) in full_comparison_tex
+    assert r"\label{fig:encoder_agreement_heatmaps}" in full_comparison_tex
+    assert (
+        r"\includegraphics[width=\linewidth]"
+        r"{figures/encoder_agreement_by_layer.pdf}"
+    ) in full_comparison_tex
+    assert r"\label{fig:encoder_agreement_by_layer}" in full_comparison_tex
+    assert r"{figures/encoder_agreement.pdf}" not in full_comparison_tex
+    assert r"\label{fig:encoder_agreement}" not in full_comparison_tex
+    for phrase in (
+        "Pergunta:",
+        "linhas representam o idioma de treino",
+        "colunas representam o idioma de avaliação",
+        "mediana entre as 12 camadas",
+        "não torna os modelos intercambiáveis",
+    ):
+        assert phrase in full_comparison_tex
 
 
 @pytest.mark.parametrize(
@@ -4577,9 +4630,14 @@ def test_comparison_narrative_explains_method_and_links_each_result(
         "sistemas diagonais completos",
     ):
         assert phrase in section_lower
-    for family in _COMPARISON_FAMILIES:
+    for family in _RENDERED_COMPARISON_FAMILIES + (
+        "encoder_agreement_heatmaps",
+        "encoder_agreement_by_layer",
+    ):
         assert rf"\label{{fig:{family}}}" in section
+    for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
+    assert r"\label{fig:encoder_agreement}" not in section
     assert r"ci\_low--ci\_high" in section
     assert "ci_low--ci_high" not in section
     assert "mudança conjunta de corpus/idioma" in section
@@ -4631,8 +4689,11 @@ def test_conclusion_and_limitations_cover_comparisons_without_causal_claims(
 def test_planned_figures_add_comparisons_only_when_complete(full_comparison_tables):
     tables = full_comparison_tables
     assert tables.omitted_comparisons == {}
-    assert tables.planned_figures[: len(_TWELVE_FAMILIES)] == _TWELVE_FAMILIES
-    assert set(_COMPARISON_FAMILIES) <= set(tables.planned_figures)
+    assert tables.planned_figures[: len(_BASE_RENDERED_FAMILIES)] == (
+        _BASE_RENDERED_FAMILIES
+    )
+    assert set(_RENDERED_COMPARISON_FAMILIES) <= set(tables.planned_figures)
+    assert "encoder_agreement" not in tables.planned_figures
     assert set(_MAIN_RESULT_FIGURES) <= set(tables.planned_figures)
 
 
@@ -4649,7 +4710,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     figures_dir = tmp_path / "figures"
     records = render_report_figures(full_comparison_tables, figures_dir)
     names = {path.name for path in figures_dir.iterdir()}
-    rendered_comparisons = _COMPARISON_FAMILIES + (
+    rendered_comparisons = _RENDERED_COMPARISON_FAMILIES + (
         "transfer_delta_roc_auc",
         "transfer_delta_mcc",
         "encoder_agreement_heatmaps",
@@ -4662,7 +4723,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     }
     assert expected <= names
     assert tuple(record.name for record in records) == (
-        _TWELVE_FAMILIES + rendered_comparisons[-4:]
+        _BASE_RENDERED_FAMILIES + rendered_comparisons[-4:]
     )
     for name in rendered_comparisons:
         for suffix in ("pdf", "png"):
@@ -4673,7 +4734,10 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
             )
 
 
-@pytest.mark.parametrize("family", _COMPARISON_FAMILIES)
+@pytest.mark.parametrize(
+    "family",
+    _RENDERED_COMPARISON_FAMILIES + ("encoder_agreement_by_layer",),
+)
 def test_comparison_figures_use_portuguese_axis_labels(
     full_comparison_tables, tmp_path, family
 ):
@@ -4796,15 +4860,20 @@ def test_full_comparison_bundle_manifest_lists_twelve_families_in_order(
     ]
     stems = [Path(item).stem for item in figure_paths]
     assert stems == sorted(stems)
-    for name in _TWELVE_FAMILIES:
+    for name in _BASE_RENDERED_FAMILIES:
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
     for name in ("encoder_agreement_heatmaps", "encoder_agreement_by_layer"):
         assert f"figures/{name}.pdf" in figure_paths
         assert f"figures/{name}.png" in figure_paths
     tex = _read_text(output / "report.tex")
-    for name in _COMPARISON_FAMILIES:
+    for name in _RENDERED_COMPARISON_FAMILIES + (
+        "encoder_agreement_heatmaps",
+        "encoder_agreement_by_layer",
+    ):
         assert rf"\label{{fig:{name}}}" in tex
+    assert r"\label{fig:encoder_agreement}" not in tex
+    assert "figures/encoder_agreement.pdf" not in tex
     assert "Espaços de comparação reservados" not in tex
 
 
@@ -4849,7 +4918,9 @@ def test_multiple_models_add_encoder_agreement_figure(tmp_path):
             load_report_source(validate_result_directory(first)),
         ]
     )
-    assert "encoder_agreement" in tables.planned_figures
+    assert "encoder_agreement" not in tables.planned_figures
+    assert "encoder_agreement_heatmaps" in tables.planned_figures
+    assert "encoder_agreement_by_layer" in tables.planned_figures
     assert "encoder_agreement" not in tables.omitted_comparisons
     for name in ("language_shift", "diagonal_vs_offdiagonal", "spectral_divergence"):
         assert name not in tables.planned_figures
@@ -4953,7 +5024,7 @@ def test_encoder_agreement_hides_unused_xai_subplot_column(
         return (f"{figure_name}.pdf", f"{figure_name}.png")
 
     monkeypatch.setattr(report_module, "_save_report_figure", capture)
-    report_module._FIGURE_BUILDERS["encoder_agreement"](
+    report_module._FIGURE_BUILDERS["encoder_agreement_by_layer"](
         plt, full_comparison_tables, tmp_path / "enc_layout"
     )
     assert any(not axis.get_visible() for axis in captured_axes)
@@ -4963,7 +5034,9 @@ def test_encoder_agreement_uses_shared_supxlabel_without_per_axis_xlabels(
     full_comparison_tables, tmp_path
 ):
     layout = _render_comparison_family_with_layout(
-        full_comparison_tables, tmp_path / "encoder_agreement", "encoder_agreement"
+        full_comparison_tables,
+        tmp_path / "encoder_agreement_by_layer",
+        "encoder_agreement_by_layer",
     )
     assert not any(layout["axis_xlabels"])
     assert layout["figure_xlabel"]
@@ -5057,7 +5130,7 @@ def test_bootstrap_ci_fill_breaks_at_non_finite_interval_layers(
     tables = dataclasses.replace(
         full_comparison_tables,
         language_shift=pd.DataFrame(rows),
-        planned_figures=_TWELVE_FAMILIES,
+        planned_figures=_BASE_RENDERED_FAMILIES,
     )
     calls: list[tuple] = []
 
@@ -5081,7 +5154,9 @@ def test_encoder_agreement_record_distinguishes_cell_iqr_from_bootstrap(
     full_comparison_tables, tmp_path
 ):
     records = render_report_figures(full_comparison_tables, tmp_path / "rec")
-    record = next(item for item in records if item.name == "encoder_agreement")
+    record = next(
+        item for item in records if item.name == "encoder_agreement_by_layer"
+    )
     lowered = record.transformation.lower()
     assert "quartis" in lowered or "interquartil" in lowered
     assert "não reproduz ci_low/ci_high" in lowered
@@ -5241,7 +5316,7 @@ def test_comparison_tex_summaries_stay_bounded_for_inflated_grids(
         full_comparison_tables,
         models=models,
         languages=languages,
-        planned_figures=_TWELVE_FAMILIES,
+        planned_figures=_BASE_RENDERED_FAMILIES,
         omitted_comparisons={},
         encoder_agreement=pd.DataFrame(encoder_rows),
         language_shift=pd.DataFrame(shift_rows),
