@@ -502,6 +502,18 @@ English-only case study that is already complete; it is separate from the future
 trilingual executions above, whose results will live in the `eng-por-zho`
 directories.
 
+The didactic report keeps a question-driven main body (about **20 a 25 páginas**
+for the full trilingual bundle) and **sete figuras principais** in a
+fixed order: `transfer_performance_heatmaps`, `transfer_delta_roc_auc`,
+`transfer_delta_mcc`, `encoder_agreement_heatmaps`, `language_shift_intervals`,
+`spectral_divergence_by_layer`, and `layer_faithfulness_intervals`. Full
+per-cell matrices, layer profiles, and local diagnostics move to **apêndices no mesmo PDF**
+and to the bundle CSVs so nothing published disappears from the
+PDF or tables. Seven appendix sections mirror protocol/provenance, full
+performance, emergence/reorganization, spectral relevance and XAI↔performance
+association, complete bootstrap comparison tables, detailed faithfulness, and
+STDFT/conservation examples. Existing CSV schemas and filenames stay unchanged.
+
 Generate the portable Portuguese LaTeX bundle on the VM from explicit result
 directories (repeat `--result` to add more; duplicate model/language/scope
 identities are rejected and no directory is scanned by default):
@@ -520,17 +532,24 @@ Set-Location escrita\relatorio-layerwise-xai
 .\build_local.ps1
 ```
 
+`build_local.ps1` runs `pdflatex` twice in `nonstopmode` and fails if `report.pdf`
+is missing.
+
 The generator is read-only and needs no GPU: it only reads persisted results,
 validates their immutable generations, writes solely inside `--output`, and
 never loads an encoder or imports `torch`/`transformers`. Output is
 deterministic, and `report_manifest.json` records the consumed artifacts and
-generated files with relative paths and SHA-256 hashes. The report adds an
-executive summary, conclusion, per-model train-language × evaluation-language
-ROC-AUC/MCC heatmaps, `transfer_selected_layers.csv`, and
-`xai_performance_association.csv`. Each heatmap cell selects the layer with
-maximum ROC-AUC and reports MCC from that same layer. Single-model or
+generated files with relative paths and SHA-256 hashes. Each transfer heatmap
+cell selects the layer with maximum ROC-AUC and reports MCC from that same
+layer; `delta_roc_auc` and `delta_mcc` effect plots reuse that selected layer
+(`transfer_selected_layers.csv`). Bootstrap comparisons use 2,000 stratified
+resamples with 95% percentile intervals; **draws bootstrap não persistidos**, so
+main-body figures show estimation dots/intervals rather than
+violin or density plots that would require stored draws. Single-model or
 single-language inputs remain scoped as case studies; off-diagonal cells, when
 present, are described as transfer under corpus/language shift without causal
-language claims. See
+language claims. Suggested bibliography entries from search or AI tools must be
+checked against primary DOI/publisher metadata before inclusion; do not copy
+Consensus-generated prose or its usage notice. See
 [scripts/README.md](scripts/README.md#relatório-layer-wise-atualizável) for
 details.

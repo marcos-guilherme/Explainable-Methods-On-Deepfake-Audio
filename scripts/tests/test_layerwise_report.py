@@ -2583,6 +2583,15 @@ def test_official_docs_name_the_pretrained_only_wav2vec2_checkpoint(relative):
     )
 
 
+def test_docs_describe_question_driven_body_and_same_pdf_appendices():
+    texts = (_read_text(_REPO / "README.md"), _read_text(_SCRIPTS / "README.md"))
+    for text in texts:
+        assert "20 a 25 páginas" in text
+        assert "apêndices no mesmo PDF" in text
+        assert "sete figuras principais" in text
+        assert "não persistidos" in text and "draws bootstrap" in text
+
+
 # ---------------------------------------------------------------------------
 # Task 3 review fixes (I1-I4, M2-M5)
 # ---------------------------------------------------------------------------

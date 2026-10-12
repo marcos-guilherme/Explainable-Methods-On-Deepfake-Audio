@@ -279,27 +279,60 @@ trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
 conjunto LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
-O relatório inclui resumo executivo e conclusão; mapas treino
-$\times$ avaliação de ROC-AUC e MCC por modelo; e a associação descritiva entre
-ROC-AUC e concentração espectral da relevância. Em cada célula dos mapas, a
-camada é selecionada pela maior ROC-AUC, e o MCC mostrado vem dessa mesma
-camada. As tabelas `transfer_selected_layers.csv` e
-`xai_performance_association.csv` persistem essas reduções.
+O **corpo principal** é orientado por perguntas e deve ocupar cerca de **20 a 25 páginas**
+no conjunto trilíngue completo. **Sete figuras principais** conduzem Resultados
+(uma pergunta por figura); perfis completos por célula e camada, matrizes
+retiradas do corpo e diagnósticos locais ficam em **apêndices no mesmo PDF** e
+nos CSVs do bundle — nada publicado deixa de aparecer no PDF ou nos CSVs.
+
+As sete figuras principais são, nesta ordem fixa:
+
+1. `transfer_performance_heatmaps` — visão matricial treino $\times$ avaliação;
+2. `transfer_delta_roc_auc` — queda de ROC-AUC fora da diagonal;
+3. `transfer_delta_mcc` — queda de MCC fora da diagonal;
+4. `encoder_agreement_heatmaps` — acordo entre encoders;
+5. `language_shift_intervals` — mudança de relevância entre corpora/idiomas;
+6. `spectral_divergence_by_layer` — divergência espectral da relevância;
+7. `layer_faithfulness_intervals` — fidelidade por intervenção (camada 12
+   diagonal).
+
+Em cada célula dos mapas de transferência, a camada é selecionada **exclusivamente
+pela maior ROC-AUC**; o MCC mostrado vem dessa mesma camada. Os efeitos
+`delta_roc_auc` e `delta_mcc` nas figuras de queda **reutilizam essa camada
+selecionada** (regra compartilhada com `transfer_selected_layers.csv`), em vez
+de escolher camadas distintas por métrica.
+
+Os **sete apêndices** no mesmo PDF cobrem: (1) protocolo, inventário e
+proveniência; (2) desempenho completo por camada; (3) emergência e
+reorganização; (4) relevância espectral e associação XAI$\leftrightarrow$desempenho;
+(5) tabelas completas das quatro comparações bootstrap; (6) fidelidade detalhada;
+(7) exemplos STDFT e conservação. Os **contratos CSV existentes** (colunas,
+identidades de comparação e nomes de arquivo como `encoder_agreement.csv`,
+`language_shift.csv`, `diagonal_vs_offdiagonal.csv`, `spectral_divergence.csv`,
+`transfer_selected_layers.csv`, `xai_performance_association.csv` e demais
+tabelas por camada) **permanecem estáveis**; o gerador só acrescenta sínteses e
+LaTeX compacto.
 
 Quando os dados necessários estão completos, o relatório também apresenta
-quatro comparações: acordo entre encoders; mudança da relevância entre
+quatro comparações bootstrap: acordo entre encoders; mudança da relevância entre
 corpora/idiomas com o probe fixo; diferença entre diagonal e fora da diagonal
 no mesmo conjunto-alvo; e divergência espectral entre sistemas diagonais
-completos. As figuras resumem as células, enquanto as tabelas CSV preservam os
-resultados por camada e seus intervalos.
+completos. As figuras principais resumem agregados; as tabelas CSV preservam
+resultados por camada e intervalos.
 
-Nessas quatro comparações, a unidade de reamostragem é o áudio. O método usa
-2.000 reamostragens bootstrap estratificadas por classe, semente base 42
-combinada com um hash estável da identidade da comparação e intervalo
-percentil de 95%. Não são realizados testes de hipótese nem produzidos
-valores-p. Comparações entre idiomas são apresentadas nos dois enquadramentos
-— probe fixo e sistemas diagonais completos — e descrevem mudança conjunta de
-corpus/idioma; não isolam nem atribuem efeito causal ao idioma.
+Nessas comparações, a unidade de reamostragem é o áudio, com 2.000 reamostragens
+bootstrap estratificadas por classe, semente base 42 combinada com um hash
+estável da comparação e intervalo percentil de 95%. **Os draws bootstrap não persistidos**
+— só estimativa e limites entram no bundle. Por isso o corpo usa
+dot/forest plots de estimação, **não** violin ou Gardner–Altman com densidade:
+sem os **draws bootstrap** salvos, não há reconstrução honesta da distribuição.
+Não há testes de hipótese nem valores-p. Comparações entre idiomas descrevem
+mudança conjunta de corpus/idioma; não atribuem efeito causal ao idioma.
+
+**Referências.** Candidatas sugeridas por busca ou ferramentas de IA devem ser
+conferidas na **fonte primária** (metadados de DOI/editora: título, ano,
+volume, páginas e pertinência) antes de entrarem na bibliografia. **Não**
+reproduza texto gerado pelo Consensus nem seu aviso de uso.
 
 Na VM, informe cada diretório de resultado explicitamente (a opção `--result`
 pode ser repetida; nenhum diretório é varrido por padrão e identidades
