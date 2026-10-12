@@ -4918,7 +4918,7 @@ def test_main_body_has_toc_orientation_and_short_glossary(full_comparison_tex):
         assert rf"\item \textbf{{{term}}}" in orientation, term
     for phrase in (
         "unidade de reamostragem é o áudio",
-        "2000 reamostragens bootstrap",
+        "2~mil reamostragens bootstrap",
         "semente base 42",
         r"intervalo percentil de 95\%",
         "não são produzidos valores-p",
@@ -5039,6 +5039,97 @@ def test_main_findings_follow_modified_table_values(
     n = int(roc.sum())
     assert f"0 de {n} estimativas de $\\Delta$ ROC-AUC são negativas" in body
     assert f"{n} de {n} intervalos ficam inteiramente acima de zero" in body
+
+
+def _caption_record(name: str) -> report_module.FigureRecord:
+    return report_module.FigureRecord(name, (), name, "", "", "", "", (), (), ())
+
+
+def test_transfer_heatmap_caption_states_question_encoding_and_optimistic_limit(
+    full_comparison_tables,
+):
+    caption = report_module._caption_pt(
+        _caption_record("transfer_performance_heatmaps"), full_comparison_tables
+    )
+    assert caption.startswith("Pergunta:")
+    assert "linhas" in caption and "colunas" in caption
+    assert "Limite principal:" in caption
+    assert "otimista" in caption
+    assert "conjunto-alvo avaliado" in caption
+
+
+def test_synthesis_is_described_as_its_comparative_questions_only(
+    full_comparison_tables, full_comparison_tex
+):
+    body = _main_body(full_comparison_tex)
+    synthesis = body.split(r"\subsection{Síntese}", 1)[1].split(r"\section{", 1)[0]
+    conclusion = body.split(r"\section{Conclusão}", 1)[1]
+    rows = report_module.build_results_synthesis(full_comparison_tables)
+    assert len(rows) == 4
+    for text in (synthesis, conclusion):
+        assert "cada pergunta" not in text
+        assert "quatro perguntas comparativas" in text
+    assert "visão geral do desempenho" in synthesis
+
+
+def test_faithfulness_prose_describes_score_change_not_decision_change(
+    full_comparison_tables, full_comparison_tex
+):
+    block = _result_block(_main_body(full_comparison_tex), _MAIN_RESULT_HEADINGS[5])
+    prose = block.split("\n", 1)[1]
+    assert "escore" in prose
+    assert "decisão" not in prose
+    caption = report_module._caption_pt(
+        _caption_record("layer_faithfulness_intervals"), full_comparison_tables
+    )
+    assert "escore" in caption and "decisão" not in caption
+    question = report_module.build_results_synthesis(full_comparison_tables)[
+        "question"
+    ].iloc[-1]
+    assert "escore" in question and "decisão" not in question
+
+
+def test_faithfulness_leader_is_ranked_by_share_of_usable_intervals():
+    claim = pd.DataFrame(
+        [
+            {"model": "hubert_base", "total": 10, "ci_above_zero_n": 3, "ci_below_zero_n": 0},
+            {"model": "wavlm_base", "total": 4, "ci_above_zero_n": 2, "ci_below_zero_n": 0},
+        ]
+    )
+    assert report_module._faithfulness_leader(claim) == "wavlm_base"
+    tied = claim.assign(total=[6, 4], ci_above_zero_n=[3, 2])
+    assert report_module._faithfulness_leader(tied) is None
+    assert report_module._faithfulness_leader(claim.iloc[:1]) is None
+
+
+def test_layer_trend_compares_only_the_first_and_last_layer():
+    finding, direction = report_module._layer_trend(
+        pd.Series({1: 0.1, 6: 0.9, 12: 0.2}), "bits"
+    )
+    assert "camada 1" in finding and "camada 12" in finding
+    assert "aumenta" not in direction and "diminui" not in direction
+    assert "apenas a primeira e a última camada" in direction
+    assert "monotônica" in direction
+
+
+def test_main_captions_derive_layer_scope_from_tables_and_contracts(
+    full_comparison_tables,
+):
+    agreement = full_comparison_tables.encoder_agreement
+    subset = dataclasses.replace(
+        full_comparison_tables, encoder_agreement=agreement[agreement["layer"] <= 6]
+    )
+    caption = report_module._caption_pt(
+        _caption_record("encoder_agreement_heatmaps"), subset
+    )
+    assert "mediana entre as 6 camadas" in caption
+    caption = report_module._caption_pt(
+        _caption_record("layer_faithfulness_intervals"), full_comparison_tables
+    )
+    assert f"camada {report_module.FINAL_LAYER}" in caption
+    assert report_module.FAITHFULNESS_PER_CLASS == 8
+    assert "oito amostras por classe" in caption
+    assert "contrato fixo do protocolo" in caption
 
 
 def test_cross_cutting_limitations_and_short_conclusion(full_comparison_tex):

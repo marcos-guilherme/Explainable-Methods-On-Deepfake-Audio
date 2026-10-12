@@ -24,6 +24,9 @@ from .encoder_suite import LANGUAGE_ORDER, LAYER_ORDER, ROLE_ORDER
 from .layerwise_paths import LayerwiseSuitePaths, resolve_active_generation
 
 FINAL_LAYER = LAYER_ORDER[-1]
+# Pairs per class fixed by the faithfulness protocol (layerwise_faithfulness);
+# the main faithfulness figure accepts only rows with this n_pairs.
+FAITHFULNESS_PER_CLASS = 8
 
 _LANGUAGE_SEGMENTS: dict[str, tuple[str, ...]] = {
     "eng": ("eng",),
@@ -1814,7 +1817,7 @@ def build_xai_performance_associations(
         values = group[["roc_auc", "spectral_concentration"]].to_numpy(
             dtype=np.float64
         )
-        if layers == tuple(range(1, 13)) and np.isfinite(values).all():
+        if layers == LAYER_ORDER and np.isfinite(values).all():
             ranks = group[["roc_auc", "spectral_concentration"]].rank(
                 method="average"
             )
@@ -1827,7 +1830,7 @@ def build_xai_performance_associations(
                 row["status"] = "available"
             else:
                 row["status"] = "unavailable_constant_series"
-        elif len(layers) == 12:
+        elif len(layers) == len(LAYER_ORDER):
             row["status"] = "unavailable_invalid_or_duplicate_layers"
         rows.append(row)
     return _ordered(pd.DataFrame(rows), keys)
@@ -3193,7 +3196,7 @@ def build_results_synthesis(tables: ReportTables) -> pd.DataFrame:
         faithfulness_result = "; ".join(parts) + "."
     rows.append(
         {
-            "question": "As faixas mais relevantes sustentam mais a decisão?",
+            "question": "Remover as faixas mais relevantes altera mais o escore?",
             "evidence": "Top-minus-random e top-minus-bottom com ICs persistidos.",
             "result": faithfulness_result,
             "caution": "Intervenção STFT controlada; não implica causalidade no mundo real.",
@@ -4719,7 +4722,7 @@ def _figure_encoder_agreement_heatmaps(
         metric="acordo entre encoders (desempenho e explicação)",
         units="fração, κ, ρ, cosseno e bits, cada métrica em sua própria escala",
         transformation=(
-            "mediana das estimativas finitas entre as 12 camadas para cada par "
+            f"mediana das estimativas finitas entre as {layer_count} camadas para cada par "
             "de modelos, idioma de treino, idioma de avaliação e métrica"
         ),
     )
@@ -5153,12 +5156,13 @@ def _figure_layer_faithfulness_intervals(
     frame = frame[
         (frame["source"] == frame["target"])
         & (frame["layer"] == FINAL_LAYER)
-        & (frame["n_pairs"] == 8)
+        & (frame["n_pairs"] == FAITHFULNESS_PER_CLASS)
     ].copy()
     comparisons = ("top_minus_random", "top_minus_bottom")
     if frame.empty or set(frame["comparison"]) != set(comparisons):
         raise ValueError(
-            f"{name} requires diagonal layer {FINAL_LAYER}, 8 samples per class, "
+            f"{name} requires diagonal layer {FINAL_LAYER}, "
+            f"{FAITHFULNESS_PER_CLASS} samples per class, "
             "and both registered controls"
         )
     models = tables.models
@@ -5273,7 +5277,8 @@ def _figure_layer_faithfulness_intervals(
         (),
         heading="Fidelidade por intervenção",
         description=(
-            f"Camada {FINAL_LAYER}, escopo diagonal e oito amostras por classe; "
+            f"Camada {FINAL_LAYER}, escopo diagonal e "
+            f"{_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras por classe; "
             "diferenças pareadas top-minus-random e top-minus-bottom. Limite "
             "principal: a intervenção STFT controlada não implica causalidade "
             "no mundo real."
@@ -5685,10 +5690,16 @@ def _caption_pt(
         )
     elif record.name == "transfer_performance_heatmaps":
         body = (
-            "Mapa idioma de treino $\\times$ idioma de avaliação, por modelo. "
-            "Em cada célula, a camada selecionada é exclusivamente a de maior "
-            "ROC-AUC; são mostrados a ROC-AUC e o MCC dessa mesma camada, sem "
-            "maximizar o MCC separadamente. Valores aparecem dentro das células."
+            "Pergunta: quão bem o probe separa áudio real de sintético em cada "
+            "combinação de idioma de treino e de avaliação? Cada coluna de "
+            "painéis é um modelo; a fileira superior mostra a ROC-AUC da camada "
+            "selecionada e a inferior o MCC dessa mesma camada. Em cada mapa, as "
+            "linhas representam o idioma de treino e as colunas o idioma de "
+            "avaliação, com o valor e a camada escritos em cada célula; a camada "
+            "é exclusivamente a de maior ROC-AUC, sem "
+            "maximizar o MCC separadamente. Limite principal: a camada é "
+            "escolhida no próprio conjunto-alvo avaliado, o que pode tornar o "
+            "valor exibido otimista."
         )
     elif record.name in ("transfer_delta_roc_auc", "transfer_delta_mcc"):
         metric = "ROC-AUC" if record.name.endswith("roc_auc") else "MCC"
@@ -5706,7 +5717,8 @@ def _caption_pt(
             "Pergunta: em que medida encoders distintos concordam nos mesmos "
             "áudios e condições? As linhas representam o idioma de treino e as "
             "colunas representam o idioma de avaliação; cada célula mostra a "
-            "mediana entre as 12 camadas, em escala própria para cada métrica. "
+            f"mediana entre as {_layer_count(tables.encoder_agreement)} camadas, "
+            "em escala própria para cada métrica. "
             "Acordo alto não torna os modelos intercambiáveis e não indica qual "
             "modelo está correto."
         )
@@ -5734,9 +5746,10 @@ def _caption_pt(
         )
     elif record.name == "layer_faithfulness_intervals":
         body = (
-            "Pergunta: as faixas mais relevantes sustentam mais a decisão do que "
-            "os controles? Células diagonais na camada 12, com oito amostras por "
-            "classe. As colunas correspondem aos modelos e as linhas às classes "
+            "Pergunta: remover as faixas mais relevantes altera mais o escore do "
+            f"probe do que remover os controles? Células diagonais na camada "
+            f"{FINAL_LAYER}, com {_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras "
+            "por classe (contrato fixo do protocolo de fidelidade). As colunas correspondem aos modelos e as linhas às classes "
             "verdadeiras real e sintético. O eixo vertical mostra $k$ e o eixo "
             r"horizontal mostra \texttt{mean\_difference}; os segmentos reproduzem "
             r"\texttt{ci\_low}--\texttt{ci\_high} persistidos, enquanto cores e "
@@ -5945,7 +5958,8 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         *([""] if fidelity_stability else []),
         f"A associação XAI$\\leftrightarrow$desempenho está disponível em "
         f"{available} de {len(tables.xai_performance_association)} célula(s); "
-        "ela é descritiva, baseada em 12 camadas e sem interpretação causal.",
+        f"ela é descritiva, baseada em {len(LAYER_ORDER)} camadas e sem "
+        "interpretação causal.",
         "",
     ]
 
@@ -6023,6 +6037,27 @@ def _ci_percent_tex() -> str:
     return f"{100 * BOOTSTRAP_CI_LEVEL:.0f}\\%"
 
 
+_COUNT_WORDS_PT = (
+    "zero", "um", "dois", "três", "quatro", "cinco",
+    "seis", "sete", "oito", "nove", "dez",
+)
+
+
+def _count_word_pt(value: int) -> str:
+    return _COUNT_WORDS_PT[value] if 0 <= value < len(_COUNT_WORDS_PT) else str(value)
+
+
+def _thousands_tex(value: int) -> str:
+    """Portuguese round thousands ("2~mil") without a digit-dot-digit group."""
+    if value >= 1000 and value % 1000 == 0:
+        return f"{value // 1000}~mil"
+    return str(value)
+
+
+def _layer_count(frame: pd.DataFrame) -> int:
+    return int(frame["layer"].nunique()) if "layer" in frame else len(LAYER_ORDER)
+
+
 def _glossary_items() -> list[str]:
     return [
         r"\textbf{Diagonal}: o probe é treinado e avaliado no mesmo idioma "
@@ -6036,7 +6071,7 @@ def _glossary_items() -> list[str]:
         "no idioma de origem; vai de $-1$ a 1, com 0 próximo do acaso. A classe "
         "positiva é sintético.",
         r"\textbf{Intervalo bootstrap}: a unidade de reamostragem é o áudio; são "
-        + f"{BOOTSTRAP_RESAMPLES}"
+        + _thousands_tex(BOOTSTRAP_RESAMPLES)
         + " reamostragens bootstrap estratificadas por classe, com semente base "
         f"{BOOTSTRAP_SEED} combinada com um hash estável da identidade da "
         f"comparação, e intervalo percentil de {_ci_percent_tex()}. Não são "
@@ -6310,7 +6345,7 @@ def _performance_section(
     aligned_stability = _aligned_probe_stability(tables)
     if fidelity_tex.strip():
         lines += [
-            r"\subsection{Fidelidade por intervenção (camada 12, diagonal)}",
+            rf"\subsection{{Fidelidade por intervenção (camada {FINAL_LAYER}, diagonal)}}",
             r"\label{sec:fidelidade}",
             "Comparações pareadas de comprehensividade (delete) entre faixas "
             r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
@@ -6318,10 +6353,10 @@ def _performance_section(
             r"$\rightarrow$ STDFT sobre o subconjunto fixo de amostras XAI. "
             "Valores positivos de top-minus-random ou top-minus-bottom "
             "sugerem, com cautela, que as faixas mais relevantes segundo o "
-            "DFT-LRP sustentam mais a decisão do que controles; a filtragem "
+            "DFT-LRP sustentam mais o escore do probe do que controles; a filtragem "
             "STFT e o reescalonamento RMS são fontes de variação introduzidas "
             "pelo procedimento e não autorizam alegação causal no mundo real. "
-            "Escopo restrito à camada~12 com origem=destino; não extrapolar "
+            f"Escopo restrito à camada~{FINAL_LAYER} com origem=destino; não extrapolar "
             "para outras camadas ou células fora da diagonal.",
             "",
             _faithfulness_scope_note(aligned_fidelity),
@@ -6431,8 +6466,8 @@ def _relevance_section(
         "A concentração espectral de cada camada é definida como a maior massa "
         "média entre as bandas de relevância absoluta normalizada. Para cada "
         "modelo e célula treino$\\rightarrow$avaliação, calcula-se a correlação "
-        "de postos de Spearman entre essa concentração e a ROC-AUC nas 12 "
-        "camadas.",
+        "de postos de Spearman entre essa concentração e a ROC-AUC nas "
+        f"{len(LAYER_ORDER)} camadas.",
         "",
     ]
     association = tables.xai_performance_association
@@ -6453,7 +6488,7 @@ def _relevance_section(
         "",
     ]
     lines += [
-        "Esta análise é descritiva, usa apenas n=12 camadas por célula quando "
+        f"Esta análise é descritiva, usa apenas n={len(LAYER_ORDER)} camadas por célula quando "
         "disponível e não sustenta inferência nem interpretação causal.",
         "",
     ]
@@ -6711,12 +6746,13 @@ def _layer_trend(medians: pd.Series, unit: str) -> tuple[str | None, str]:
         f"Na camada {int(first)}, a mediana é {_num(a)} {unit}; na camada "
         f"{int(last)}, {_num(b)} {unit}."
     )
-    if b > a:
-        direction = "A mediana aumenta da primeira para a última camada."
-    elif b < a:
-        direction = "A mediana diminui da primeira para a última camada."
-    else:
-        direction = "A mediana é igual na primeira e na última camada."
+    relation = "maior" if b > a else "menor" if b < a else "igual"
+    direction = (
+        "Comparando apenas a primeira e a última camada, a mediana na última é "
+        f"{relation} {'à' if relation == 'igual' else 'que a'} da primeira; a "
+        "comparação não descreve as camadas intermediárias nem implica variação "
+        "monotônica."
+    )
     return finding, direction
 
 
@@ -7049,6 +7085,18 @@ def _spectral_block(
     )
 
 
+def _faithfulness_leader(claim: pd.DataFrame) -> str | None:
+    """Model with the strictly largest share of usable intervals above zero."""
+    usable = claim[claim["total"] > 0]
+    if len(usable) < 2:
+        return None
+    shares = (usable["ci_above_zero_n"] / usable["total"]).to_numpy(dtype=float)
+    order = np.argsort(-shares, kind="stable")
+    if np.isclose(shares[order[0]], shares[order[1]]):
+        return None
+    return str(usable["model"].iloc[order[0]])
+
+
 def _faithfulness_block(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
@@ -7069,16 +7117,17 @@ def _faithfulness_block(
     )
     interpretation = (
         "Um intervalo inteiramente acima de zero sugere que, neste protocolo, "
-        "remover as faixas mais relevantes segundo o DFT-LRP altera mais a decisão "
-        "do que remover o controle (faixas aleatórias ou menos relevantes)."
+        "remover as faixas mais relevantes segundo o DFT-LRP altera mais o escore "
+        "do probe do que remover o controle (faixas aleatórias ou menos "
+        "relevantes); a medida é a variação do escore, não uma mudança direta "
+        "da classificação."
     )
-    ranked = claim.sort_values("ci_above_zero_n", ascending=False, kind="stable")
-    if len(ranked) > 1 and ranked.iloc[0]["ci_above_zero_n"] > ranked.iloc[1]["ci_above_zero_n"]:
-        leader = ranked.iloc[0]
+    leader = _faithfulness_leader(claim)
+    if leader is not None:
         interpretation += (
-            f" {escape_latex(_model_name(leader['model']))} reúne mais sinais "
-            "positivos, o que indica maior concordância entre explicação e "
-            "intervenção nesse modelo, não superioridade do modelo."
+            f" {escape_latex(_model_name(leader))} tem a maior proporção de "
+            "intervalos acima de zero, o que indica maior concordância entre "
+            "explicação e intervenção nesse modelo, não superioridade do modelo."
         )
     layers = _join_pt([str(int(value)) for value in sorted(aligned["layer"].unique())])
     pairs = _join_pt([str(int(value)) for value in sorted(aligned["n_pairs"].unique())])
@@ -7107,6 +7156,11 @@ def _faithfulness_block(
     )
 
 
+def _synthesis_scope_tex(tables: ReportTables) -> str:
+    rows = len(build_results_synthesis(tables))
+    return f"{_count_word_pt(rows)} perguntas comparativas"
+
+
 def _main_results_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
@@ -7130,8 +7184,13 @@ def _main_results_section(
         lines += block(tables, figures)
     lines += [
         r"\subsection{Síntese}",
-        r"A Tabela~\ref{tab:results-synthesis} reúne, para cada pergunta, a "
-        "evidência usada, o resultado e a cautela correspondente.",
+        r"A Tabela~\ref{tab:results-synthesis} resume as "
+        f"{_synthesis_scope_tex(tables)}, uma por linha: transferência, acordo "
+        "entre encoders, mudança de relevância (que reúne a distância "
+        "Jensen--Shannon e a divergência espectral) e fidelidade, com a "
+        "evidência usada, o resultado e a cautela correspondente. A visão geral "
+        "do desempenho não tem linha própria; seus valores estão na "
+        r"Seção~\ref{sec:resultado-desempenho}.",
         "",
         r"\input{tables/results_synthesis.tex}",
         "",
@@ -7206,7 +7265,7 @@ def _short_conclusion_section(tables: ReportTables) -> list[str]:
         )
     lines += [
         r"A Tabela~\ref{tab:results-synthesis} reúne as respostas e as cautelas "
-        "de cada pergunta.",
+        f"das {_synthesis_scope_tex(tables)}.",
         "",
     ]
     return lines
@@ -7377,7 +7436,8 @@ def _faithfulness_scope_note(aligned: pd.DataFrame) -> str:
         f"Escopo: {n_cells} célula(s) diagonal(is) modelo$\\times$idioma, "
         "duas classes (bonafide e spoof), "
         f"valores de $k$ = {escape_latex(k_text)}, "
-        "oito amostras por classe no subconjunto XAI. "
+        f"{_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras por classe no "
+        "subconjunto XAI (contrato fixo do protocolo de fidelidade). "
         "Top-$k$ e bottom-$k$ referem-se às faixas mais e menos relevantes "
         "segundo o DFT-LRP; top-minus-random e top-minus-bottom são diferenças "
         "médias pareadas frente a controles aleatórios ou às faixas menos "
@@ -7465,17 +7525,15 @@ def _executive_fidelity_stability_blurbs(tables: ReportTables) -> list[str]:
     blurbs: list[str] = []
     aligned_fidelity = _aligned_layer_faithfulness(tables)
     if not aligned_fidelity.empty:
-        counts = faithfulness_aggregate_counts(aligned_fidelity)
-        if not counts.empty:
-            leader = counts.groupby("model", sort=True)[
-                "n_ci_above_zero"
-            ].sum()
-            model = leader.idxmax()
+        claim = faithfulness_claim(aligned_fidelity)
+        model = _faithfulness_leader(claim)
+        if model is not None:
+            row = claim[claim["model"] == model].iloc[0]
             blurbs.append(
-                "Na fidelidade por intervenção (camada~12, diagonal), "
-                f"{escape_latex(_model_name(model))} reúne o maior número de "
-                f"células agregadas com IC bootstrap estritamente positivo "
-                f"({int(leader[model])} contagens somadas entre comparações), "
+                f"Na fidelidade por intervenção (camada~{FINAL_LAYER}, diagonal), "
+                f"{escape_latex(_model_name(model))} tem a maior proporção de "
+                "intervalos bootstrap inteiramente acima de zero "
+                f"({int(row['ci_above_zero_n'])} de {int(row['total'])}), "
                 "sem implicar superioridade causal."
             )
     aligned_stability = _aligned_probe_stability(tables)
@@ -7523,7 +7581,7 @@ def _layer_faithfulness_tex(tables: ReportTables) -> str:
             r"\small",
             r"\setlength{\tabcolsep}{4pt}",
             r"\caption{Resumo descritivo da fidelidade por intervenção "
-            r"(camada~12, células diagonais): contagens sobre células agregadas "
+            rf"(camada~{FINAL_LAYER}, células diagonais): contagens sobre células agregadas "
             r"por modelo e comparação. Detalhe completo em "
             r"\texttt{layer\_faithfulness\_summary.csv}.}",
             r"\label{tab:layer-faithfulness-summary}",
