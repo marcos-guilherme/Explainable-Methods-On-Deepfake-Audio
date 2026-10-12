@@ -4147,6 +4147,7 @@ def test_long_id_bundle_compiles_without_significant_overfull_boxes(
         for value in re.findall(r"Overfull \\hbox \(([0-9.]+)pt too wide", log)
     ]
     assert [value for value in overfull if value >= 1.0] == [], overfull
+    assert "Overfull \\vbox" not in log
 
 
 def test_report_omits_probe_stability_input_when_rows_miss_performance_cells(
@@ -4884,16 +4885,27 @@ def test_encoder_agreement_heatmaps_use_metric_scales_and_canonical_layout(
         assert sorted(panel["texts"]) == sorted(f"{value:.2f}" for value in finite)
 
 
+_FIGURE_SIZE = r"width=\linewidth,height=0.7\textheight,keepaspectratio"
+
+
+def test_every_figure_leaves_room_for_its_caption_on_one_page(
+    full_comparison_tex, eng_tex
+):
+    for tex in (full_comparison_tex, eng_tex):
+        options = re.findall(r"\\includegraphics\[([^\]]*)\]", tex)
+        assert options and set(options) == {_FIGURE_SIZE}
+
+
 def test_report_uses_heatmaps_as_main_and_by_layer_as_technical_detail(
     full_comparison_tex,
 ):
     assert (
-        r"\includegraphics[width=\linewidth]"
+        rf"\includegraphics[{_FIGURE_SIZE}]"
         r"{figures/encoder_agreement_heatmaps.pdf}"
     ) in full_comparison_tex
     assert r"\label{fig:encoder_agreement_heatmaps}" in full_comparison_tex
     assert (
-        r"\includegraphics[width=\linewidth]"
+        rf"\includegraphics[{_FIGURE_SIZE}]"
         r"{figures/encoder_agreement_by_layer.pdf}"
     ) in full_comparison_tex
     assert r"\label{fig:encoder_agreement_by_layer}" in full_comparison_tex

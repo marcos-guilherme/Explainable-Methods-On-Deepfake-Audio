@@ -5622,7 +5622,9 @@ def _figure_block(record: FigureRecord, tables: ReportTables) -> list[str]:
     return [
         r"\begin{figure}[H]",
         r"\centering",
-        rf"\includegraphics[width=\linewidth]{{figures/{pdf}}}",
+        # The height cap keeps tall multi-panel figures and their captions on one page.
+        rf"\includegraphics[width=\linewidth,height=0.7\textheight,keepaspectratio]"
+        rf"{{figures/{pdf}}}",
         rf"\caption{{{caption}}}",
         rf"\label{{fig:{record.name}}}",
         r"\end{figure}",
