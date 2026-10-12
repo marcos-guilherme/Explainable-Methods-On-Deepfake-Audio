@@ -208,3 +208,33 @@ Result: exit code 0, no output.
 
 No known remaining Task 4 concern. Verification was limited to the requested
 focused suites and static checks; the full report test file was not rerun.
+
+## Spectral ordering quality gate
+
+The spectral facet-order test now patches the canonical order to the deliberately
+non-lexical sequence `("por", "eng", "zho")`, constructs every pair in that
+order, and derives expected columns directly from the patched order. An
+implementation that replaces the canonical ordering with lexical `sorted(...)`
+will therefore fail the title sequence assertion.
+
+Command:
+
+```bash
+PYTHONPATH=scripts .venv-report/bin/python -m pytest \
+  scripts/tests/test_layerwise_report.py -k \
+  "spectral_divergence_keeps or spectral_main" -v
+```
+
+Result:
+
+```text
+4 passed, 326 deselected in 28.09s
+```
+
+Files changed:
+
+- `scripts/tests/test_layerwise_report.py`
+- `.superpowers/sdd/task-4-report.md`
+
+Concern: none. This follow-up changes only the quality gate and its evidence;
+production code and generated report bundles are unchanged.

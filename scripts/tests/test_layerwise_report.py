@@ -4947,24 +4947,35 @@ def test_spectral_main_uses_only_all_group_and_exact_persisted_values(
 
 
 def test_spectral_main_figure_has_canonical_model_rows_and_pair_columns(
-    full_comparison_tables, tmp_path
+    full_comparison_tables, tmp_path, monkeypatch
 ):
+    language_order = ("por", "eng", "zho")
+    pairs = tuple(
+        (language_a, language_b)
+        for index, language_a in enumerate(language_order)
+        for language_b in language_order[index + 1 :]
+    )
+    template = full_comparison_tables.spectral_divergence.query(
+        "group == 'all'"
+    ).iloc[:12]
+    frames = []
+    for model in full_comparison_tables.models:
+        for language_a, language_b in pairs:
+            frame = template.copy()
+            frame["model"] = model
+            frame["language_a"] = language_a
+            frame["language_b"] = language_b
+            frames.append(frame)
+    spectral = pd.concat(frames, ignore_index=True)
     tables = dataclasses.replace(
         full_comparison_tables,
+        languages=language_order,
+        spectral_divergence=spectral,
         planned_figures=("spectral_divergence_by_layer",),
     )
+    monkeypatch.setattr(report_module, "LANGUAGE_ORDER", language_order)
     _, captured = _capture_figures(tables, tmp_path / "spectral_layout")
     axes = captured["spectral_divergence_by_layer"]["axes"]
-    pairs = sorted(
-        {
-            (str(row.language_a), str(row.language_b))
-            for row in full_comparison_tables.spectral_divergence[
-                ["language_a", "language_b"]
-            ]
-            .drop_duplicates()
-            .itertuples(index=False)
-        }
-    )
     assert len(axes) == len(full_comparison_tables.models) * len(pairs)
     assert [axis["title"] for axis in axes[: len(pairs)]] == [
         f"{report_module._language_pair_pretty(*pair)} (diag.)" for pair in pairs
