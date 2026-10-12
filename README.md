@@ -502,26 +502,51 @@ English-only case study that is already complete; it is separate from the future
 trilingual executions above, whose results will live in the `eng-por-zho`
 directories.
 
-<!-- layerwise-report-doc-contract
-main-result-figures=transfer_performance_heatmaps,transfer_delta_roc_auc,transfer_delta_mcc,encoder_agreement_heatmaps,language_shift_intervals,spectral_divergence_by_layer,layer_faithfulness_intervals
-stable-comparison-csv=encoder_agreement.csv,language_shift.csv,diagonal_vs_offdiagonal.csv,spectral_divergence.csv,transfer_selected_layers.csv,xai_performance_association.csv
--->
-
 The didactic report keeps a question-driven main body (about **20 a 25 páginas**
-for the full trilingual bundle) and **sete figuras principais** in a
-fixed order: `transfer_performance_heatmaps`, `transfer_delta_roc_auc`,
-`transfer_delta_mcc`, `encoder_agreement_heatmaps`, `language_shift_intervals`,
-`spectral_divergence_by_layer`, and `layer_faithfulness_intervals`. Full
+for the full trilingual bundle) driven by **sete figuras principais**. Full
 per-cell matrices, layer profiles, and local diagnostics move to **apêndices no mesmo PDF**
-and to the bundle CSVs so nothing published disappears from the
-PDF or tables. Seven appendix sections mirror protocol/provenance, full
-performance, emergence/reorganization, spectral relevance and XAI↔performance
-association, complete bootstrap comparison tables, detailed faithfulness, and
-STDFT/conservation examples. Comparison CSV basenames (`encoder_agreement.csv`,
-`language_shift.csv`, `diagonal_vs_offdiagonal.csv`, `spectral_divergence.csv`,
-`transfer_selected_layers.csv`, `xai_performance_association.csv`) and their
-column schemas remain stable; the generator only adds synthesis tables and
+and to the bundle CSVs so nothing published disappears from the PDF or tables.
+Seven appendix sections mirror protocol/provenance, full performance,
+emergence/reorganization, spectral relevance and XAI↔performance association,
+complete bootstrap comparison tables, detailed faithfulness, and STDFT/conservation
+examples.
+
+The seven main result figures are, in fixed order:
+
+1. `transfer_performance_heatmaps` — train × evaluation heatmaps;
+2. `transfer_delta_roc_auc` — off-diagonal ROC-AUC drop;
+3. `transfer_delta_mcc` — off-diagonal MCC drop;
+4. `encoder_agreement_heatmaps` — encoder agreement;
+5. `language_shift_intervals` — relevance shift across corpora/languages;
+6. `spectral_divergence_by_layer` — spectral relevance divergence;
+7. `layer_faithfulness_intervals` — layer-12 diagonal faithfulness.
+
+Stable comparison CSV basenames, in fixed order:
+
+1. `encoder_agreement.csv`
+2. `language_shift.csv`
+3. `diagonal_vs_offdiagonal.csv`
+4. `spectral_divergence.csv`
+5. `transfer_selected_layers.csv`
+6. `xai_performance_association.csv`
+
+Their column schemas remain stable; the generator only adds synthesis tables and
 compact LaTeX.
+
+**Transfer layer selection rule.** Each transfer heatmap cell selects the layer
+with maximum ROC-AUC and reports MCC from that same layer; the `delta_roc_auc`
+and `delta_mcc` effect plots reuse that selected layer (`transfer_selected_layers.csv`)
+instead of choosing different layers per metric.
+
+**Bootstrap uncertainty.** Bootstrap comparisons use 2,000 stratified resamples
+with 95% percentile intervals; point estimates and intervals are persisted in the
+bundle, but **draws bootstrap não persistidos**, so main-body figures show
+estimation dots/intervals rather than violin or density plots that would require
+stored draws or honest bootstrap reconstruction.
+
+**References.** Suggested bibliography entries from search or AI tools must be
+checked against primary DOI/publisher metadata before inclusion; do not copy
+Consensus-generated prose or its usage notice.
 
 Generate the portable Portuguese LaTeX bundle on the VM from explicit result
 directories (repeat `--result` to add more; duplicate model/language/scope
@@ -548,18 +573,9 @@ The generator is read-only and needs no GPU: it only reads persisted results,
 validates their immutable generations, writes solely inside `--output`, and
 never loads an encoder or imports `torch`/`transformers`. Output is
 deterministic, and `report_manifest.json` records the consumed artifacts and
-generated files with relative paths and SHA-256 hashes. Each transfer heatmap
-cell selects the layer with maximum ROC-AUC and reports MCC from that same layer;
-`delta_roc_auc` and `delta_mcc` effect plots reuse that selected layer
-(`transfer_selected_layers.csv`). Bootstrap comparisons use 2,000 stratified
-resamples with 95% percentile intervals; point estimates and intervals are
-persisted in the bundle, but **draws bootstrap não persistidos**, so main-body
-figures show estimation dots/intervals rather than violin or density
-plots that would require stored draws or honest bootstrap reconstruction. Single-model or
+generated files with relative paths and SHA-256 hashes. Single-model or
 single-language inputs remain scoped as case studies; off-diagonal cells, when
 present, are described as transfer under corpus/language shift without causal
-language claims. Suggested bibliography entries from search or AI tools must be
-checked against primary DOI/publisher metadata before inclusion; do not copy
-Consensus-generated prose or its usage notice. See
+language claims. See
 [scripts/README.md](scripts/README.md#relatório-layer-wise-atualizável) for
 details.

@@ -2583,13 +2583,6 @@ def test_official_docs_name_the_pretrained_only_wav2vec2_checkpoint(relative):
     )
 
 
-_LAYERWISE_REPORT_DOC_CONTRACT = re.compile(
-    r"<!--\s*layerwise-report-doc-contract\s*\n"
-    r"main-result-figures=(?P<figures>[^\n]+)\n"
-    r"stable-comparison-csv=(?P<csvs>[^\n]+)\n"
-    r"-->",
-    re.MULTILINE,
-)
 _STABLE_COMPARISON_CSV_BASENAMES = (
     "encoder_agreement.csv",
     "language_shift.csv",
@@ -2606,6 +2599,37 @@ _LAYERWISE_REPORT_VM_GENERATE = (
 _LAYERWISE_REPORT_WINDOWS_BUILD = (
     "Set-Location escrita\\relatorio-layerwise-xai\n.\\build_local.ps1"
 )
+_VISIBLE_MAIN_FIGURES_LIST = re.compile(
+    r"(?ms)"
+    r"(?:As sete figuras principais são, nesta ordem fixa:|"
+    r"The seven main result figures are, in fixed order:)\s*\n"
+    r"(?P<list>(?:\d+\.\s+`[^`]+`[^\n]*\n)+)"
+)
+_VISIBLE_STABLE_CSV_LIST = re.compile(
+    r"(?ms)"
+    r"(?:Os CSVs de comparação com contrato estável são, nesta ordem:|"
+    r"Stable comparison CSV basenames, in fixed order:)\s*\n"
+    r"(?P<list>(?:\d+\.\s+`[^`]+\.csv`[^\n]*\n)+)"
+)
+_TRANSFER_LAYER_RULE = re.compile(
+    r"(?ms)"
+    r"(?:\*\*Regra de camada selecionada na transferência\.\*\*|"
+    r"\*\*Transfer layer selection rule\.\*\*)\s*"
+    r"(?P<body>.+?)"
+    r"(?=\n\n\*\*(?:Incerteza bootstrap|Bootstrap uncertainty)\.\*\*)"
+)
+_BOOTSTRAP_UNCERTAINTY = re.compile(
+    r"(?ms)"
+    r"(?:\*\*Incerteza bootstrap\.\*\*|\*\*Bootstrap uncertainty\.\*\*)\s*"
+    r"(?P<body>.+?)"
+    r"(?=\n\n\*\*(?:Referências|References)\.\*\*)"
+)
+_CITATION_POLICY = re.compile(
+    r"(?ms)"
+    r"(?:\*\*Referências\.\*\*|\*\*References\.\*\*)\s*"
+    r"(?P<body>.+?)"
+    r"(?=\n\n(?:Na VM,|Generate the portable|The generator is))"
+)
 
 
 def _layerwise_report_doc_section(relative: str, text: str) -> str:
@@ -2617,12 +2641,86 @@ def _layerwise_report_doc_section(relative: str, text: str) -> str:
     return text[start:]
 
 
-def _parse_layerwise_report_doc_contract(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    match = _LAYERWISE_REPORT_DOC_CONTRACT.search(text)
-    assert match, "missing layerwise-report-doc-contract marker"
-    figures = tuple(name.strip() for name in match.group("figures").split(",") if name.strip())
-    csvs = tuple(name.strip() for name in match.group("csvs").split(",") if name.strip())
-    return figures, csvs
+def _parse_numbered_backtick_items(list_block: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"^\d+\.\s+`([^`]+)`", list_block, re.MULTILINE))
+
+
+def parse_visible_main_result_figures(text: str) -> tuple[str, ...]:
+    match = _VISIBLE_MAIN_FIGURES_LIST.search(text)
+    if not match:
+        raise ValueError("missing visible ordered main-result-figures list")
+    items = _parse_numbered_backtick_items(match.group("list"))
+    if len(items) != 7:
+        raise ValueError(f"expected 7 main figures, found {len(items)}")
+    return items
+
+
+def parse_visible_stable_comparison_csvs(text: str) -> tuple[str, ...]:
+    match = _VISIBLE_STABLE_CSV_LIST.search(text)
+    if not match:
+        raise ValueError("missing visible ordered stable-comparison-csv list")
+    items = _parse_numbered_backtick_items(match.group("list"))
+    if len(items) != len(_STABLE_COMPARISON_CSV_BASENAMES):
+        raise ValueError(
+            f"expected {len(_STABLE_COMPARISON_CSV_BASENAMES)} stable CSVs, found {len(items)}"
+        )
+    return items
+
+
+def _extract_bounded_paragraph(pattern: re.Pattern[str], section: str, label: str) -> str:
+    match = pattern.search(section)
+    if not match:
+        raise AssertionError(f"missing bounded section: {label}")
+    return match.group("body").strip()
+
+
+def _assert_transfer_layer_selection_rule(paragraph: str) -> None:
+    assert "transfer_selected_layers.csv" in paragraph
+    assert "delta_roc_auc" in paragraph and "delta_mcc" in paragraph
+    assert re.search(
+        r"(maximum ROC-AUC|maior ROC-AUC).{0,500}(same layer|mesma camada)",
+        paragraph,
+        re.IGNORECASE | re.DOTALL,
+    ), "ROC-AUC layer selection must precede same-layer MCC in one bounded paragraph"
+    assert re.search(
+        r"(reuse|reutiliz).{0,250}(selected layer|camada selecionada|"
+        r"transfer_selected_layers\.csv)|"
+        r"(selected layer|camada selecionada).{0,250}(reuse|reutiliz)",
+        paragraph,
+        re.IGNORECASE | re.DOTALL,
+    ), "delta effects must reuse the ROC-AUC-selected layer"
+
+
+def _assert_bootstrap_uncertainty_policy(paragraph: str) -> None:
+    lower = paragraph.lower()
+    assert "draws bootstrap" in lower and "não persistidos" in lower
+    assert re.search(
+        r"(estimativa|estimate|intervalo|interval|limites|limits).{0,400}"
+        r"(bundle|entram no bundle|persist)",
+        lower,
+        re.DOTALL,
+    ), "estimates/intervals must be affirmed as persisted in the bounded paragraph"
+    assert "reconstru" in lower or "reconstruction" in lower
+    assert "draws bootstrap persistidos" not in lower
+    assert "draws bootstrap are persisted" not in lower
+
+
+def _assert_primary_source_citation_policy(paragraph: str) -> None:
+    lower = paragraph.lower()
+    assert "doi" in lower and ("editora" in lower or "publisher" in lower)
+    assert re.search(
+        r"(fonte primária|primary).{0,400}(bibliografia|bibliography)|"
+        r"(before inclusion|antes de entrarem).{0,200}(bibliografia|bibliography)|"
+        r"metadata.{0,200}(before|antes)",
+        paragraph,
+        re.IGNORECASE | re.DOTALL,
+    ), "DOI/publisher metadata must be verified before bibliography"
+    assert "consensus" in lower
+    assert re.search(
+        r"(não reproduza|do not copy).{0,300}(consensus|aviso de uso|usage notice)",
+        paragraph,
+        re.IGNORECASE | re.DOTALL,
+    ), "Consensus prose/usage notice must not be reproduced"
 
 
 def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
@@ -2633,52 +2731,33 @@ def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
     assert "sete figuras principais" in section
     assert "não persistidos" in section and "draws bootstrap" in section
 
-    figures, csv_basenames = _parse_layerwise_report_doc_contract(text)
+    try:
+        figures = parse_visible_main_result_figures(section)
+        csv_basenames = parse_visible_stable_comparison_csvs(section)
+    except ValueError as exc:
+        raise AssertionError(str(exc)) from exc
     assert figures == report_module.MAIN_RESULT_FIGURES
     assert csv_basenames == _STABLE_COMPARISON_CSV_BASENAMES
     assert (
         "permanecem estáveis" in section
         or "remain stable" in section.lower()
-        or "schemas and filenames stay unchanged" in section.lower()
+        or "column schemas remain stable" in section.lower()
     )
 
-    assert "transfer_selected_layers.csv" in section
-    assert "delta_roc_auc" in section and "delta_mcc" in section
-    assert "maximum ROC-AUC" in section or "maior ROC-AUC" in section
-    section_lower = section.lower()
-    assert "same layer" in section_lower or "mesma camada" in section_lower
-    assert "reutiliz" in section.lower() or "reuse" in section.lower()
+    _assert_transfer_layer_selection_rule(
+        _extract_bounded_paragraph(_TRANSFER_LAYER_RULE, section, "transfer layer rule")
+    )
+    _assert_bootstrap_uncertainty_policy(
+        _extract_bounded_paragraph(_BOOTSTRAP_UNCERTAINTY, section, "bootstrap uncertainty")
+    )
+    _assert_primary_source_citation_policy(
+        _extract_bounded_paragraph(_CITATION_POLICY, section, "citation policy")
+    )
 
     assert _LAYERWISE_REPORT_VM_GENERATE in section
     assert _LAYERWISE_REPORT_WINDOWS_BUILD in section
     assert "nonstopmode" in section.lower()
     assert "report.pdf" in section
-
-    assert "95" in section and (
-        "percentil" in section.lower() or "percentile" in section.lower()
-    )
-    assert (
-        "intervalo" in section.lower()
-        or "interval" in section.lower()
-        or "limites" in section.lower()
-    )
-    assert (
-        "estimativa" in section_lower
-        or "estimate" in section_lower
-        or "estimation" in section_lower
-        or "limits" in section_lower
-        or "limites" in section_lower
-    )
-    assert "reconstru" in section_lower or "reconstruction" in section_lower
-    assert "draws bootstrap are persisted" not in section_lower
-    assert "draws bootstrap persistidos" not in section_lower
-    assert "persistem os draws bootstrap" not in section_lower
-
-    assert "DOI" in section and ("editora" in section or "publisher" in section.lower())
-    assert "fonte primária" in section or "primary" in section.lower()
-    assert "Consensus" in section
-    assert "não reproduza" in section_lower or "do not copy" in section_lower
-    assert "aviso de uso" in section_lower or "usage notice" in section_lower
 
 
 def test_docs_describe_question_driven_body_and_same_pdf_appendices():
@@ -2693,6 +2772,53 @@ def test_docs_describe_question_driven_body_and_same_pdf_appendices():
 @pytest.mark.parametrize("relative", ["README.md", "scripts/README.md"])
 def test_docs_layerwise_report_semantic_contract(relative):
     _assert_layerwise_report_doc_contract(relative, _read_text(_REPO / relative))
+
+
+def test_parse_visible_main_result_figures_rejects_reordered_list():
+    sample = (
+        "The seven main result figures are, in fixed order:\n\n"
+        "1. `transfer_delta_roc_auc` — drop;\n"
+        "2. `transfer_performance_heatmaps` — heatmaps;\n"
+        "3. `transfer_delta_mcc` — mcc;\n"
+        "4. `encoder_agreement_heatmaps` — agreement;\n"
+        "5. `language_shift_intervals` — shift;\n"
+        "6. `spectral_divergence_by_layer` — spectral;\n"
+        "7. `layer_faithfulness_intervals` — faithfulness;\n"
+    )
+    figures = parse_visible_main_result_figures(sample)
+    assert figures != report_module.MAIN_RESULT_FIGURES
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda text: text.replace(
+            "2. `transfer_delta_roc_auc`",
+            "2. `transfer_delta_roc_auc_typo`",
+            1,
+        ),
+        lambda text: text.replace(
+            "1. `encoder_agreement.csv`",
+            "1. `encoder_agreement_v2.csv`",
+            1,
+        ),
+        lambda text: re.sub(
+            r"\*\*Transfer layer selection rule\.\*\*[^\n]*\n[^\n]+",
+            "**Transfer layer selection rule.** Separate layers per metric.",
+            text,
+            count=1,
+        ),
+        lambda text: text.replace(
+            "draws bootstrap não persistidos", "draws bootstrap persistidos", 1
+        ),
+        lambda text: text.replace("before inclusion", "without verification", 1),
+    ],
+)
+def test_docs_layerwise_report_contract_rejects_documentation_mutations(mutator):
+    relative = "README.md"
+    mutated = mutator(_read_text(_REPO / relative))
+    with pytest.raises(AssertionError):
+        _assert_layerwise_report_doc_contract(relative, mutated)
 
 
 # ---------------------------------------------------------------------------
