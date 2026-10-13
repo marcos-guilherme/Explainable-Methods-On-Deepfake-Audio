@@ -2996,7 +2996,9 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         on=faithfulness_keys,
         how="inner",
     )
-    has_aligned_faithfulness = not aligned_faithfulness.empty
+    has_aligned_faithfulness = not _displayable_faithfulness_rows(
+        aligned_faithfulness
+    ).empty
     return ReportTables(
         models=models,
         languages=languages,
@@ -3079,6 +3081,27 @@ def _usable_claim_rows(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFr
     return usable.loc[finite]
 
 
+def _pooled_layer_scope(
+    frame: pd.DataFrame,
+    columns: Sequence[str] = ("estimate",),
+    **filters: object,
+) -> str:
+    """How many layers a pooled claim aggregates, from the same usable rows."""
+    selected = frame
+    for column, value in filters.items():
+        selected = selected[selected[column] == value]
+    if selected.empty or "layer" not in selected:
+        return ""
+    layers = sorted(
+        {int(value) for value in _usable_claim_rows(selected, columns)["layer"]}
+    )
+    if len(layers) > 1:
+        return f"agregando as {len(layers)} camadas"
+    if layers:
+        return f"na camada {layers[0]}"
+    return ""
+
+
 def transfer_effect_claim(frame: pd.DataFrame) -> Mapping[str, float | int]:
     usable = _usable_claim_rows(frame, ("estimate", "ci_low", "ci_high"))
     estimates = usable["estimate"].to_numpy(dtype=np.float64)
@@ -3135,23 +3158,36 @@ def build_results_synthesis(tables: ReportTables) -> pd.DataFrame:
                 f"{label}: {claim['negative_n']}/{claim['n']} estimativas negativas; "
                 f"{claim['ci_below_zero_n']}/{claim['n']} ICs inteiramente abaixo de zero"
             )
+    transfer_scope = _pooled_layer_scope(
+        tables.diagonal_vs_offdiagonal[
+            tables.diagonal_vs_offdiagonal["metric"].isin(("delta_roc_auc", "delta_mcc"))
+        ],
+        ("estimate", "ci_low", "ci_high"),
+    )
+    transfer_result = "; ".join(transfer_parts)
+    if transfer_parts and transfer_scope:
+        transfer_result = f"{transfer_result} ({transfer_scope})"
     rows.append(
         {
             "question": "Quanto o desempenho cai na transferência?",
             "evidence": "Diferença fora da diagonal menos diagonal no mesmo conjunto-alvo.",
-            "result": "; ".join(transfer_parts) if transfer_parts else "Não disponível.",
+            "result": transfer_result if transfer_parts else "Não disponível.",
             "caution": "O sinal descreve a mudança observada, não sua causa.",
         }
     )
 
     agreement = agreement_claim(tables.encoder_agreement)
+    agreement_scope = _pooled_layer_scope(
+        tables.encoder_agreement, metric="prediction_agreement"
+    )
     agreement_result = (
         "Não disponível."
         if not agreement["n"]
         else (
             f"Mediana {_num(agreement['median'])}; faixa "
             f"{_num(agreement['minimum'])}–{_num(agreement['maximum'])} "
-            f"em {agreement['n']} estimativas."
+            f"em {agreement['n']} estimativas"
+            + (f", {agreement_scope}." if agreement_scope else ".")
         )
     )
     rows.append(
@@ -3205,10 +3241,25 @@ def build_results_synthesis(tables: ReportTables) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+_SUPTITLE_LINE_CHARS = 100
+
+
+def _wrap_long_suptitle(fig) -> None:
+    suptitle = getattr(fig, "_suptitle", None)
+    engine = fig.get_layout_engine()
+    if suptitle is None or type(engine).__name__ != "ConstrainedLayoutEngine":
+        return
+    text = suptitle.get_text()
+    if "\n" not in text and len(text) > _SUPTITLE_LINE_CHARS and " (" in text:
+        heading, scope = text.rsplit(" (", 1)
+        suptitle.set_text(f"{heading}\n({scope}")
+
+
 def _save_report_figure(fig, name: str, figures_dir: Path) -> tuple[str, ...]:
     import matplotlib.pyplot as plt
 
     figures_dir.mkdir(parents=True, exist_ok=True)
+    _wrap_long_suptitle(fig)
     fig.savefig(figures_dir / f"{name}.pdf", metadata=_PDF_METADATA)
     fig.savefig(figures_dir / f"{name}.png", metadata=_PNG_METADATA)
     plt.close(fig)
@@ -3344,8 +3395,21 @@ _MULTI_PANEL_XLABEL_Y = 0.115
 
 
 def _layer_axis(ax) -> None:
-    ax.set_xticks(range(1, 13))
+    _set_layer_ticks(ax, list(range(1, 13)))
     ax.set_xlim(0.6, 12.4)
+
+
+def _set_layer_ticks(ax, ticks: Sequence[int]) -> None:
+    """A tick per layer; beyond six layers, labels alternate back from the last."""
+    ax.set_xticks(ticks)
+    last = ticks[-1]
+    ax.set_xticklabels(
+        [
+            str(tick) if len(ticks) <= 6 or (last - tick) % 2 == 0 else ""
+            for tick in ticks
+        ]
+    )
+    ax.tick_params(axis="x", labelsize=7)
 
 
 def _band_tick_indices(n_bands: int, axis_width_in: float) -> list[int]:
@@ -3500,8 +3564,8 @@ def _figure_fixed_threshold(plt, tables, figures_dir):
         [
             ("accuracy", "Acurácia (fração)", 1.0),
             ("mcc", "MCC (adimensional, \u22121 a 1)", 1.0),
-            ("tpr", "TPR: sintéticos detectados\n(fração dos sintéticos)", 1.0),
-            ("fpr", "FPR: reais marcados como sintéticos\n(fração dos reais)", 1.0),
+            ("tpr", "TPR: sintéticos\ndetectados\n(fração dos sintéticos)", 1.0),
+            ("fpr", "FPR: reais marcados\ncomo sintéticos\n(fração dos reais)", 1.0),
         ],
         (2, 2),
         4.8,
@@ -3548,9 +3612,10 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
     frame = tables.transfer_selection
     images = {}
     metrics = (
-        ("roc_auc", "ROC-AUC na camada selecionada", (0.0, 1.0), "viridis"),
-        ("mcc", "MCC na mesma camada", (-1.0, 1.0), "coolwarm"),
+        ("roc_auc", "ROC-AUC (camada selecionada)", (0.0, 1.0), "viridis"),
+        ("mcc", "MCC (mesma camada)", (-1.0, 1.0), "coolwarm"),
     )
+    language_labels = [_language_name(item).capitalize() for item in languages]
     for row_index, (metric, metric_title, limits, cmap) in enumerate(metrics):
         for column_index, model in enumerate(models):
             ax = axes[row_index, column_index]
@@ -3576,21 +3641,20 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
             )
             images[metric] = image
             ax.set_xticks(range(len(languages)))
-            ax.set_xticklabels(
-                [_language_name(item).capitalize() for item in languages],
-                rotation=30,
-                ha="right",
-            )
             ax.set_yticks(range(len(languages)))
-            ax.set_yticklabels(
-                [_language_name(item).capitalize() for item in languages]
-            )
-            ax.set_xlabel("Idioma de avaliação")
-            ax.set_ylabel("Idioma de treino")
-            ax.set_title(
-                f"{_model_name(model)} — {metric_title}",
-                fontsize=8,
-            )
+            ax.tick_params(axis="both", labelsize=7)
+            ax.grid(False)
+            if row_index == len(metrics) - 1:
+                ax.set_xticklabels(language_labels, rotation=30, ha="right")
+                ax.set_xlabel("Idioma de avaliação", fontsize=8)
+            else:
+                ax.set_xticklabels([])
+            if column_index == 0:
+                ax.set_yticklabels(language_labels)
+                ax.set_ylabel("Idioma de treino", fontsize=8)
+            else:
+                ax.set_yticklabels([])
+            ax.set_title(f"{_model_name(model)}\n{metric_title}", fontsize=8)
             for source_index in range(len(languages)):
                 for target_index in range(len(languages)):
                     value = matrix[source_index, target_index]
@@ -3599,7 +3663,7 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
                         ax.text(
                             target_index,
                             source_index,
-                            f"{value:.2f}\nC{int(selected_layer)}",
+                            f"{_figure_number(value)}\nC{int(selected_layer)}",
                             ha="center",
                             va="center",
                             fontsize=7,
@@ -3611,12 +3675,9 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
                         )
     for metric, image in images.items():
         row = 0 if metric == "roc_auc" else 1
-        fig.colorbar(
-            image,
-            ax=axes[row, :].tolist(),
-            shrink=0.8,
-            label="ROC-AUC" if metric == "roc_auc" else "MCC",
-        )
+        colorbar = fig.colorbar(image, ax=axes[row, :].tolist(), shrink=0.8)
+        colorbar.set_label("ROC-AUC" if metric == "roc_auc" else "MCC", fontsize=8)
+        colorbar.ax.tick_params(labelsize=7)
     record = _record(
         tables,
         name,
@@ -3667,19 +3728,31 @@ def _figure_transfer_effect(
         raise ValueError(f"{name} figure requested but no selected effects exist")
 
     models = tuple(model for model in tables.models if model in set(frame["model"]))
+    pairs = sorted(
+        set(frame[["source", "target"]].itertuples(index=False, name=None))
+    )
+    pair_position = {pair: index for index, pair in enumerate(pairs)}
     fig, axes = plt.subplots(
         1,
         len(models),
-        figsize=(_FIGURE_WIDTH, 2.5),
+        figsize=(_FIGURE_WIDTH, 0.9 + 0.3 * len(pairs)),
         squeeze=False,
         sharex=True,
+        sharey=True,
+        constrained_layout=True,
     )
     for column, model in enumerate(models):
         ax = axes[0, column]
         model_rows = frame[frame["model"] == model].sort_values(
             ["source", "target"], kind="stable"
         )
-        positions = np.arange(len(model_rows))
+        positions = np.array(
+            [
+                pair_position[(str(row.source), str(row.target))]
+                for row in model_rows.itertuples(index=False)
+            ],
+            dtype=np.float64,
+        )
         estimates = model_rows["estimate"].to_numpy(dtype=np.float64)
         low = model_rows["ci_low"].to_numpy(dtype=np.float64)
         high = model_rows["ci_high"].to_numpy(dtype=np.float64)
@@ -3701,16 +3774,14 @@ def _figure_transfer_effect(
                 zorder=3,
             )
         ax.axvline(0.0, color="0.45", linestyle="--", linewidth=0.8)
-        ax.set_yticks(positions)
-        ax.set_yticklabels(
-            [
-                _transfer_pretty(str(row.source), str(row.target))
-                for row in model_rows.itertuples(index=False)
-            ]
-        )
-        ax.set_xlabel(xlabel)
         ax.set_title(_model_name(model), fontsize=8)
-        ax.invert_yaxis()
+        ax.tick_params(axis="both", labelsize=7)
+        ax.locator_params(axis="x", nbins=4)
+    first = axes[0, 0]
+    first.set_yticks(range(len(pairs)))
+    first.set_yticklabels([_transfer_pretty(source, target) for source, target in pairs])
+    first.set_ylim(len(pairs) - 0.5, -0.5)
+    fig.supxlabel(xlabel, fontsize=8)
 
     cells = tuple(
         frame[["model", "source", "target"]]
@@ -3738,7 +3809,6 @@ def _figure_transfer_effect(
         cells=cells,
     )
     fig.suptitle(record.title, fontsize=9)
-    fig.subplots_adjust(left=0.14, right=0.98, top=0.82, bottom=0.25, wspace=0.35)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -4390,11 +4460,9 @@ _COMPARISON_METRIC_LABELS_PT: Mapping[str, str] = MappingProxyType(
         "wasserstein_distance": "Wasserstein (Hz)",
     }
 )
-_COMPARISON_SUPX_Y = 0.10
 _COMPARISON_LEGEND_KW = {
-    "loc": "upper center",
-    "bbox_to_anchor": (0.5, 0.02),
-    "ncol": 3,
+    "loc": "outside right center",
+    "ncol": 1,
     "fontsize": 6.5,
     "frameon": False,
 }
@@ -4432,7 +4500,7 @@ def _layer_axis_dynamic(ax, layers: Sequence[int]) -> None:
     ticks = sorted({int(value) for value in layers})
     if not ticks:
         return
-    ax.set_xticks(ticks)
+    _set_layer_ticks(ax, ticks)
     ax.set_xlim(min(ticks) - 0.4, max(ticks) + 0.4)
 
 
@@ -4574,8 +4642,6 @@ def _finalize_comparison_line_figure(
     axes,
     *,
     legend_title: str | None = None,
-    top: float = 0.90,
-    bottom: float = 0.34,
 ) -> None:
     flat = np.atleast_1d(axes).ravel()
     for axis in flat:
@@ -4604,15 +4670,8 @@ def _finalize_comparison_line_figure(
         )
         if legend_title:
             legend.get_title().set_fontsize(7)
-    fig.supxlabel(_LAYER_AXIS_LABEL, fontsize=8, y=_COMPARISON_SUPX_Y)
-    fig.subplots_adjust(
-        left=0.12,
-        right=0.98,
-        top=top,
-        bottom=bottom,
-        hspace=0.32,
-        wspace=0.28,
-    )
+    fig.supxlabel(_LAYER_AXIS_LABEL, fontsize=8)
+    fig.set_layout_engine("constrained", h_pad=0.04, w_pad=0.04)
 
 
 def encoder_agreement_heatmap_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -4684,14 +4743,20 @@ def _figure_encoder_agreement_heatmaps(
                 ha="right",
             )
             ax.set_yticks(range(len(languages)))
-            ax.set_yticklabels(
-                [_language_name(item).capitalize() for item in languages]
-            )
-            ax.set_xlabel("Idioma de avaliação")
-            ax.set_ylabel("Idioma de treino")
+            ax.tick_params(axis="both", labelsize=7)
+            ax.grid(False)
+            if row_index == len(_ENCODER_HEATMAP_METRICS) - 1:
+                ax.set_xlabel("Idioma de avaliação", fontsize=8)
+            if column_index == 0:
+                ax.set_yticklabels(
+                    [_language_name(item).capitalize() for item in languages]
+                )
+                ax.set_ylabel("Idioma de treino", fontsize=8)
+            else:
+                ax.set_yticklabels([])
             ax.set_title(
-                f"{_model_name(model_a)} × {_model_name(model_b)} — {label}",
-                fontsize=8,
+                f"{_model_name(model_a)} × {_model_name(model_b)}\n{label}",
+                fontsize=7,
             )
             midpoint = (limits[0] + limits[1]) / 2.0
             for source_index in range(len(languages)):
@@ -4701,13 +4766,17 @@ def _figure_encoder_agreement_heatmaps(
                         ax.text(
                             target_index,
                             source_index,
-                            f"{value:.2f}",
+                            _figure_number(value),
                             ha="center",
                             va="center",
                             fontsize=7,
                             color="white" if value < midpoint else "black",
                         )
-            fig.colorbar(image, ax=ax, shrink=0.75, label=label)
+        colorbar = fig.colorbar(
+            image, ax=axes[row_index, :].tolist(), shrink=0.85, aspect=12
+        )
+        colorbar.set_label(label, fontsize=7)
+        colorbar.ax.tick_params(labelsize=7)
     layer_count = tables.encoder_agreement["layer"].nunique()
     record = _record(
         tables,
@@ -4797,8 +4866,8 @@ def _figure_encoder_agreement_lines(
         units="ρ, fração, κ, cosseno e bits em eixos rotulados separadamente",
         transformation=_ENCODER_AGREEMENT_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
-    _finalize_comparison_line_figure(fig, axes, bottom=0.20)
+    fig.suptitle(record.title, fontsize=9)
+    _finalize_comparison_line_figure(fig, axes)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -4865,7 +4934,7 @@ def _figure_language_shift(plt, tables: ReportTables, figures_dir: Path):
         units="bits (logaritmo base 2)",
         transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
+    fig.suptitle(record.title, fontsize=9)
     _finalize_comparison_line_figure(
         fig, axes, legend_title="Par de idiomas-alvo e grupo"
     )
@@ -4939,8 +5008,7 @@ def _figure_language_shift_intervals(
                 ax.set_title(f"Probe fixo · {_language_name(source)}", fontsize=8)
             if column == 0:
                 ax.set_ylabel(f"{_model_name(model)}\nJS (bits)", fontsize=7)
-            else:
-                ax.set_ylabel("JS (bits)", fontsize=7)
+            ax.tick_params(axis="y", labelsize=7)
     record = _record(
         tables,
         name,
@@ -4958,7 +5026,7 @@ def _figure_language_shift_intervals(
             "inferida dos intervalos"
         ),
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
+    fig.suptitle(record.title, fontsize=9)
     _finalize_comparison_line_figure(
         fig, axes, legend_title="Par de idiomas-alvo"
     )
@@ -5015,7 +5083,7 @@ def _figure_diagonal_vs_offdiagonal(plt, tables: ReportTables, figures_dir: Path
         units="ROC-AUC e MCC adimensionais",
         transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
+    fig.suptitle(record.title, fontsize=9)
     _finalize_comparison_line_figure(
         fig, axes, legend_title="Transferência (treino→avaliação)"
     )
@@ -5084,7 +5152,7 @@ def _figure_spectral_divergence(plt, tables: ReportTables, figures_dir: Path):
         units="Hz (suporte nos centros de banda registrados)",
         transformation=_BOOTSTRAP_CI_TRANSFORMATION,
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
+    fig.suptitle(record.title, fontsize=9)
     _finalize_comparison_line_figure(fig, axes, legend_title="Grupo de classe")
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
@@ -5141,8 +5209,8 @@ def _figure_spectral_divergence_by_layer(
             "faixa = ci_low–ci_high bootstrap persistido da mesma linha"
         ),
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
-    _finalize_comparison_line_figure(fig, axes, bottom=0.24)
+    fig.suptitle(record.title, fontsize=9)
+    _finalize_comparison_line_figure(fig, axes)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -5150,22 +5218,23 @@ def _figure_layer_faithfulness_intervals(
     plt, tables: ReportTables, figures_dir: Path
 ) -> FigureRecord:
     name = "layer_faithfulness_intervals"
-    frame = _aligned_layer_faithfulness(tables)
-    if frame.empty:
+    aligned = _aligned_layer_faithfulness(tables)
+    if aligned.empty:
         raise ValueError(f"{name} figure requested but the aligned table is empty")
-    frame = frame[
-        (frame["source"] == frame["target"])
-        & (frame["layer"] == FINAL_LAYER)
-        & (frame["n_pairs"] == FAITHFULNESS_PER_CLASS)
-    ].copy()
-    comparisons = ("top_minus_random", "top_minus_bottom")
+    frame = _displayable_faithfulness_rows(aligned)
+    comparisons = _FAITHFULNESS_CONTROLS
     if frame.empty or set(frame["comparison"]) != set(comparisons):
         raise ValueError(
             f"{name} requires diagonal layer {FINAL_LAYER}, "
             f"{FAITHFULNESS_PER_CLASS} samples per class, "
             "and both registered controls"
         )
-    models = tables.models
+    present_models = set(frame["model"])
+    models = tuple(model for model in tables.models if model in present_models)
+    present_languages = set(frame["source"])
+    languages = tuple(
+        language for language in LANGUAGE_ORDER if language in present_languages
+    )
     classes = tuple(
         true_class
         for true_class in _TRUE_CLASS_ORDER
@@ -5180,92 +5249,139 @@ def _figure_layer_faithfulness_intervals(
     incomplete = []
     required_controls = set(comparisons)
     for model in models:
-        for true_class in classes:
-            for k_value in ks:
-                group = frame[
-                    (frame["model"] == model)
-                    & (frame["true_class"] == true_class)
-                    & (frame["k"] == k_value)
-                ]
-                observed = set(group["comparison"])
-                if observed != required_controls:
-                    missing = ", ".join(sorted(required_controls - observed))
-                    incomplete.append(
-                        f"model={model}, true_class={true_class}, k={k_value}: "
-                        f"{missing or 'unexpected controls'}"
-                    )
+        model_languages = sorted(
+            set(frame.loc[frame["model"] == model, "source"]),
+            key=LANGUAGE_ORDER.index,
+        )
+        for language in model_languages:
+            for true_class in classes:
+                for k_value in ks:
+                    group = frame[
+                        (frame["model"] == model)
+                        & (frame["source"] == language)
+                        & (frame["true_class"] == true_class)
+                        & (frame["k"] == k_value)
+                    ]
+                    observed = set(group["comparison"])
+                    if observed != required_controls:
+                        missing = ", ".join(sorted(required_controls - observed))
+                        incomplete.append(
+                            f"model={model}, language={language}, "
+                            f"true_class={true_class}, k={k_value}: "
+                            f"{missing or 'unexpected controls'}"
+                        )
     if incomplete:
         raise ValueError(
             f"{name} missing required controls for " + "; ".join(incomplete)
         )
+    from matplotlib.lines import Line2D
+
+    series = [(language, comparison) for language in languages for comparison in comparisons]
+    spread = 0.72
+    step = spread / max(len(series) - 1, 1)
+    offsets = {
+        item: (index - (len(series) - 1) / 2.0) * step
+        for index, item in enumerate(series)
+    }
     fig, axes = plt.subplots(
         len(classes),
         len(models),
-        figsize=(_FIGURE_WIDTH, 1.8 * len(classes) + 0.8),
+        figsize=(_FIGURE_WIDTH, len(classes) * (0.5 + 0.32 * len(ks)) + 1.3),
         squeeze=False,
         sharex=True,
         sharey=True,
+        constrained_layout=True,
     )
-    styles = {
-        "top_minus_random": ("o", "#1f77b4"),
-        "top_minus_bottom": ("s", "#d62728"),
-    }
-    offsets = {"top_minus_random": -0.08, "top_minus_bottom": 0.08}
+    k_position = {k_value: index for index, k_value in enumerate(ks)}
     for row, true_class in enumerate(classes):
         for column, model in enumerate(models):
             ax = axes[row, column]
             subset = frame[
                 (frame["model"] == model) & (frame["true_class"] == true_class)
             ]
-            for comparison in comparisons:
-                ordered = subset[subset["comparison"] == comparison].sort_values("k")
+            for language, comparison in series:
+                ordered = subset[
+                    (subset["source"] == language)
+                    & (subset["comparison"] == comparison)
+                ].sort_values("k")
                 if ordered.empty:
                     continue
                 estimate = ordered["mean_difference"].to_numpy(dtype=np.float64)
                 low = ordered["ci_low"].to_numpy(dtype=np.float64)
                 high = ordered["ci_high"].to_numpy(dtype=np.float64)
-                point_k = ordered["k"].to_numpy(dtype=np.float64)
+                positions = np.array(
+                    [k_position[int(value)] for value in ordered["k"]],
+                    dtype=np.float64,
+                )
                 mask = np.isfinite(estimate) & np.isfinite(low) & np.isfinite(high)
                 if not mask.any():
                     continue
-                marker, color = styles[comparison]
-                y = point_k[mask] + offsets[comparison]
-                ax.hlines(
-                    y,
-                    low[mask],
-                    high[mask],
-                    color=color,
-                    linewidth=1.0,
-                )
+                color = _FAITHFULNESS_CONTROL_COLORS[comparison]
+                y = positions[mask] + offsets[(language, comparison)]
+                ax.hlines(y, low[mask], high[mask], color=color, linewidth=0.9)
                 ax.plot(
                     estimate[mask],
                     y,
-                    marker=marker,
+                    marker=_FAITHFULNESS_LANGUAGE_MARKERS[language],
                     color=color,
+                    markerfacecolor=color,
+                    markeredgecolor="white",
+                    markeredgewidth=0.4,
                     linestyle="none",
                     markersize=4.0,
-                    label=_FAITHFULNESS_COMPARISON_PT[comparison],
+                    gid=f"{language}|{comparison}",
                 )
             ax.axvline(0.0, color="0.45", linewidth=0.8)
+            ax.set_yticks(range(len(ks)))
+            ax.set_yticklabels([str(k_value) for k_value in ks])
+            ax.set_ylim(len(ks) - 0.5, -0.5)
+            ax.tick_params(axis="both", labelsize=7)
+            ax.locator_params(axis="x", nbins=4)
             if row == 0:
                 ax.set_title(_model_name(model), fontsize=8)
             if column == 0:
                 ax.set_ylabel(
                     f"{_TRUE_CLASS_NAMES_PT[true_class]}\n$k$", fontsize=7
                 )
-            ax.set_yticks(ks)
-            ax.set_xlabel("Diferença média pareada", fontsize=7)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        fig.legend(
-            handles,
-            labels,
-            loc="lower center",
-            ncol=len(comparisons),
-            title="Comparação",
-            fontsize=7,
-            title_fontsize=7,
+            if row == len(classes) - 1:
+                ax.set_xlabel("Diferença média pareada", fontsize=7)
+    language_handles = [
+        Line2D(
+            [],
+            [],
+            marker=_FAITHFULNESS_LANGUAGE_MARKERS[language],
+            color="0.35",
+            linestyle="none",
+            markersize=4.5,
+            label=_language_name(language).capitalize(),
         )
+        for language in languages
+    ]
+    control_handles = [
+        Line2D(
+            [],
+            [],
+            color=_FAITHFULNESS_CONTROL_COLORS[comparison],
+            linewidth=1.6,
+            label=_FAITHFULNESS_COMPARISON_PT[comparison],
+        )
+        for comparison in comparisons
+    ]
+    legend_style = {"fontsize": 7, "title_fontsize": 7, "frameon": False}
+    fig.legend(
+        handles=language_handles,
+        loc="outside lower left",
+        ncol=len(language_handles),
+        title="Idioma (formato do marcador)",
+        **legend_style,
+    )
+    fig.legend(
+        handles=control_handles,
+        loc="outside lower right",
+        ncol=len(control_handles),
+        title="Comparação (cor)",
+        **legend_style,
+    )
     cells = tuple(
         row
         for row in _cells(tables)
@@ -5286,15 +5402,15 @@ def _figure_layer_faithfulness_intervals(
         metric="diferença média de comprehensividade",
         units="adimensional",
         transformation=(
-            "colunas = modelos; linhas = classes verdadeiras (real, sintético); "
-            "k no eixo vertical e mean_difference no eixo horizontal; segmentos "
-            "horizontais = ci_low–ci_high persistidos e marcadores distintos "
-            "identificam os dois controles; sem valores-p"
+            "colunas = modelos com dados alinhados; linhas = classes verdadeiras "
+            "(real, sintético); k no eixo vertical e mean_difference no eixo "
+            "horizontal; segmentos horizontais = ci_low–ci_high persistidos; "
+            "formato dos marcadores = idioma, cor = controle e deslocamento vertical "
+            "fixo por idioma e controle em cada k; sem valores-p"
         ),
         cells=cells,
     )
-    fig.suptitle(record.title, fontsize=9, y=0.98)
-    fig.subplots_adjust(bottom=0.28, top=0.82, hspace=0.35, wspace=0.2)
+    fig.suptitle(record.title, fontsize=9)
     return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
@@ -5512,16 +5628,28 @@ def _csv_tex(name: str) -> str:
     return _tt_breakable(f"tables/{name}.csv").replace("/", r"/\allowbreak{}")
 
 
+def _true_minus(text: str) -> str:
+    if re.fullmatch(r"-0(\.0*)?", text):
+        return text[1:]
+    return text.replace("-", "\u2212")
+
+
 def _num(value: object, digits: int = 3) -> str:
-    return f"{float(value):.{digits}f}".replace(".", ",")
+    return _true_minus(f"{float(value):.{digits}f}").replace(".", ",")
 
 
 def _signed(value: object, digits: int = 3) -> str:
-    return f"{float(value):+.{digits}f}".replace(".", ",")
+    text = _true_minus(f"{float(value):.{digits}f}")
+    return (text if text.startswith("\u2212") else f"+{text}").replace(".", ",")
 
 
 def _sci(value: object) -> str:
-    return f"{float(value):.2e}".replace(".", ",")
+    mantissa, exponent = f"{float(value):.2e}".split("e")
+    return f"{_true_minus(mantissa)}e{_true_minus(exponent)}".replace(".", ",")
+
+
+def _figure_number(value: object, digits: int = 2) -> str:
+    return _true_minus(f"{float(value):.{digits}f}")
 
 
 def _model_name(model: str) -> str:
@@ -5554,6 +5682,7 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def _write_tex(path: Path, text: str) -> None:
+    text = text.replace("\u2212", r"\ensuremath{-}")
     _assert_pdflatex_safe(text, path.name)
     _write_text(path, text)
 
@@ -5724,17 +5853,32 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "melhor nem pior e não identifica a causa do deslocamento."
         )
     elif record.name == "layer_faithfulness_intervals":
+        shown = displayable_layer_faithfulness(tables)
+        shown_models = [
+            escape_latex(_model_name(model))
+            for model in tables.models
+            if model in set(shown["model"])
+        ]
+        shown_languages = [
+            _language_name(language)
+            for language in LANGUAGE_ORDER
+            if language in set(shown["source"])
+        ]
         body = (
             "Pergunta: remover as faixas mais relevantes altera mais o escore do "
             f"probe do que remover os controles? Células diagonais na camada "
             f"{FINAL_LAYER}, com {_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras "
-            "por classe (contrato fixo do protocolo de fidelidade). As colunas correspondem aos modelos e as linhas às classes "
-            "verdadeiras real e sintético. O eixo vertical mostra $k$ e o eixo "
-            r"horizontal mostra \texttt{mean\_difference}; os segmentos reproduzem "
-            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos, enquanto cores e "
-            "marcadores distinguem top-minus-random de top-minus-bottom. Limite "
-            "principal: a intervenção STFT controlada não implica causalidade no "
-            "mundo real."
+            "por classe (contrato fixo do protocolo de fidelidade). As colunas "
+            f"correspondem aos modelos com dados alinhados ({_join_pt(shown_models)}) "
+            "e as linhas às classes verdadeiras real e sintético. O eixo vertical "
+            r"mostra $k$ e o eixo horizontal mostra \texttt{mean\_difference}; os "
+            r"segmentos reproduzem \texttt{ci\_low}--\texttt{ci\_high} persistidos. "
+            "O formato do marcador identifica o idioma da célula diagonal "
+            f"({_join_pt(shown_languages)}), as cores distinguem top-minus-random "
+            "de top-minus-bottom e cada combinação de idioma e controle tem um "
+            "deslocamento vertical fixo em torno de cada $k$, sem sobreposição. "
+            "Limite principal: a intervenção STFT controlada não implica "
+            "causalidade no mundo real."
         )
     elif record.name == "dft_relevance_heatmap":
         body = (
@@ -5905,37 +6049,56 @@ def _executive_comparison_items(tables: ReportTables) -> list[str]:
             f"{claim['n']} estimativas negativas (mediana {_signed(claim['median'])})"
             for metric, claim in deltas.items()
         ]
+        scope = _pooled_layer_scope(
+            tables.diagonal_vs_offdiagonal[
+                tables.diagonal_vs_offdiagonal["metric"].isin(tuple(deltas))
+            ],
+            ("estimate", "ci_low", "ci_high"),
+        )
         items.append(
-            "Na comparação diagonal e fora da diagonal, no mesmo conjunto-alvo: "
+            "Na comparação diagonal e fora da diagonal, no mesmo conjunto-alvo"
+            + _scope_clause(scope)
+            + ": "
             + _join_pt(parts)
             + r" (Seção~\ref{sec:resultado-transferencia})."
         )
     if _has_comparison(tables, "encoder_agreement"):
         claim = agreement_claim(tables.encoder_agreement)
         if claim["n"]:
+            scope = _pooled_layer_scope(
+                tables.encoder_agreement, metric="prediction_agreement"
+            )
             items.append(
-                "No acordo entre encoders, a fração de decisões iguais tem mediana "
-                f"{_num(claim['median'])}, com faixa de {_num(claim['minimum'])} a "
-                f"{_num(claim['maximum'])} "
+                f"No acordo entre encoders{_scope_clause(scope)}, a fração de "
+                f"decisões iguais tem mediana {_num(claim['median'])}, com faixa "
+                f"de {_num(claim['minimum'])} a {_num(claim['maximum'])} "
                 r"(Seção~\ref{sec:resultado-acordo})."
             )
     if _has_comparison(tables, "language_shift"):
         claim = _estimate_claim(tables.language_shift, group="all")
         if claim["n"]:
+            scope = _pooled_layer_scope(tables.language_shift, group="all")
             items.append(
-                "Na mudança de relevância entre corpora/idiomas, com probe fixo, a "
-                f"distância Jensen--Shannon mediana é {_num(claim['median'])} bits "
+                "Na mudança de relevância entre corpora/idiomas, com probe fixo"
+                f"{_scope_clause(scope)}, a distância Jensen--Shannon mediana é "
+                f"{_num(claim['median'])} bits "
                 r"(Seção~\ref{sec:resultado-relevancia})."
             )
     if _has_comparison(tables, "spectral_divergence"):
         claim = _estimate_claim(tables.spectral_divergence, group="all")
         if claim["n"]:
+            scope = _pooled_layer_scope(tables.spectral_divergence, group="all")
             items.append(
-                "Na divergência espectral entre sistemas diagonais, a distância de "
-                f"Wasserstein mediana é {_num(claim['median'])} Hz "
+                "Na divergência espectral entre sistemas diagonais"
+                f"{_scope_clause(scope)}, a distância de Wasserstein mediana é "
+                f"{_num(claim['median'])} Hz "
                 r"(Seção~\ref{sec:resultado-espectral})."
             )
     return items
+
+
+def _scope_clause(scope: str) -> str:
+    return f", {scope}" if scope else ""
 
 
 def _executive_summary_section(tables: ReportTables) -> list[str]:
@@ -7394,12 +7557,35 @@ def _aligned_layer_faithfulness(tables: ReportTables) -> pd.DataFrame:
     return subset.merge(perf_keys, on=keys, how="inner")
 
 
+_FAITHFULNESS_CONTROLS = ("top_minus_random", "top_minus_bottom")
 _FAITHFULNESS_COMPARISON_PT: Mapping[str, str] = MappingProxyType(
     {
         "top_minus_random": "top-minus-random",
         "top_minus_bottom": "top-minus-bottom",
     }
 )
+_FAITHFULNESS_CONTROL_COLORS: Mapping[str, str] = MappingProxyType(
+    {"top_minus_random": "#1f77b4", "top_minus_bottom": "#d62728"}
+)
+_FAITHFULNESS_LANGUAGE_MARKERS: Mapping[str, str] = MappingProxyType(
+    {"eng": "o", "por": "s", "zho": "^"}
+)
+
+
+def _displayable_faithfulness_rows(aligned: pd.DataFrame) -> pd.DataFrame:
+    """Aligned rows the faithfulness figure can show: diagonal, final layer, full n."""
+    if aligned.empty:
+        return aligned
+    return aligned[
+        (aligned["source"] == aligned["target"])
+        & (aligned["layer"] == FINAL_LAYER)
+        & (aligned["n_pairs"] == FAITHFULNESS_PER_CLASS)
+        & aligned["comparison"].isin(_FAITHFULNESS_CONTROLS)
+    ].copy()
+
+
+def displayable_layer_faithfulness(tables: ReportTables) -> pd.DataFrame:
+    return _displayable_faithfulness_rows(_aligned_layer_faithfulness(tables))
 
 
 def faithfulness_aggregate_counts(frame: pd.DataFrame) -> pd.DataFrame:

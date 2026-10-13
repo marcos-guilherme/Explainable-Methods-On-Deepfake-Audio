@@ -3258,18 +3258,40 @@ def test_tex_reports_identified_emergence_layers(eng_tex):
 # --- M5: consistent decimal and scientific formatting ---
 
 
+def _tex_number(text: str) -> str:
+    return text.replace("\u2212", r"\ensuremath{-}")
+
+
 def test_numbers_use_a_decimal_comma_and_one_scientific_style(eng_tex, eng_bundle):
     body = eng_tex.split(r"\begin{document}", 1)[1]
     assert re.search(r"\d\.\d", body) is None
     for name in _BUNDLE_TABLES:
         fragment = _read_text(eng_bundle / "tables" / f"{name}.tex")
         assert re.search(r"\d\.\d", fragment) is None, name
-    for match in re.finditer(r"\d[eE][+-]?\d", body):
+    sign = r"(?:[+-]|\\ensuremath\{-\})"
+    for match in re.finditer(rf"\d[eE]{sign}?\d", body):
         start = max(0, match.start() - 6)
         assert re.search(
-            r"\d,\d{2}e[+-]\d{2}", body[start : match.end() + 3]
+            rf"\d,\d{{2}}e{sign}\d{{2}}", body[start : match.end() + 3]
         ), body[start : match.end() + 3]
-    assert "rtol=5,00e-03" in body and "atol=2,00e-06" in body
+    assert r"rtol=5,00e\ensuremath{-}03" in body
+    assert r"atol=2,00e\ensuremath{-}06" in body
+
+
+def test_negative_numbers_are_typeset_with_a_true_minus(
+    full_comparison_tex, full_comparison_tables, tmp_path
+):
+    body = full_comparison_tex.split(r"\begin{document}", 1)[1]
+    assert re.search(r"(?<![\w}\-])-\d+,\d", body) is None
+    assert r"\ensuremath{-}0," in body
+    write_report_tables(full_comparison_tables, tmp_path / "tables")
+    for fragment in (tmp_path / "tables").glob("*.tex"):
+        text = _read_text(fragment)
+        assert re.search(r"(?<![\w}\-])-\d+,\d", text) is None, fragment.name
+    assert report_module._num(-0.25) == "\u22120,250"
+    assert report_module._signed(-0.25) == "\u22120,250"
+    assert report_module._signed(0.25) == "+0,250"
+    assert report_module._num(-0.0001) == "0,000"
 
 
 # ===========================================================================
@@ -3434,7 +3456,7 @@ def test_figures_use_clear_portuguese_labels_with_units(
     eng_captured, figure, expected
 ):
     _, captured = eng_captured
-    joined = "\n".join(captured[figure]["texts"])
+    joined = "\n".join(" ".join(text.split()) for text in captured[figure]["texts"])
     for needle in expected:
         assert needle in joined, (figure, needle)
 
@@ -4918,7 +4940,9 @@ def test_encoder_agreement_heatmaps_use_metric_scales_and_canonical_layout(
         assert panel["clim"] == pytest.approx(limits)
         assert panel["cmap"] == cmap
         finite = panel["array"][np.isfinite(panel["array"])]
-        assert sorted(panel["texts"]) == sorted(f"{value:.2f}" for value in finite)
+        assert sorted(panel["texts"]) == sorted(
+            f"{value:.2f}".replace("-", "\u2212") for value in finite
+        )
 
 
 _FIGURE_SIZE = r"width=\linewidth,height=\figuremaxheight,keepaspectratio"
@@ -5096,7 +5120,7 @@ def test_transfer_heatmap_caption_keeps_train_rows_evaluation_columns_and_shared
         row_panels = panels[
             metric_row * len(models) : (metric_row + 1) * len(models)
         ]
-        for model, panel in zip(models, row_panels):
+        for column, (model, panel) in enumerate(zip(models, row_panels)):
             expected = (
                 full_comparison_tables.transfer_selection.query("model == @model")
                 .pivot(index="source", columns="target", values=metric)
@@ -5104,8 +5128,9 @@ def test_transfer_heatmap_caption_keeps_train_rows_evaluation_columns_and_shared
                 .to_numpy(dtype=np.float64)
             )
             assert np.allclose(panel["array"], expected)
-            assert panel["xlabel"] == "Idioma de avaliação"
-            assert panel["ylabel"] == "Idioma de treino"
+            bottom_row = metric_row == 1
+            assert panel["xlabel"] == ("Idioma de avaliação" if bottom_row else "")
+            assert panel["ylabel"] == ("Idioma de treino" if column == 0 else "")
             assert metric_label in panel["title"]
             selected_layers = (
                 full_comparison_tables.transfer_selection.query("model == @model")
@@ -5147,8 +5172,8 @@ def test_full_report_executive_summary_reports_all_four_comparisons_from_data(
         frame = frame[(frame[column] == value) & (frame["status"] == "ok")]
         median = float(frame.loc[np.isfinite(frame["estimate"]), "estimate"].median())
         assert (
-            report_module._num(median) in summary
-            or report_module._signed(median) in summary
+            _tex_number(report_module._num(median)) in summary
+            or _tex_number(report_module._signed(median)) in summary
         )
     assert r"\input{tables/results_synthesis.tex}" not in summary
 
@@ -5308,7 +5333,7 @@ def test_main_result_findings_are_derived_from_the_tables(
         )
         assert f"{claim['negative_n']} de {claim['n']}" in transfer
         assert f"{claim['ci_below_zero_n']} de {claim['n']}" in transfer
-        assert report_module._signed(claim["median"]) in transfer
+        assert _tex_number(report_module._signed(claim["median"])) in transfer
     agreement = report_module.agreement_claim(full_comparison_tables.encoder_agreement)
     block = _result_block(body, _MAIN_RESULT_HEADINGS[2])
     assert report_module._num(agreement["median"]) in block
@@ -6125,9 +6150,14 @@ def test_comparison_figure_title_legend_and_xlabel_do_not_overlap(
     assert layout["figure_xlabel_box"] is not None
     title_box = layout["title_box"]
     assert title_box is not None
+    xlabel_box = layout["figure_xlabel_box"]
+
+    def disjoint(a, b):
+        return a.x1 <= b.x0 or b.x1 <= a.x0 or a.y1 <= b.y0 or b.y1 <= a.y0
+
     for legend_box in layout["legend_boxes"]:
-        assert title_box.y0 >= legend_box.y1 or title_box.y1 <= legend_box.y0
-        assert legend_box.y1 <= layout["figure_xlabel_box"].y0, family
+        assert disjoint(title_box, legend_box), family
+        assert disjoint(xlabel_box, legend_box), family
 
 
 @pytest.mark.parametrize("family", _COMPARISON_BOOTSTRAP_FAMILIES)
@@ -6887,3 +6917,303 @@ def test_full_comparison_manifest_lists_each_artifact_once_sorted(
     on_disk = [p for p in _bundle_files(output) if p != "report_manifest.json"]
     assert listed == on_disk
     assert {Path(p).suffix for p in listed} >= {".pdf", ".png", ".csv", ".tex"}
+
+
+# ===========================================================================
+# Final redesign review: legible main figures on the full 3 × 3 design
+# ===========================================================================
+
+
+@pytest.fixture(scope="module")
+def trilingual_tables(tmp_path_factory):
+    base = tmp_path_factory.mktemp("trilingual") / "results_case"
+    roots = []
+    for profile in ("hubert_base", "wav2vec2_base", "wavlm_base"):
+        root = write_scientific_result_root(
+            base, profile=profile, languages=("eng", "por", "zho")
+        )
+        paths = LayerwiseSuitePaths(root)
+        for language in ("eng", "por", "zho"):
+            _write_layer_faithfulness_generation(paths, profile, language)
+        roots.append(root)
+    return build_report_tables(
+        [load_report_source(validate_result_directory(root)) for root in roots]
+    )
+
+
+def _drawn_text_boxes(fig, renderer):
+    """Every text matplotlib actually draws, with a grouping key per artist."""
+    boxes = []
+    seen = set()
+
+    def add(text, group):
+        if text is None or not text.get_visible() or not text.get_text().strip():
+            return
+        if id(text) in seen:
+            return
+        seen.add(id(text))
+        box = text.get_window_extent(renderer)
+        if box.width > 0 and box.height > 0:
+            boxes.append((text, group, box))
+
+    for attribute in ("_suptitle", "_supxlabel", "_supylabel"):
+        add(getattr(fig, attribute, None), attribute)
+    for text in fig.texts:
+        add(text, "figure")
+    legends = list(fig.legends) + [
+        ax.get_legend() for ax in fig.axes if ax.get_legend() is not None
+    ]
+    for legend in legends:
+        add(legend.get_title(), ("legend", id(legend)))
+        for text in legend.get_texts():
+            add(text, ("legend", id(legend)))
+    for ax in fig.axes:
+        if not ax.get_visible():
+            continue
+        for text in (ax.title, ax._left_title, ax._right_title):
+            add(text, ("title", id(ax)))
+        add(ax.xaxis.label, ("xlabel", id(ax)))
+        add(ax.yaxis.label, ("ylabel", id(ax)))
+        add(ax.xaxis.get_offset_text(), ("offset", id(ax)))
+        add(ax.yaxis.get_offset_text(), ("offset", id(ax)))
+        for axis in (ax.xaxis, ax.yaxis):
+            low, high = sorted(axis.get_view_interval())
+            span = max(high - low, 1e-12)
+            for tick in axis.get_major_ticks():
+                location = tick.get_loc()
+                if location is None or not (
+                    low - 1e-6 * span <= location <= high + 1e-6 * span
+                ):
+                    continue
+                for label in (tick.label1, tick.label2):
+                    add(label, ("ticks", id(axis)))
+        for text in ax.texts:
+            add(text, ("annotation", id(ax)))
+    return boxes
+
+
+def _text_collisions(fig, tolerance: float = 0.5) -> list[str]:
+    """Pairs of drawn texts whose boxes overlap, plus texts cut by the canvas.
+
+    Rotated tick labels of one axis are parallel and offset along that axis, so
+    their axis-aligned boxes may overlap without the glyphs touching; that one
+    pair kind is exempt. Everything else must be disjoint.
+    """
+    fig.canvas.draw()
+    renderer = fig._get_renderer()
+    boxes = _drawn_text_boxes(fig, renderer)
+    canvas = fig.bbox
+    problems = []
+    for text, _, box in boxes:
+        if (
+            box.x0 < canvas.x0 - 1
+            or box.y0 < canvas.y0 - 1
+            or box.x1 > canvas.x1 + 1
+            or box.y1 > canvas.y1 + 1
+        ):
+            problems.append(f"outside canvas: {text.get_text()!r}")
+    for index, (first, group_a, box_a) in enumerate(boxes):
+        for second, group_b, box_b in boxes[index + 1 :]:
+            if (
+                group_a == group_b
+                and isinstance(group_a, tuple)
+                and group_a[0] == "ticks"
+                and (first.get_rotation() % 180 or second.get_rotation() % 180)
+            ):
+                continue
+            if (
+                box_a.x0 < box_b.x1 - tolerance
+                and box_b.x0 < box_a.x1 - tolerance
+                and box_a.y0 < box_b.y1 - tolerance
+                and box_b.y0 < box_a.y1 - tolerance
+            ):
+                problems.append(f"{first.get_text()!r} overlaps {second.get_text()!r}")
+    return problems
+
+
+def _faithfulness_points(fig) -> list[dict]:
+    panels = []
+    for ax in fig.axes:
+        points = [line for line in ax.lines if (line.get_gid() or "").count("|") == 1]
+        if not points:
+            continue
+        panels.append(
+            {
+                "title": ax.get_title(),
+                "points": [
+                    {
+                        "gid": line.get_gid(),
+                        "marker": line.get_marker(),
+                        "color": line.get_color(),
+                        "y": [float(value) for value in line.get_ydata()],
+                    }
+                    for line in points
+                ],
+            }
+        )
+    return panels
+
+
+@pytest.fixture(scope="module")
+def trilingual_main_capture(trilingual_tables, tmp_path_factory):
+    tables = dataclasses.replace(
+        trilingual_tables, planned_figures=report_module.MAIN_RESULT_FIGURES
+    )
+    captured: dict[str, dict] = {}
+    original = report_module._save_report_figure
+
+    def capture(fig, name, figures_dir):
+        report_module._wrap_long_suptitle(fig)
+        legend_texts = [
+            text.get_text()
+            for legend in fig.legends
+            for text in [legend.get_title(), *legend.get_texts()]
+        ]
+        captured[name] = {
+            "collisions": _text_collisions(fig),
+            "faithfulness": _faithfulness_points(fig),
+            "legend_texts": legend_texts,
+            "annotations": [text.get_text() for ax in fig.axes for text in ax.texts],
+        }
+        return original(fig, name, figures_dir)
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(report_module, "_save_report_figure", capture)
+    try:
+        records = render_report_figures(
+            tables, tmp_path_factory.mktemp("trilingual_figures")
+        )
+    finally:
+        patch.undo()
+    return records, captured
+
+
+@pytest.mark.parametrize("name", report_module.MAIN_RESULT_FIGURES)
+def test_main_figures_draw_no_colliding_or_clipped_text_on_the_full_design(
+    trilingual_main_capture, name
+):
+    _, captured = trilingual_main_capture
+    assert name in captured
+    assert captured[name]["collisions"] == []
+
+
+def test_collision_detector_flags_overlapping_titles():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 3, figsize=(4, 2))
+    for ax in axes:
+        ax.set_title("Um título longo demais para um painel estreito")
+    try:
+        assert _text_collisions(fig)
+    finally:
+        plt.close(fig)
+
+
+def test_faithfulness_figure_distinguishes_every_language_and_control(
+    trilingual_main_capture, trilingual_tables
+):
+    records, captured = trilingual_main_capture
+    panels = captured["layer_faithfulness_intervals"]["faithfulness"]
+    assert len(panels) == 6
+    languages = ("eng", "por", "zho")
+    controls = ("top_minus_random", "top_minus_bottom")
+    expected = {f"{language}|{control}" for language in languages for control in controls}
+    for panel in panels:
+        points = panel["points"]
+        assert {point["gid"] for point in points} == expected
+        by_language: dict[str, set] = {}
+        by_control: dict[str, set] = {}
+        for point in points:
+            language, control = point["gid"].split("|")
+            by_language.setdefault(language, set()).add(point["marker"])
+            by_control.setdefault(control, set()).add(point["color"])
+        assert all(len(markers) == 1 for markers in by_language.values())
+        assert len({next(iter(m)) for m in by_language.values()}) == len(languages)
+        assert all(len(colors) == 1 for colors in by_control.values())
+        assert len({next(iter(c)) for c in by_control.values()}) == len(controls)
+        positions = [y for point in points for y in point["y"]]
+        assert len(positions) == len(set(positions))
+    legend = "\n".join(captured["layer_faithfulness_intervals"]["legend_texts"])
+    for label in ("Inglês", "Português", "Mandarim", "top-minus-random", "top-minus-bottom"):
+        assert label in legend
+    record = next(r for r in records if r.name == "layer_faithfulness_intervals")
+    caption = report_module._caption_pt(record, trilingual_tables)
+    assert "formato do marcador" in caption
+    assert "deslocamento vertical" in caption
+    assert "cores distinguem top-minus-random de top-minus-bottom" in caption
+
+
+def test_faithfulness_figure_renders_only_models_with_aligned_data(
+    full_comparison_tables, tmp_path
+):
+    faithfulness = full_comparison_tables.layer_faithfulness
+    subset = faithfulness[faithfulness["model"] != "wavlm_base"]
+    tables = dataclasses.replace(full_comparison_tables, layer_faithfulness=subset)
+    assert "layer_faithfulness_intervals" in tables.planned_figures
+    tables = dataclasses.replace(
+        tables, planned_figures=("layer_faithfulness_intervals",)
+    )
+    _, captured = _capture_figures(tables, tmp_path / "subset")
+    titles = [axis["title"] for axis in captured["layer_faithfulness_intervals"]["axes"]]
+    assert "HuBERT Base" in titles
+    assert "WavLM Base" not in titles
+
+
+def test_faithfulness_figure_still_fails_closed_on_a_missing_control(
+    full_comparison_tables, tmp_path
+):
+    faithfulness = full_comparison_tables.layer_faithfulness
+    drop = (
+        (faithfulness["model"] == "hubert_base")
+        & (faithfulness["source"] == "por")
+        & (faithfulness["true_class"] == "spoof")
+        & (faithfulness["comparison"] == "top_minus_bottom")
+    )
+    assert drop.any()
+    tables = dataclasses.replace(
+        full_comparison_tables,
+        layer_faithfulness=faithfulness[~drop],
+        planned_figures=("layer_faithfulness_intervals",),
+    )
+    with pytest.raises(ValueError, match="language=por"):
+        render_report_figures(tables, tmp_path / "missing_control")
+
+
+def test_faithfulness_is_not_planned_without_displayable_rows(
+    full_comparison_tables,
+):
+    report_module_tables = full_comparison_tables
+    faithfulness = report_module_tables.layer_faithfulness.copy()
+    faithfulness["n_pairs"] = report_module.FAITHFULNESS_PER_CLASS + 1
+    assert not report_module.displayable_layer_faithfulness(
+        dataclasses.replace(report_module_tables, layer_faithfulness=faithfulness)
+    ).shape[0]
+
+
+def test_heatmap_annotations_use_a_true_minus_sign(trilingual_main_capture):
+    _, captured = trilingual_main_capture
+    annotations = [
+        text
+        for name in ("transfer_performance_heatmaps", "encoder_agreement_heatmaps")
+        for text in captured[name]["annotations"]
+    ]
+    assert annotations
+    assert not any(re.search(r"(?<![\w.])-\d", text) for text in annotations)
+    assert report_module._figure_number(-0.114) == "\u22120.11"
+    assert report_module._figure_number(0.5) == "0.50"
+
+
+def test_pooled_counts_name_the_layers_they_aggregate(trilingual_tables, tmp_path):
+    path = tmp_path / "report.tex"
+    write_report_tex(path, trilingual_tables, (), [])
+    tex = _read_text(path)
+    summary = tex.split(r"\section{Resumo executivo}", 1)[1].split(r"\section{", 1)[0]
+    layers = trilingual_tables.diagonal_vs_offdiagonal["layer"].nunique()
+    assert f"agregando as {layers} camadas" in summary
+    synthesis = report_module.build_results_synthesis(trilingual_tables)
+    transfer, agreement = synthesis["result"].iloc[0], synthesis["result"].iloc[1]
+    assert f"agregando as {layers} camadas" in transfer
+    assert f"agregando as {layers} camadas" in agreement
