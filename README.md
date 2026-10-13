@@ -502,7 +502,7 @@ English-only case study that is already complete; it is separate from the future
 trilingual executions above, whose results will live in the `eng-por-zho`
 directories.
 
-The didactic report keeps a question-driven main body (about **16 a 20 páginas**
+The didactic report keeps a question-driven main body (about **20 a 25 páginas**
 for the full trilingual bundle) driven by **sete figuras principais**. Full
 per-cell matrices, layer profiles, and local diagnostics move to **apêndices no mesmo PDF**
 and to the bundle CSVs so nothing published disappears from the PDF or tables.

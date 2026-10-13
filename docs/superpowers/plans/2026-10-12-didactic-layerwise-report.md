@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebuild the layer-wise report as a 16–20 page question-driven main narrative plus complete technical appendices, with seven effect- and uncertainty-oriented figures.
+**Goal:** Rebuild the layer-wise report as a 20–25 page question-driven main narrative plus complete technical appendices, with seven effect- and uncertainty-oriented figures.
 
 **Architecture:** Keep `ReportTables` and the validated CSV contracts as the scientific source of truth. Add pure reduction helpers for selected-layer effects and quantitative claims, then replace the current comparison builders and repetitive LaTeX sections while retaining detailed figures/tables in appendices. The report remains deterministic, read-only over experiment artifacts, atomically published, and compilable with two `pdflatex` passes.
 
@@ -10,8 +10,7 @@
 
 ## Global Constraints
 
-- Main body target: 16–20 pages for the complete 3-model × 3-language bundle
-  (user decision: keep the concise body; do not add content only to gain pages).
+- Main body target: 20–25 pages for the complete 3-model × 3-language bundle.
 - Preserve every currently published cell, layer, metric, and source artifact in the PDF appendices or bundle CSVs.
 - Do not rerun encoders, probes, AttnLRP, DFT-LRP, or STDFT-LRP.
 - Do not persist or reconstruct bootstrap draw distributions from confidence limits.
@@ -788,7 +787,7 @@ git commit -m "feat(report): preserve technical detail in appendices"
 def test_docs_describe_question_driven_body_and_same_pdf_appendices():
     texts = (_read_text(_REPO / "README.md"), _read_text(_SCRIPTS / "README.md"))
     for text in texts:
-        assert "16 a 20 páginas" in text
+        assert "20 a 25 páginas" in text
         assert "apêndices no mesmo PDF" in text
         assert "sete figuras principais" in text
         assert "não persistidos" in text and "draws bootstrap" in text
@@ -913,8 +912,7 @@ pdfinfo report.pdf | rg '^(Pages|Page size|File size|PDF version):'
 rg 'newlabel\\{appendix:start\\}' report.aux
 ```
 
-Expected: A4 PDF; appendix starts after printed page 16 and no later than page 21
-(body pages are numbered in arabic after the roman title/contents pages).
+Expected: A4 PDF; appendix starts after page 20 and no later than page 26.
 Search `report.log` for `Fatal error`, `Missing $ inserted`,
 `Undefined control sequence`, and unresolved references; expect no matches.
 

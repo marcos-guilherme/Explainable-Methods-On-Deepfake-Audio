@@ -2726,7 +2726,7 @@ def _assert_primary_source_citation_policy(paragraph: str) -> None:
 def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
     section = _layerwise_report_doc_section(relative, text)
 
-    assert "16 a 20 páginas" in section
+    assert "20 a 25 páginas" in section
     assert "apêndices no mesmo PDF" in section
     assert "sete figuras principais" in section
     assert "não persistidos" in section and "draws bootstrap" in section
@@ -2763,7 +2763,7 @@ def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
 def test_docs_describe_question_driven_body_and_same_pdf_appendices():
     texts = (_read_text(_REPO / "README.md"), _read_text(_SCRIPTS / "README.md"))
     for text in texts:
-        assert "16 a 20 páginas" in text
+        assert "20 a 25 páginas" in text
         assert "apêndices no mesmo PDF" in text
         assert "sete figuras principais" in text
         assert "não persistidos" in text and "draws bootstrap" in text
@@ -2812,7 +2812,6 @@ def test_parse_visible_main_result_figures_rejects_reordered_list():
             "draws bootstrap não persistidos", "draws bootstrap persistidos", 1
         ),
         lambda text: text.replace("before inclusion", "without verification", 1),
-        lambda text: text.replace("16 a 20 páginas", "20 a 25 páginas", 1),
     ],
 )
 def test_docs_layerwise_report_contract_rejects_documentation_mutations(mutator):

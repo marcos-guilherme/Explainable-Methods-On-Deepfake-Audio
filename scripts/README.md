@@ -279,7 +279,7 @@ trilíngues acima, cujos resultados ficarão nos diretórios `eng-por-zho`.
 conjunto LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
-O **corpo principal** é orientado por perguntas e deve ocupar cerca de **16 a 20 páginas**
+O **corpo principal** é orientado por perguntas e deve ocupar cerca de **20 a 25 páginas**
 no conjunto trilíngue completo. **Sete figuras principais** conduzem Resultados
 (uma pergunta por figura); perfis completos por célula e camada, matrizes
 retiradas do corpo e diagnósticos locais ficam em **apêndices no mesmo PDF** e
