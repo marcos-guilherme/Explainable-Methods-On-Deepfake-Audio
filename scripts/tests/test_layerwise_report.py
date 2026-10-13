@@ -5857,6 +5857,16 @@ def test_report_structure_places_legacy_group_profiles_in_single_technical_annex
     assert r"\subsection{Perfis técnicos por grupo de classe}" in annex
 
 
+def test_long_comparison_questions_start_on_fresh_pages(full_comparison_tex):
+    for heading in (
+        "Até que ponto os encoders concordam?",
+        "Como a relevância muda entre corpora e idiomas?",
+        "Quanto a relevância se desloca em frequência?",
+        "As faixas apontadas sustentam a decisão?",
+    ):
+        assert rf"\clearpage" "\n" rf"\subsection{{{heading}}}" in full_comparison_tex
+
+
 def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(
     full_comparison_tables, tmp_path
 ):

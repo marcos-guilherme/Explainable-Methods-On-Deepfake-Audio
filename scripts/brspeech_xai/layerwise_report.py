@@ -7221,7 +7221,15 @@ def _main_results_section(
         "",
     ]
     for block in blocks:
-        lines += block(tables, figures)
+        content = block(tables, figures)
+        if content and block in {
+            _agreement_block,
+            _relevance_shift_block,
+            _spectral_block,
+            _faithfulness_block,
+        }:
+            lines += [r"\clearpage"]
+        lines += content
     lines += [
         r"\subsection{Síntese}",
         r"A Tabela~\ref{tab:results-synthesis} resume as "
