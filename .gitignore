@@ -243,6 +243,10 @@ configs/english.yaml
 configs/portuguese-metadata.yaml
 configs/mandarin-metadata.yaml
 
+# Local agent planning and execution artifacts.
+.superpowers/
+docs/superpowers/
+
 # Local Portuguese derived metadata outputs.
 **/portuguese_preparation/
 
