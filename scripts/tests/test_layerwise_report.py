@@ -5645,6 +5645,47 @@ def test_frequency_profile_claims_preserve_co_dominant_bands(
     assert claims["layers_dominant"].tolist() == [halfway, len(layers) - halfway]
 
 
+def test_frequency_layer_dominance_covers_each_diagonal_layer(
+    full_comparison_tables,
+):
+    dominance = report_module.frequency_layer_dominance(full_comparison_tables)
+    expected = {
+        (model, language, layer)
+        for model in full_comparison_tables.models
+        for language in full_comparison_tables.languages
+        for layer in LAYER_ORDER
+    }
+    assert set(zip(dominance["model"], dominance["language"], dominance["layer"])) == (
+        expected
+    )
+
+
+def test_frequency_layer_dominance_preserves_exact_ties(full_comparison_tables):
+    frame = full_comparison_tables.band_relevance.copy()
+    model = full_comparison_tables.models[0]
+    language = full_comparison_tables.languages[0]
+    layer = LAYER_ORDER[0]
+    mask = (
+        (frame["model"] == model)
+        & (frame["source"] == language)
+        & (frame["target"] == language)
+        & (frame["measure"] == "absolute_normalized")
+        & (frame["layer"] == layer)
+    )
+    frame.loc[mask, "mean"] = 0.0
+    frame.loc[mask & (frame["band"] == 1), "mean"] = 1.0
+    frame.loc[mask & (frame["band"] == 2), "mean"] = 1.0
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=frame)
+
+    dominance = report_module.frequency_layer_dominance(tables)
+    tied = dominance[
+        (dominance["model"] == model)
+        & (dominance["language"] == language)
+        & (dominance["layer"] == layer)
+    ]
+    assert tied["band"].tolist() == [1, 2]
+
+
 def test_frequency_heatmap_uses_the_same_diagonal_scope_as_its_claims(
     full_comparison_tables, tmp_path
 ):

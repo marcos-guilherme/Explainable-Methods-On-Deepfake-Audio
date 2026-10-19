@@ -7507,6 +7507,39 @@ def _profiles_detail(figures: Mapping[str, FigureRecord], name: str) -> str:
     )
 
 
+def frequency_layer_dominance(tables: ReportTables) -> pd.DataFrame:
+    """Return every dominant band for each diagonal model/language/layer cell."""
+    columns = ["model", "language", "layer", "band", "band_label", "mean_mass"]
+    frame = tables.band_relevance
+    selected = frame[
+        (frame["source"] == frame["target"])
+        & (frame["measure"] == "absolute_normalized")
+    ].copy()
+    if selected.empty:
+        return pd.DataFrame(columns=columns)
+
+    selected["language"] = selected["target"]
+    identity = ["model", "language", "layer"]
+    maximum = selected.groupby(identity)["mean"].transform("max")
+    dominant = selected[selected["mean"] == maximum].copy()
+    dominant = dominant.rename(columns={"mean": "mean_mass"})
+    model_order = {model: index for index, model in enumerate(tables.models)}
+    language_order = {
+        language: index for index, language in enumerate(tables.languages)
+    }
+    dominant["_model_order"] = dominant["model"].map(model_order)
+    dominant["_language_order"] = dominant["language"].map(language_order)
+    return (
+        dominant.sort_values(
+            ["_model_order", "_language_order", "layer", "band"],
+            kind="mergesort",
+        )
+        .drop(columns=["_model_order", "_language_order"])
+        .reset_index(drop=True)
+        .loc[:, columns]
+    )
+
+
 def frequency_profile_claims(tables: ReportTables) -> pd.DataFrame:
     """Return the recurring dominant band for each diagonal model/language cell."""
     columns = [
@@ -7518,31 +7551,22 @@ def frequency_profile_claims(tables: ReportTables) -> pd.DataFrame:
         "layers_dominant",
         "n_layers",
     ]
+    per_layer = frequency_layer_dominance(tables)
+    if per_layer.empty:
+        return pd.DataFrame(columns=columns)
+
     frame = tables.band_relevance
     selected = frame[
         (frame["source"] == frame["target"])
         & (frame["measure"] == "absolute_normalized")
     ].copy()
-    if selected.empty:
-        return pd.DataFrame(columns=columns)
-
     selected["language"] = selected["target"]
-    identity = ["model", "language", "layer"]
-    per_layer = (
-        selected.sort_values(
-            identity + ["mean", "band"],
-            ascending=[True, True, True, False, True],
-            kind="mergesort",
-        )
-        .drop_duplicates(identity)
-        .loc[:, identity + ["band", "band_label"]]
-    )
     dominance = (
         per_layer.groupby(
             ["model", "language", "band", "band_label"], as_index=False, sort=True
-        )
-        .size()
-        .rename(columns={"size": "layers_dominant"})
+        )["layer"]
+        .nunique()
+        .rename(columns={"layer": "layers_dominant"})
     )
     mean_mass = (
         selected.groupby(["model", "language", "band"], as_index=False, sort=True)[
