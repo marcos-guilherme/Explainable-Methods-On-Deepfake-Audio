@@ -285,6 +285,13 @@ no conjunto trilíngue completo. **Oito figuras principais** conduzem Resultados
 retiradas do corpo e diagnósticos locais ficam em **apêndices no mesmo PDF** e
 nos CSVs do bundle — nada publicado deixa de aparecer no PDF ou nos CSVs.
 
+As legendas das figuras são curtas: dizem o que está sendo mostrado e como ler
+os eixos, cores ou marcadores. A pergunta científica, o resultado, a
+interpretação e a cautela ficam no texto do bloco, sem repetição na legenda. A
+conclusão apresenta um perfil separado para cada encoder, sempre nos mesmos
+cinco eixos: desempenho diagonal, comportamento ao longo das camadas,
+frequência, transferência e fidelidade.
+
 As oito figuras principais são, nesta ordem fixa:
 
 1. `transfer_performance_heatmaps` — visão matricial treino $\times$ avaliação;

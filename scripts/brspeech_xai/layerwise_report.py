@@ -5760,196 +5760,114 @@ def _figure_block(record: FigureRecord, tables: ReportTables) -> list[str]:
     ]
 
 
-def _caption_scope(record: FigureRecord) -> str:
-    """Name each model and language once, without listing every cell."""
-    models = list(dict.fromkeys(model for model, _, _ in record.cells))
-    languages = [
-        language
-        for language in LANGUAGE_ORDER
-        if any(language in (origin, target) for _, origin, target in record.cells)
-    ]
-    if not models:
-        return ""
-    noun = "Modelo" if len(models) == 1 else "Modelos"
-    return (
-        f" {noun}: {', '.join(_tt(model) for model in models)}; "
-        f"idiomas: {escape_latex(', '.join(languages))}."
-    )
-
-
 def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
     band_range = escape_latex(_band_range_text(tables))
-    scope = _caption_scope(record)
     if record.name == "performance_by_layer":
         body = (
-            "Pergunta: como a separação muda ao longo das camadas? "
-            "ROC-AUC (sem limiar, de 0 a 1) e EER diagnóstico (em \\%) do probe "
-            "linear por camada, no teste do idioma-alvo; a linha tracejada marca "
-            "o acaso (ROC-AUC 0,5). Limite principal: um único conjunto de teste "
-            "por célula, sem intervalo de confiança."
+            "ROC-AUC e EER diagnóstico do probe linear em cada camada. "
+            "A linha tracejada marca o acaso para a ROC-AUC (0,5)."
         )
     elif record.name == "fixed_threshold_by_layer":
         body = (
-            "Pergunta: como o limiar calibrado na origem se comporta em cada "
-            "camada? Acurácia, MCC, TPR e FPR no limiar fixo; a classe positiva "
-            "é sintético (rótulo 1), TPR é a fração de sintéticos detectados e "
-            "FPR a de reais marcados como sintéticos. Limite principal: o limiar "
-            "não é recalibrado no idioma de avaliação."
+            "Acurácia, MCC, TPR e FPR por camada no limiar calibrado na origem. "
+            "A classe positiva é sintético; TPR mede sintéticos detectados e FPR, "
+            "áudios reais marcados como sintéticos."
         )
     elif record.name == "transfer_performance_heatmaps":
         body = (
-            "Pergunta: quão bem o probe separa áudio real de sintético em cada "
-            "combinação de idioma de treino e de avaliação? Cada coluna de "
-            "painéis é um modelo; a fileira superior mostra a ROC-AUC da camada "
-            "selecionada e a inferior o MCC dessa mesma camada. Em cada mapa, as "
-            "linhas representam o idioma de treino e as colunas o idioma de "
-            "avaliação, com o valor e a camada escritos em cada célula; a camada "
-            "é exclusivamente a de maior ROC-AUC, sem "
-            "maximizar o MCC separadamente. Limite principal: a camada é "
-            "escolhida no próprio conjunto-alvo avaliado, o que pode tornar o "
-            "valor exibido otimista."
+            "Desempenho na camada de maior ROC-AUC de cada combinação. "
+            "As linhas indicam o idioma de treino e as colunas, o de avaliação; "
+            "a parte superior mostra ROC-AUC e a inferior, o MCC da mesma camada."
         )
     elif record.name in ("transfer_delta_roc_auc", "transfer_delta_mcc"):
         metric = "ROC-AUC" if record.name.endswith("roc_auc") else "MCC"
         body = (
-            f"Pergunta: quanto muda a {metric} fora da diagonal em relação ao "
-            "sistema diagonal do mesmo conjunto-alvo? Um painel por modelo; cada "
-            "linha é uma transferência treino$\\rightarrow$avaliação na camada "
-            "selecionada pela ROC-AUC da célula, com o ponto na estimativa e o "
-            f"segmento no intervalo bootstrap de {_ci_percent_tex()} persistido; a linha "
-            "tracejada marca efeito zero. Limite principal: corpus e idioma mudam "
-            "juntos, portanto o efeito não identifica uma causa."
+            f"Mudança de {metric} na transferência em relação ao sistema diagonal "
+            "do mesmo conjunto-alvo. O ponto é a estimativa, o segmento é o "
+            f"intervalo bootstrap de {_ci_percent_tex()} e a linha tracejada marca zero."
         )
     elif record.name == "encoder_agreement_heatmaps":
         body = (
-            "Pergunta: em que medida encoders distintos concordam nos mesmos "
-            "áudios e condições? As linhas representam o idioma de treino e as "
-            "colunas representam o idioma de avaliação; cada célula mostra a "
+            "Concordância entre encoders nos mesmos áudios e condições. "
+            "As linhas indicam o idioma de treino e as colunas, o de avaliação; "
+            "cada célula mostra a "
             f"mediana entre as {_layer_count(tables.encoder_agreement)} camadas, "
-            "em escala própria para cada métrica. Limite principal: acordo alto "
-            "não torna os modelos intercambiáveis e não indica qual modelo está "
-            "correto."
+            "em escala própria para cada métrica."
         )
     elif record.name == "language_shift_intervals":
         body = (
-            "Pergunta: quanto muda a relevância ao trocar o conjunto-alvo com "
-            "modelo, idioma de treino e probe fixos? As linhas correspondem aos "
-            "modelos e as colunas correspondem ao idioma de treino do probe; "
-            "cada ponto codifica um par de idiomas-alvo em uma camada pela "
-            "distância Jensen--Shannon, e as hastes reproduzem exclusivamente "
-            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
-            "agregado. Limite principal: corpus, áudio e idioma mudam juntos, "
-            "portanto a figura não isola um efeito causal do idioma."
+            "Mudança da relevância entre conjuntos-alvo com probe fixo, medida "
+            "pela distância Jensen--Shannon. As linhas separam os encoders, as "
+            "colunas o idioma de treino, e as hastes mostram os intervalos bootstrap."
         )
     elif record.name == "spectral_divergence_by_layer":
         body = (
-            "Pergunta: quanto se desloca em frequência a massa de relevância "
-            "entre sistemas diagonais de idiomas distintos? As linhas correspondem "
-            "aos modelos e as colunas correspondem aos pares de idiomas; cada "
-            "painel mostra a camada no eixo horizontal e Wasserstein em Hz no eixo "
-            r"vertical. A curva e a faixa reproduzem \texttt{estimate} e "
-            r"\texttt{ci\_low}--\texttt{ci\_high} persistidos para o grupo "
-            "agregado. Limite principal: distância maior não significa resultado "
-            "melhor nem pior e não identifica a causa do deslocamento."
+            "Deslocamento da massa de relevância em frequência entre sistemas "
+            "diagonais, medido por Wasserstein em Hz. As colunas separam os pares "
+            "de idiomas; a curva percorre as camadas e a faixa mostra o intervalo "
+            "bootstrap."
         )
     elif record.name == "layer_faithfulness_intervals":
-        shown = displayable_layer_faithfulness(tables)
-        shown_models = [
-            escape_latex(_model_name(model))
-            for model in tables.models
-            if model in set(shown["model"])
-        ]
-        shown_languages = [
-            _language_name(language)
-            for language in LANGUAGE_ORDER
-            if language in set(shown["source"])
-        ]
         body = (
-            "Pergunta: remover as faixas mais relevantes altera mais o escore do "
-            f"probe do que remover os controles? Células diagonais na camada "
-            f"{FINAL_LAYER}, com {_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras "
-            "por classe (contrato fixo do protocolo de fidelidade). As colunas "
-            f"correspondem aos modelos com dados alinhados ({_join_pt(shown_models)}) "
-            "e as linhas às classes verdadeiras real e sintético. O eixo vertical "
-            r"mostra $k$ e o eixo horizontal mostra \texttt{mean\_difference}; os "
-            r"segmentos reproduzem \texttt{ci\_low}--\texttt{ci\_high} persistidos. "
-            "O formato do marcador identifica o idioma da célula diagonal "
-            f"({_join_pt(shown_languages)}), as cores distinguem top-minus-random "
-            "de top-minus-bottom e cada combinação de idioma e controle tem um "
-            "deslocamento vertical fixo em torno de cada $k$, sem sobreposição. "
-            "Limite principal: a intervenção STFT controlada não implica "
-            "causalidade no mundo real."
+            f"Alteração do escore após remover faixas na camada {FINAL_LAYER}. "
+            "As colunas separam os encoders, as linhas as classes, o eixo "
+            r"horizontal mostra a diferença média e o vertical, $k$. "
+            "O formato do marcador identifica o idioma, as cores distinguem "
+            "top-minus-random de top-minus-bottom e o deslocamento vertical separa "
+            "os controles."
         )
     elif record.name == "dft_relevance_heatmap":
         body = (
-            "Pergunta: em que bandas de frequência cada camada concentra a "
-            "relevância? Média, no conjunto fixo de amostras XAI, da relevância "
-            "AttnLRP absoluta normalizada após a DFT, por camada e banda mel "
-            f"({band_range}); a massa em banda de cada amostra soma 1. Limite "
-            "principal: os valores são frações da massa em banda, não do "
-            "espectro inteiro."
+            "Massa média de relevância absoluta normalizada por camada e faixa "
+            f"mel ({band_range}). Em cada amostra, a massa distribuída entre as "
+            "faixas soma 1."
         )
     elif record.name == "class_relevance_by_layer":
         body = (
-            "Pergunta: a relevância difere entre áudio real e sintético? "
-            "Relevância média absoluta normalizada por classe verdadeira e a "
-            "diferença sintético $-$ real, por camada; a massa em banda "
-            f"({band_range}) soma 1 por amostra. Limite principal: médias "
-            "descritivas, sem intervalo de confiança."
+            "Massa média de relevância por classe verdadeira e diferença "
+            f"sintético $-$ real em cada camada e faixa ({band_range})."
         )
     elif record.name == "decision_reorganization_by_layer":
         body = (
-            "Pergunta: entre quais camadas adjacentes a relevância da decisão "
-            "final mais se reorganiza? Similaridade cosseno e variação L1 "
-            "normalizada (adimensionais) da massa temporal de relevância; média "
-            "e intervalo normal de 95\\% sobre as amostras. Limite principal: "
-            "descreve a relevância, não a representação interna do encoder."
+            "Mudança da relevância temporal entre camadas adjacentes. As curvas "
+            "mostram similaridade cosseno e variação L1 normalizada, com média e "
+            "intervalo normal de 95\\% entre amostras."
         )
     elif record.name == "stdft_examples":
         body = (
-            "Pergunta: como a relevância se distribui no tempo e na frequência? "
-            "Mapas STDFT-LRP (janela de Hann de 512 amostras, passo 256) de uma "
-            "amostra real e uma sintética na primeira, na intermediária e na "
-            "última camada, em escala simétrica comum. Limite principal: "
-            "exemplos ilustrativos, não representativos do conjunto."
+            "Mapas STDFT-LRP de uma amostra real e uma sintética na primeira, "
+            "na intermediária e na última camada. Todos usam a mesma escala "
+            "simétrica de cor."
         )
     elif record.name == "conservation_diagnostics":
         body = _conservation_caption(tables)
     elif record.name == "diagonal_vs_offdiagonal":
         body = (
-            "Pergunta: a diferença de desempenho na transferência depende da "
-            r"camada? $\Delta$ ROC-AUC e $\Delta$ MCC (fora da diagonal menos "
-            "diagonal, no mesmo conjunto-alvo) por camada, com intervalo "
-            f"bootstrap de {_ci_percent_tex()} persistido e referência em zero. "
-            "Limite principal: corpus e idioma mudam juntos."
+            r"$\Delta$ ROC-AUC e $\Delta$ MCC por camada, calculados como "
+            "transferência menos sistema diagonal no mesmo conjunto-alvo. "
+            f"As faixas mostram intervalos bootstrap de {_ci_percent_tex()}."
         )
     elif record.name == "encoder_agreement_by_layer":
         body = (
-            "Pergunta: o acordo entre encoders muda ao longo das camadas? Uma "
-            "curva por par de modelos para acordos de desempenho (Spearman do "
+            "Acordo entre pares de encoders ao longo das camadas. As curvas "
+            "mostram acordos de desempenho (Spearman do "
             "escore, fração de decisões iguais, kappa) e de explicação "
-            "(cosseno, distância JS), em eixos separados; a faixa mostra os "
-            "quartis entre células. Limite principal: a faixa não substitui os "
-            "intervalos bootstrap do CSV."
+            "(cosseno e distância JS); a faixa mostra os quartis entre células."
         )
     elif record.name == "language_shift":
         body = (
-            "Pergunta: a mudança de relevância difere entre áudio real e "
-            "sintético? Distância Jensen--Shannon (bits) entre pares de "
+            "Distância Jensen--Shannon entre pares de "
             "idiomas-alvo por camada, com probe fixo, para os grupos agregado, "
-            "real e sintético. Limite principal: corpus, áudio e idioma mudam "
-            "juntos."
+            "real e sintético."
         )
     elif record.name == "spectral_divergence":
         body = (
-            "Pergunta: o deslocamento em frequência difere entre áudio real e "
-            "sintético? Distância de Wasserstein (Hz) entre sistemas diagonais "
-            "por camada, para os grupos agregado, real e sintético. Limite "
-            "principal: não separa corpus de idioma nem identifica a causa."
+            "Distância de Wasserstein em frequência entre sistemas diagonais, "
+            "por camada, para os grupos agregado, real e sintético."
         )
     else:
         body = escape_latex(record.title)
-    return body + scope
+    return body
 
 
 def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
@@ -5982,13 +5900,9 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
 
 def _conservation_caption(tables: ReportTables) -> str:
     return (
-        "Pergunta: as explicações conservam o escore dentro das tolerâncias? "
-        "Quatro verificações por camada, em escala logarítmica, cada uma com "
-        "seu limite: resíduo bias-zeroed em uma amostra de validação, resíduos "
-        "da DFT no conjunto fixo de amostras XAI e da STDFT no subconjunto "
-        "STDFT, e recálculo do escore pela regra rtol/atol. Limite principal: "
-        "as populações diferem, então os painéis não são comparáveis entre si; "
-        "os escopos estão listados no texto."
+        "Verificações numéricas de conservação por camada, em escala logarítmica: "
+        "resíduo bias-zeroed, resíduos da DFT e da STDFT e erro no recálculo do "
+        "escore. Cada painel tem seu próprio limite de aceitação."
     )
 
 
@@ -7283,18 +7197,10 @@ def _frequency_profile_table(claims: pd.DataFrame) -> str:
                 ),
             ]
         )
-    models = list(dict.fromkeys(str(model) for model in claims["model"]))
-    languages = list(
-        dict.fromkeys(str(language) for language in claims["language"])
-    )
     caption = (
-        "Pergunta: como ler as faixas dominantes da "
-        "Figura~\\ref{fig:dft_relevance_heatmap}? Cada linha mostra a faixa com "
-        "maior massa média de relevância no maior número de camadas; empates são "
-        "mantidos como faixas co-dominantes. Limite principal: a tabela resume a "
-        "recorrência e não substitui o perfil completo do mapa. "
-        f"Modelos: {', '.join(_tt(model) for model in models)}; "
-        f"idiomas: {escape_latex(', '.join(languages))}."
+        "Faixas com maior massa média de relevância no maior número de camadas "
+        "da Figura~\\ref{fig:dft_relevance_heatmap}. Empates aparecem como "
+        "faixas co-dominantes."
     )
     return _comparison_compact_table(
         caption,
@@ -7623,47 +7529,204 @@ def _cross_cutting_limitations_section(tables: ReportTables) -> list[str]:
     ]
 
 
-def _short_conclusion_section(tables: ReportTables) -> list[str]:
+def _profile_diagonal_text(tables: ReportTables, model: str) -> str:
     selected = tables.transfer_selection
-    off_diagonal = selected[selected["source"] != selected["target"]]
+    rows = selected[
+        (selected["model"] == model) & (selected["source"] == selected["target"])
+    ]
+    if rows.empty:
+        return "Não há células diagonais disponíveis para este encoder."
+    return (
+        f"Nas {len(rows)} células diagonais, a ROC-AUC selecionada tem mediana "
+        f"{_num(rows['roc_auc'].median())} e o MCC da mesma camada, "
+        f"{_num(rows['mcc'].median())}."
+    )
+
+
+def _profile_layer_text(tables: ReportTables, model: str) -> str:
+    selected = tables.transfer_selection
+    diagonal_selected = selected[
+        (selected["model"] == model) & (selected["source"] == selected["target"])
+    ]
+    performance = tables.performance
+    diagonal = performance[
+        (performance["model"] == model)
+        & (performance["source"] == performance["target"])
+    ]
+    if diagonal.empty:
+        return "Não há perfil diagonal por camada disponível para este encoder."
+
+    by_layer = diagonal.groupby("layer", sort=True)["roc_auc"].median()
+    first_layer, last_layer = int(by_layer.index.min()), int(by_layer.index.max())
+    peak = float(by_layer.max())
+    peak_layers = [
+        str(int(layer))
+        for layer, value in by_layer.items()
+        if np.isclose(float(value), peak)
+    ]
+    peak_location = (
+        f"na camada {peak_layers[0]}"
+        if len(peak_layers) == 1
+        else f"nas camadas {_join_pt(peak_layers)}"
+    )
+    selected_layers = sorted(
+        {int(layer) for layer in diagonal_selected["selected_layer"]}
+    )
+    selected_text = (
+        _join_pt([str(layer) for layer in selected_layers])
+        if selected_layers
+        else "não disponível"
+    )
+    return (
+        f"As camadas escolhidas nas células diagonais são {selected_text}. "
+        f"A mediana da ROC-AUC diagonal é {_num(by_layer.loc[first_layer])} na "
+        f"camada {first_layer} e {_num(by_layer.loc[last_layer])} na camada "
+        f"{last_layer}; o maior valor mediano, {_num(peak)}, ocorre "
+        f"{peak_location}. "
+        "A comparação entre extremos não implica evolução monotônica."
+    )
+
+
+def _profile_frequency_text(tables: ReportTables, model: str) -> str:
+    claims = frequency_profile_claims(tables)
+    rows = claims[claims["model"] == model]
+    if rows.empty:
+        return "Não há resumo de relevância por faixa disponível para este encoder."
+    parts = []
+    for language in tables.languages:
+        language_rows = rows[rows["language"] == language]
+        if language_rows.empty:
+            continue
+        labels = [
+            escape_latex(str(label)).replace("–", "--")
+            for label in language_rows["band_label"]
+        ]
+        parts.append(
+            f"{escape_latex(_language_name(language))}: {_join_pt(labels)} em "
+            f"{int(language_rows['layers_dominant'].iloc[0])} de "
+            f"{int(language_rows['n_layers'].iloc[0])} camadas"
+        )
+    if not parts:
+        return "Não há resumo de relevância por faixa disponível para este encoder."
+    return "Faixas mais frequentemente dominantes: " + "; ".join(parts) + "."
+
+
+def _profile_transfer_text(tables: ReportTables, model: str) -> str:
+    parts = []
+    for metric, label in (("delta_roc_auc", "ROC-AUC"), ("delta_mcc", "MCC")):
+        rows = selected_transfer_effects(tables, metric)
+        rows = rows[rows["model"] == model]
+        claim = transfer_effect_claim(rows)
+        if claim["n"]:
+            parts.append(
+                f"$\\Delta$ {label} com mediana {_signed(claim['median'])}; "
+                f"{claim['negative_n']} de {claim['n']} estimativas negativas"
+            )
+    if not parts:
+        return "Não há células fora da diagonal disponíveis para este encoder."
+    return "; ".join(parts) + "."
+
+
+def _profile_faithfulness_text(tables: ReportTables, model: str) -> str:
+    claim = faithfulness_claim(
+        _aligned_layer_faithfulness(tables).query("model == @model")
+    )
+    if claim.empty:
+        return "Não há resultados de fidelidade alinhados para este encoder."
+    row = claim.iloc[0]
+    return (
+        f"{int(row['ci_above_zero_n'])} de {int(row['total'])} intervalos ficam "
+        "inteiramente acima de zero e "
+        f"{int(row['ci_below_zero_n'])} de {int(row['total'])} ficam "
+        "inteiramente abaixo de zero."
+    )
+
+
+def _encoder_profile_sections(tables: ReportTables) -> list[str]:
+    """Parallel, data-derived profiles used in the report conclusion."""
+    lines: list[str] = []
+    for model in tables.models:
+        lines += [
+            rf"\subsection{{{escape_latex(_model_name(model))}}}",
+            rf"\textbf{{Desempenho diagonal.}} {_profile_diagonal_text(tables, model)}",
+            "",
+            rf"\textbf{{Ao longo das camadas.}} {_profile_layer_text(tables, model)}",
+            "",
+            rf"\textbf{{Frequência.}} {_profile_frequency_text(tables, model)}",
+            "",
+            rf"\textbf{{Transferência.}} {_profile_transfer_text(tables, model)}",
+            "",
+            rf"\textbf{{Fidelidade.}} {_profile_faithfulness_text(tables, model)}",
+            "",
+        ]
+    return lines
+
+
+def _cross_encoder_conclusion(tables: ReportTables) -> list[str]:
+    if len(tables.models) < 2:
+        return [
+            r"\subsection{Comparação entre encoders}",
+            "Este relatório contém apenas um encoder; portanto, não sustenta uma "
+            "comparação entre arquiteturas.",
+            "",
+        ]
+
+    diagonal = tables.transfer_selection[
+        tables.transfer_selection["source"] == tables.transfer_selection["target"]
+    ]
+    medians = diagonal.groupby("model", sort=False)["roc_auc"].median()
+    performance = ""
+    if len(medians) >= 2:
+        low, high = str(medians.idxmin()), str(medians.idxmax())
+        performance = (
+            "Nas células diagonais, a mediana de ROC-AUC vai de "
+            f"{_num(medians.loc[low])} em "
+            f"{escape_latex(_model_name(low))} a {_num(medians.loc[high])} em "
+            f"{escape_latex(_model_name(high))}. "
+        )
+
+    frequency = frequency_profile_claims(tables)
+    frequency_models = int(frequency["model"].nunique()) if not frequency.empty else 0
+    frequency_text = (
+        "Os perfis de frequência também mudam entre encoders e, dentro de cada "
+        "encoder, podem mudar entre idiomas. "
+        if frequency_models >= 2
+        else ""
+    )
+    return [
+        r"\subsection{Comparação entre encoders}",
+        performance
+        + "As camadas de melhor separação, as perdas de transferência e os "
+        "resultados de fidelidade são apresentados nos mesmos cinco eixos acima, "
+        "o que permite comparar os modelos sem misturar medidas diferentes. "
+        + frequency_text,
+        "Em conjunto, os resultados mostram associação entre a escolha do encoder "
+        "e os padrões observados; não permitem atribuir essas diferenças a uma "
+        "característica específica do pré-treino ou ao idioma isoladamente.",
+        "",
+    ]
+
+
+def _short_conclusion_section(tables: ReportTables) -> list[str]:
+    profile_intro = (
+        "O perfil abaixo usa"
+        if len(tables.models) == 1
+        else f"Os {len(tables.models)} perfis abaixo usam"
+    )
     lines = [
         rf"\section{{{_SECTION_TITLES_PT[4]}}}",
         r"\label{sec:conclusao}",
-        "O relatório separa discriminação sem limiar de comportamento no limiar "
-        "fixo e mantém ROC-AUC e MCC vinculados à mesma camada selecionada.",
+        f"{profile_intro} a mesma sequência de leitura para mostrar o "
+        "que muda quando se troca o encoder: desempenho diagonal, comportamento "
+        "ao longo das camadas, relevância em frequência, transferência e "
+        "fidelidade.",
+        "",
     ]
-    if off_diagonal.empty:
-        lines.append(
-            "Como o relatório contém apenas a diagonal, os resultados sustentam "
-            "somente a descrição do caso carregado, não uma conclusão de transferência."
-        )
-    else:
-        deltas = _delta_claims(tables)
-        negative = [
-            _DELTA_LABELS_TEX[metric]
-            for metric, claim in deltas.items()
-            if 2 * claim["negative_n"] > claim["n"]
-        ]
-        if negative:
-            lines.append(
-                f"Na maioria das estimativas de {_join_pt(negative)}, o desempenho "
-                "fora da diagonal fica abaixo do sistema diagonal do mesmo "
-                "conjunto-alvo."
-            )
-        lines.append(
-            "As células fora da diagonal documentam transferência sob mudança de "
-            "corpus/idioma; diferenças de ROC-AUC e das métricas no limiar não "
-            "identificam um efeito causal do idioma."
-        )
-    if not _aligned_layer_faithfulness(tables).empty or any(
-        _has_comparison(tables, name)
-        for name in ("encoder_agreement", "language_shift", "spectral_divergence")
-    ):
-        lines.append(
-            "As análises de explicação descrevem como a relevância do probe varia "
-            "entre encoders, conjuntos e camadas; não são pistas acústicas verificadas."
-        )
+    lines += _encoder_profile_sections(tables)
+    lines += _cross_encoder_conclusion(tables)
     lines += [
+        "As comparações de transferência combinam mudança de corpus e idioma e, "
+        "por isso, não identificam um efeito causal do idioma.",
         r"A Tabela~\ref{tab:results-synthesis} reúne as respostas e as cautelas "
         f"das {_synthesis_scope_tex(tables)}.",
         "",

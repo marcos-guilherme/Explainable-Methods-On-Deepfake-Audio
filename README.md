@@ -506,6 +506,11 @@ The didactic report keeps a question-driven main body (about **16 a 20 páginas*
 for the full trilingual bundle) driven by **oito figuras principais**. Full
 per-cell matrices, layer profiles, and local diagnostics move to **apêndices no mesmo PDF**
 and to the bundle CSVs so nothing published disappears from the PDF or tables.
+Figure captions only explain what is shown and how to read the visual encoding;
+the question, finding, interpretation, and caution remain in the surrounding
+result block. The conclusion gives each encoder a parallel five-part profile:
+diagonal performance, layer behavior, frequency relevance, transfer, and
+faithfulness.
 Seven appendix sections mirror protocol/provenance, full performance,
 emergence/reorganization, spectral relevance and XAI↔performance association,
 complete bootstrap comparison tables, detailed faithfulness, and STDFT/conservation

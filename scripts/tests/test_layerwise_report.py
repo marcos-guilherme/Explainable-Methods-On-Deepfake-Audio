@@ -3195,14 +3195,16 @@ def test_build_local_script_does_not_silence_the_stale_pdf_removal(eng_bundle):
     assert "-ErrorAction Stop" in script
 
 
-# --- M3: the model appears once per caption ---
+# --- M3: captions stay readable instead of repeating internal identifiers ---
 
 
 def _captions(tex: str) -> list[str]:
     return re.findall(r"\\caption\{(.*)\}\n\\label", tex)
 
 
-def test_captions_state_the_model_once(eng_tex, two_model_roots, tmp_path):
+def test_figure_captions_omit_internal_model_identifiers(
+    eng_tex, two_model_roots, tmp_path
+):
     captions = [
         caption
         for caption in _captions(eng_tex)
@@ -3210,7 +3212,7 @@ def test_captions_state_the_model_once(eng_tex, two_model_roots, tmp_path):
     ]
     assert len(captions) >= 6
     for caption in captions:
-        assert caption.count(r"\texttt{hubert\_base}") == 1, caption
+        assert r"\texttt{hubert\_base}" not in caption, caption
 
     first, second = two_model_roots
     output = tmp_path / "two"
@@ -3218,10 +3220,7 @@ def test_captions_state_the_model_once(eng_tex, two_model_roots, tmp_path):
     tex = _read_text(output / "report.tex")
     for caption in _captions(tex):
         for model in (r"\texttt{hubert\_base}", r"\texttt{wavlm\_base}"):
-            assert caption.count(model) <= 1, caption
-    performance = next(c for c in _captions(tex) if "ROC-AUC (sem limiar" in c)
-    assert r"\texttt{hubert\_base}" in performance
-    assert r"\texttt{wavlm\_base}" in performance
+            assert model not in caption, caption
 
 
 # --- M4: Portuguese for emergence values that were not identified ---
@@ -4977,8 +4976,8 @@ def test_report_uses_heatmaps_as_main_and_by_layer_as_technical_detail(
     assert r"\label{fig:encoder_agreement}" not in full_comparison_tex
     for phrase in (
         "Pergunta:",
-        "linhas representam o idioma de treino",
-        "colunas representam o idioma de avaliação",
+        "linhas indicam o idioma de treino",
+        "colunas, o de avaliação",
         "mediana entre as 12 camadas",
         "não torna os modelos intercambiáveis",
     ):
@@ -5495,17 +5494,32 @@ def _caption_record(name: str) -> report_module.FigureRecord:
     return report_module.FigureRecord(name, (), name, "", "", "", "", (), (), ())
 
 
-def test_transfer_heatmap_caption_states_question_encoding_and_optimistic_limit(
+def test_transfer_heatmap_caption_is_short_and_only_explains_the_encoding(
     full_comparison_tables,
 ):
     caption = report_module._caption_pt(
         _caption_record("transfer_performance_heatmaps"), full_comparison_tables
     )
-    assert caption.startswith("Pergunta:")
     assert "linhas" in caption and "colunas" in caption
-    assert "Limite principal:" in caption
-    assert "otimista" in caption
-    assert "conjunto-alvo avaliado" in caption
+    assert "ROC-AUC" in caption and "MCC" in caption
+    assert "Pergunta:" not in caption
+    assert "Limite principal:" not in caption
+    assert "otimista" not in caption
+    assert len(caption) < 360
+
+
+def test_all_figure_captions_avoid_the_old_formula_and_internal_ids(
+    full_comparison_tables,
+):
+    for name in full_comparison_tables.planned_figures:
+        caption = report_module._caption_pt(
+            _caption_record(name), full_comparison_tables
+        )
+        assert "Pergunta:" not in caption, name
+        assert "Limite principal:" not in caption, name
+        for model in full_comparison_tables.models:
+            assert model not in caption, (name, model)
+        assert len(caption) < 500, (name, len(caption))
 
 
 def test_synthesis_is_described_as_its_comparative_questions_only(
@@ -5579,11 +5593,12 @@ def test_main_captions_derive_layer_scope_from_tables_and_contracts(
     )
     assert f"camada {report_module.FINAL_LAYER}" in caption
     assert report_module.FAITHFULNESS_PER_CLASS == 8
-    assert "oito amostras por classe" in caption
-    assert "contrato fixo do protocolo" in caption
+    assert "contrato fixo do protocolo" not in caption
+    assert "Limite principal:" not in caption
+    assert len(caption) < 500
 
 
-def test_cross_cutting_limitations_and_short_conclusion(full_comparison_tex):
+def test_cross_cutting_limitations_and_encoder_conclusion(full_comparison_tex):
     body = _main_body(full_comparison_tex)
     limitations = body.split(r"\section{Limitações transversais}", 1)[1].split(
         r"\section{Conclusão}", 1
@@ -5596,9 +5611,70 @@ def test_cross_cutting_limitations_and_short_conclusion(full_comparison_tex):
     assert "não identificam um efeito causal do idioma" in conclusion
     assert r"Tabela~\ref{tab:results-synthesis}" in conclusion
     assert conclusion.count(r"Figura~\ref") == 0
-    assert len(conclusion) < 1600
     for phrase in ("causado pelo idioma", "o idioma causa", "efeito causal do idioma é"):
         assert phrase not in body
+
+
+def test_conclusion_gives_each_encoder_the_same_five_part_profile(
+    full_comparison_tables, full_comparison_tex
+):
+    conclusion = _main_body(full_comparison_tex).split(r"\section{Conclusão}", 1)[1]
+    headings = [
+        rf"\subsection{{{report_module._model_name(model)}}}"
+        for model in full_comparison_tables.models
+    ]
+    positions = [conclusion.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+
+    for index, (model, heading) in enumerate(
+        zip(full_comparison_tables.models, headings)
+    ):
+        start = conclusion.index(heading)
+        end = (
+            conclusion.index(headings[index + 1], start)
+            if index + 1 < len(headings)
+            else conclusion.index(r"\subsection{Comparação entre encoders}", start)
+        )
+        profile = conclusion[start:end]
+        for axis in (
+            "Desempenho diagonal",
+            "Ao longo das camadas",
+            "Frequência",
+            "Transferência",
+            "Fidelidade",
+        ):
+            assert rf"\textbf{{{axis}.}}" in profile, (model, axis)
+        assert model not in profile
+
+
+def test_encoder_profile_numbers_are_derived_from_the_loaded_tables(
+    full_comparison_tables,
+):
+    model = full_comparison_tables.models[0]
+    selected = full_comparison_tables.transfer_selection
+    diagonal = selected[
+        (selected["model"] == model) & (selected["source"] == selected["target"])
+    ]
+    text = "\n".join(report_module._encoder_profile_sections(full_comparison_tables))
+    heading = rf"\subsection{{{report_module._model_name(model)}}}"
+    profile = text.split(heading, 1)[1].split(r"\subsection{", 1)[0]
+    assert report_module._num(diagonal["roc_auc"].median()) in profile
+    for layer in sorted(diagonal["selected_layer"].astype(int).unique()):
+        assert str(layer) in profile
+
+    changed_selection = selected.copy()
+    mask = (changed_selection["model"] == model) & (
+        changed_selection["source"] == changed_selection["target"]
+    )
+    changed_selection.loc[mask, "roc_auc"] = 0.123
+    changed = dataclasses.replace(
+        full_comparison_tables, transfer_selection=changed_selection
+    )
+    changed_text = "\n".join(report_module._encoder_profile_sections(changed))
+    changed_profile = changed_text.split(heading, 1)[1].split(
+        r"\subsection{", 1
+    )[0]
+    assert report_module._num(0.123) in changed_profile
 
 
 def test_comparison_narrative_explains_method_and_links_each_result(
@@ -5961,24 +6037,27 @@ def test_spectral_main_figure_has_canonical_model_rows_and_pair_columns(
         assert first["ylabel"].startswith(report_module._model_name(model) + "\n")
 
 
-def test_shift_and_spectral_main_captions_state_question_encoding_and_limit(
+def test_shift_and_spectral_main_captions_only_explain_visual_encoding(
     full_comparison_tex,
 ):
-    for name in ("language_shift_intervals", "spectral_divergence_by_layer"):
+    expected = {
+        "language_shift_intervals": ("Jensen--Shannon", "intervalos bootstrap"),
+        "spectral_divergence_by_layer": ("Wasserstein em Hz", "intervalo bootstrap"),
+    }
+    for name, phrases in expected.items():
         figure = full_comparison_tex.split(rf"\label{{fig:{name}}}", 1)[0].rsplit(
             r"\begin{figure}[H]", 1
         )[1]
-        assert "Pergunta:" in figure
-        assert "Limite principal:" in figure
-    assert r"\texttt{ci\_low}--\texttt{ci\_high}" in full_comparison_tex
-    assert "distância maior não significa resultado melhor nem pior" in full_comparison_tex
+        assert "Pergunta:" not in figure
+        assert "Limite principal:" not in figure
+        for phrase in phrases:
+            assert phrase in figure
+    assert "distância maior não significa modelo melhor nem pior" in full_comparison_tex
     for phrase in (
-        "linhas correspondem aos modelos",
-        "colunas correspondem ao idioma de treino do probe",
-        "cada ponto codifica um par de idiomas-alvo em uma camada",
-        "colunas correspondem aos pares de idiomas",
-        "camada no eixo horizontal",
-        "Wasserstein em Hz no eixo vertical",
+        "linhas separam os encoders",
+        "colunas o idioma de treino",
+        "colunas separam os pares de idiomas",
+        "curva percorre as camadas",
     ):
         assert phrase in full_comparison_tex
 
@@ -7016,18 +7095,23 @@ def test_single_source_appendix_keeps_stable_sections_with_unavailable_notes(
     assert r"\input{tables/layer_faithfulness_summary.tex}" not in fidelity
 
 
-def test_all_captions_state_question_encoding_and_limit_without_inventory(
+def test_all_figure_captions_are_short_and_leave_cautions_in_the_prose(
     full_comparison_tex, eng_tex
 ):
     for tex in (full_comparison_tex, eng_tex):
-        for caption in _captions(tex):
-            if caption.startswith("Inventário"):
-                continue
-            assert caption.startswith("Pergunta:"), caption[:80]
-            assert "Limite principal:" in caption, caption[:80]
-            assert r"Idioma (treino$\rightarrow$avaliação):" not in caption
-            assert r"Modelos e idiomas (treino$\rightarrow$avaliação):" not in caption
-            assert "Escopos: (1)" not in caption
+        figures = re.findall(
+            r"\\begin{figure}\[H\](.*?)\\end{figure}", tex, flags=re.DOTALL
+        )
+        assert figures
+        for figure in figures:
+            caption = re.search(r"\\caption\{(.*)\}\n\\label", figure)
+            assert caption is not None
+            text = caption.group(1)
+            assert "Pergunta:" not in text, text[:80]
+            assert "Limite principal:" not in text, text[:80]
+            assert len(text) < 500, text[:80]
+        assert r"\textbf{Pergunta:}" in tex
+        assert r"\textbf{Cautela:}" in tex
 
 
 def test_full_comparison_manifest_lists_each_artifact_once_sorted(
