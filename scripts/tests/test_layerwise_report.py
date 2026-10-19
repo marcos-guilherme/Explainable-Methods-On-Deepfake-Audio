@@ -5677,6 +5677,42 @@ def test_encoder_profile_numbers_are_derived_from_the_loaded_tables(
     assert report_module._num(0.123) in changed_profile
 
 
+def test_cross_encoder_conclusion_compares_layers_transfer_and_faithfulness(
+    full_comparison_tables,
+):
+    comparison = "\n".join(
+        report_module._cross_encoder_conclusion(full_comparison_tables)
+    )
+
+    diagonal = full_comparison_tables.performance.query("source == target")
+    for model in full_comparison_tables.models:
+        rows = diagonal[diagonal["model"] == model]
+        by_layer = rows.groupby("layer")["roc_auc"].median()
+        peak_layer = int(by_layer.idxmax())
+        assert (
+            f"{report_module._model_name(model)}: camada {peak_layer}" in comparison
+        )
+
+    transfer_medians = {}
+    for model in full_comparison_tables.models:
+        rows = report_module.selected_transfer_effects(
+            full_comparison_tables, "delta_roc_auc"
+        )
+        transfer_medians[model] = rows[rows["model"] == model]["estimate"].median()
+    best_transfer = max(transfer_medians, key=transfer_medians.get)
+    assert report_module._model_name(best_transfer) in comparison
+    assert report_module._signed(transfer_medians[best_transfer]) in comparison
+
+    faithfulness = report_module.faithfulness_claim(
+        report_module._aligned_layer_faithfulness(full_comparison_tables)
+    )
+    leader = report_module._faithfulness_leader(faithfulness)
+    if leader is not None:
+        assert report_module._model_name(leader) in comparison
+        row = faithfulness[faithfulness["model"] == leader].iloc[0]
+        assert f"{int(row['ci_above_zero_n'])} de {int(row['total'])}" in comparison
+
+
 def test_comparison_narrative_explains_method_and_links_each_result(
     full_comparison_tex,
 ):

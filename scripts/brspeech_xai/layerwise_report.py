@@ -7671,35 +7671,121 @@ def _cross_encoder_conclusion(tables: ReportTables) -> list[str]:
             "",
         ]
 
+    def displayed_leaders(values: pd.Series) -> tuple[list[str], str]:
+        displayed_maximum = _num(values.max())
+        leaders = [
+            str(model)
+            for model, value in values.items()
+            if _num(value) == displayed_maximum
+        ]
+        return leaders, displayed_maximum
+
     diagonal = tables.transfer_selection[
         tables.transfer_selection["source"] == tables.transfer_selection["target"]
     ]
-    medians = diagonal.groupby("model", sort=False)["roc_auc"].median()
-    performance = ""
-    if len(medians) >= 2:
-        low, high = str(medians.idxmin()), str(medians.idxmax())
-        performance = (
-            "Nas células diagonais, a mediana de ROC-AUC vai de "
-            f"{_num(medians.loc[low])} em "
-            f"{escape_latex(_model_name(low))} a {_num(medians.loc[high])} em "
-            f"{escape_latex(_model_name(high))}. "
+    performance_parts = []
+    for metric, label in (("roc_auc", "ROC-AUC"), ("mcc", "MCC")):
+        medians = diagonal.groupby("model", sort=False)[metric].median()
+        if len(medians) < 2:
+            continue
+        leaders, value = displayed_leaders(medians)
+        performance_parts.append(
+            f"a maior mediana de {label} é {value}, em "
+            f"{_join_pt([escape_latex(_model_name(model)) for model in leaders])}"
         )
-
-    frequency = frequency_profile_claims(tables)
-    frequency_models = int(frequency["model"].nunique()) if not frequency.empty else 0
-    frequency_text = (
-        "Os perfis de frequência também mudam entre encoders e, dentro de cada "
-        "encoder, podem mudar entre idiomas. "
-        if frequency_models >= 2
+    performance = (
+        "Nas células diagonais, " + "; ".join(performance_parts) + "."
+        if performance_parts
         else ""
     )
+
+    diagonal_performance = tables.performance[
+        tables.performance["source"] == tables.performance["target"]
+    ]
+    peaks = []
+    for model in tables.models:
+        rows = diagonal_performance[diagonal_performance["model"] == model]
+        if rows.empty:
+            continue
+        by_layer = rows.groupby("layer", sort=True)["roc_auc"].median()
+        peaks.append(
+            f"{escape_latex(_model_name(model))}: camada {int(by_layer.idxmax())} "
+            f"({_num(by_layer.max())})"
+        )
+    layer_text = (
+        "A camada com maior mediana diagonal de ROC-AUC também muda: "
+        + "; ".join(peaks)
+        + "."
+        if peaks
+        else ""
+    )
+
+    frequency = frequency_profile_claims(tables)
+    stable_frequency = []
+    for model in tables.models:
+        rows = frequency[frequency["model"] == model]
+        if rows.empty or rows["language"].nunique() != len(tables.languages):
+            continue
+        one_per_language = rows.groupby("language").size().eq(1).all()
+        same_band = rows["band_label"].nunique() == 1
+        all_layers = (rows["layers_dominant"] == rows["n_layers"]).all()
+        if one_per_language and same_band and all_layers:
+            stable_frequency.append(
+                f"{escape_latex(_model_name(model))} mantém "
+                f"{escape_latex(str(rows['band_label'].iloc[0])).replace('–', '--')} "
+                "como faixa dominante em todos os idiomas e camadas"
+            )
+    frequency_text = (
+        "Na frequência, " + "; ".join(stable_frequency) + "."
+        if stable_frequency
+        else (
+            "Os perfis de frequência mudam entre encoders e podem mudar entre "
+            "idiomas."
+        )
+    )
+
+    transfer_parts = []
+    for metric, label in (("delta_roc_auc", "ROC-AUC"), ("delta_mcc", "MCC")):
+        rows = selected_transfer_effects(tables, metric)
+        medians = rows.groupby("model", sort=False)["estimate"].median()
+        if len(medians) < 2:
+            continue
+        maximum = float(medians.max())
+        displayed_maximum = _signed(maximum)
+        leaders = [
+            str(model)
+            for model, value in medians.items()
+            if _signed(value) == displayed_maximum
+        ]
+        transfer_parts.append(
+            f"a maior mediana de $\\Delta$ {label} é {displayed_maximum}, em "
+            f"{_join_pt([escape_latex(_model_name(model)) for model in leaders])}"
+        )
+    transfer_text = (
+        "Na transferência, " + "; ".join(transfer_parts) + "."
+        if transfer_parts
+        else ""
+    )
+
+    faithfulness = faithfulness_claim(_aligned_layer_faithfulness(tables))
+    faithfulness_text = ""
+    leader = _faithfulness_leader(faithfulness)
+    if leader is not None:
+        row = faithfulness[faithfulness["model"] == leader].iloc[0]
+        faithfulness_text = (
+            f"Na fidelidade, {escape_latex(_model_name(leader))} tem a maior "
+            "proporção de intervalos inteiramente acima de zero "
+            f"({int(row['ci_above_zero_n'])} de {int(row['total'])}); isso indica "
+            "maior concordância entre explicação e intervenção neste protocolo, "
+            "não superioridade geral."
+        )
     return [
         r"\subsection{Comparação entre encoders}",
-        performance
-        + "As camadas de melhor separação, as perdas de transferência e os "
-        "resultados de fidelidade são apresentados nos mesmos cinco eixos acima, "
-        "o que permite comparar os modelos sem misturar medidas diferentes. "
-        + frequency_text,
+        performance,
+        layer_text,
+        frequency_text,
+        transfer_text,
+        faithfulness_text,
         "Em conjunto, os resultados mostram associação entre a escolha do encoder "
         "e os padrões observados; não permitem atribuir essas diferenças a uma "
         "característica específica do pré-treino ou ao idioma isoladamente.",
