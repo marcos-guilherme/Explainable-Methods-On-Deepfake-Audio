@@ -6890,6 +6890,7 @@ def _result_block(
     interpretation: str,
     caution: str,
     details: str,
+    evidence_blocks: Sequence[str] = (),
 ) -> list[str]:
     if not 1 <= len(findings) <= 3:
         raise ValueError(f"result block {key} needs one to three findings")
@@ -6904,6 +6905,9 @@ def _result_block(
     ]
     for name in shown:
         lines += _figure_block(figures[name], tables)
+    for evidence in evidence_blocks:
+        if evidence:
+            lines += [evidence, ""]
     return [
         *lines,
         r"\textbf{Resultado:}",
@@ -7259,6 +7263,47 @@ def frequency_profile_claims(tables: ReportTables) -> pd.DataFrame:
     )
 
 
+def _frequency_profile_table(claims: pd.DataFrame) -> str:
+    body = []
+    for (model, language), rows in claims.groupby(
+        ["model", "language"], sort=False
+    ):
+        labels = [
+            escape_latex(str(label)).replace("–", "--")
+            for label in rows["band_label"]
+        ]
+        body.append(
+            [
+                escape_latex(_model_name(str(model))),
+                escape_latex(_language_name(str(language))),
+                _join_pt(labels),
+                (
+                    f"{int(rows['layers_dominant'].iloc[0])} de "
+                    f"{int(rows['n_layers'].iloc[0])}"
+                ),
+            ]
+        )
+    models = list(dict.fromkeys(str(model) for model in claims["model"]))
+    languages = list(
+        dict.fromkeys(str(language) for language in claims["language"])
+    )
+    caption = (
+        "Pergunta: como ler as faixas dominantes da "
+        "Figura~\\ref{fig:dft_relevance_heatmap}? Cada linha mostra a faixa com "
+        "maior massa média de relevância no maior número de camadas; empates são "
+        "mantidos como faixas co-dominantes. Limite principal: a tabela resume a "
+        "recorrência e não substitui o perfil completo do mapa. "
+        f"Modelos: {', '.join(_tt(model) for model in models)}; "
+        f"idiomas: {escape_latex(', '.join(languages))}."
+    )
+    return _comparison_compact_table(
+        caption,
+        "tab:frequency-profile-summary",
+        ["Modelo", "Idioma", "Faixa(s) dominante(s)", "Camadas"],
+        body,
+    )
+
+
 def _frequency_profile_block(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
@@ -7323,6 +7368,7 @@ def _frequency_profile_block(
             r"(Figura~\ref{fig:class_relevance_by_layer}); "
             f"{_csv_tex('dft_band_relevance')}."
         ),
+        evidence_blocks=(_frequency_profile_table(claims),),
     )
 
 

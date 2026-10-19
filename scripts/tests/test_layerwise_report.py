@@ -5390,6 +5390,37 @@ def test_main_frequency_profile_names_each_encoder_and_language_from_data(
         assert f"{row.layers_dominant} de {row.n_layers} camadas" in block
 
 
+def test_frequency_profile_table_decodes_figure_before_the_findings(
+    full_comparison_tables, full_comparison_tex
+):
+    block = _result_block(
+        _main_body(full_comparison_tex),
+        "Em quais faixas a relevância se concentra para cada encoder e idioma?",
+    )
+    figure = block.index(r"\label{fig:dft_relevance_heatmap}")
+    table = block.index(r"\label{tab:frequency-profile-summary}")
+    findings = block.index(r"\textbf{Resultado:}")
+    assert figure < table < findings
+
+    table_text = block[table : block.index(r"\end{table}", table)]
+    claims = report_module.frequency_profile_claims(full_comparison_tables)
+    assert table_text.count(r"\\") == len(
+        claims[["model", "language"]].drop_duplicates()
+    ) + 1
+    for (model, language), rows in claims.groupby(["model", "language"], sort=False):
+        labels = [
+            str(label).replace("–", "--") for label in rows["band_label"].tolist()
+        ]
+        assert report_module._model_name(model) in table_text
+        assert report_module._language_name(language) in table_text
+        for label in labels:
+            assert label in table_text
+        assert (
+            f"{int(rows['layers_dominant'].iloc[0])} de "
+            f"{int(rows['n_layers'].iloc[0])}"
+        ) in table_text
+
+
 def test_frequency_profile_claims_preserve_co_dominant_bands(
     full_comparison_tables,
 ):
