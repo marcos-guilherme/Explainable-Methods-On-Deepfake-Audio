@@ -5513,7 +5513,7 @@ def test_main_result_blocks_follow_approved_order_with_their_figures(
         )[0]
         assert 1 <= findings.count(r"\item ") <= 3, heading
         assert "Detalhe completo:" in block
-        assert "material tabular suplementar" in block
+        assert "suplementar" in block
         assert ".csv" not in block
     for name in _MAIN_RESULT_FIGURES:
         assert full_comparison_tex.count(rf"\label{{fig:{name}}}") == 1
@@ -5984,7 +5984,7 @@ def test_comparison_narrative_explains_method_and_links_each_result(
     for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
         assert rf"\input{{tables/{family}.tex}}" not in body
-    assert "material tabular suplementar" in body
+    assert "suplementar" in body
     assert ".csv" not in body
     assert r"\label{fig:encoder_agreement}" not in full_comparison_tex
     assert r"\texttt{ci\_low}--\texttt{ci\_high}" in section

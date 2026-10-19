@@ -6765,21 +6765,17 @@ def _performance_appendix(
     names = ("performance_by_layer", "fixed_threshold_by_layer")
     present = [name for name in names if name in figures]
     stability_tex = _probe_stability_tex(tables)
-    stability_csv = (
-        f"; variabilidade do probe em {_csv_tex('probe_stability_by_layer')}"
-        if stability_tex.strip()
-        else ""
+    stability_note = (
+        "; e variabilidade do probe" if stability_tex.strip() else ""
     )
     lines = [
         *_appendix_section(1, "app:desempenho"),
         *_provenance(
             "métricas por camada (ROC-AUC, EER diagnóstico, acurácia, MCC, TPR "
-            f"e FPR) em {_csv_tex('performance_by_layer')}; desempenho de "
-            f"calibração em {_csv_tex('calibration_performance_by_layer')}; "
-            f"camada selecionada por fonte em {_csv_tex('transfer_selected_layers')}; "
-            f"recalibração few-shot em {_csv_tex('threshold_recalibration')}"
-            + stability_csv
-            + "."
+            "e FPR); desempenho de calibração; camada selecionada por fonte; "
+            "recalibração few-shot"
+            + stability_note
+            + ", todos disponíveis nas tabelas suplementares."
         ),
         "A camada reportada na síntese é selecionada exclusivamente na calibração "
         "da origem, pelo menor EER, antes de examinar qualquer conjunto-alvo. A "
@@ -6884,10 +6880,9 @@ def _emergence_appendix(
     lines = [
         *_appendix_section(2, "app:emergencia"),
         *_provenance(
-            "início (onset) e consolidação persistidos pelo agregador do "
-            f"experimento, sem recálculo, em {_csv_tex('emergence_layers')}; "
-            "similaridade e variação L1 entre camadas adjacentes, com o número "
-            f"de amostras, em {_csv_tex('decision_reorganization')}."
+            "início (onset), consolidação, similaridade e variação L1 entre "
+            "camadas adjacentes, com o número de amostras, disponíveis nas "
+            "tabelas suplementares."
         ),
     ]
     if tables.emergence.empty:
@@ -6968,10 +6963,9 @@ def _relevance_appendix(
         *_appendix_section(3, "app:relevancia"),
         *_provenance(
             "relevância absoluta normalizada por célula, camada e banda mel, "
-            f"no conjunto fixo de amostras XAI, em {_csv_tex('dft_band_relevance')} "
-            f"e, por classe verdadeira, em {_csv_tex('class_relevance')}; "
-            "associação entre concentração espectral e ROC-AUC em "
-            f"{_csv_tex('xai_performance_association')}."
+            "no conjunto fixo de amostras XAI, total e por classe verdadeira; "
+            "e associação entre concentração espectral e ROC-AUC, disponíveis "
+            "nas tabelas suplementares."
         ),
     ]
     for name in names:
@@ -7024,9 +7018,8 @@ def _comparisons_appendix(
     lines += [
         *_provenance(
             "limites \\texttt{ci\\_low}--\\texttt{ci\\_high} de cada grupo, camada "
-            "e célula em "
-            + _join_pt([_csv_tex(name) for name in present])
-            + r"; o contrato do intervalo bootstrap está no glossário "
+            "e célula nas tabelas suplementares das comparações disponíveis; "
+            r"o contrato do intervalo bootstrap está no glossário "
             r"(Seção~\ref{sec:orientacao})."
         ),
         "As tabelas agregam medianas e faixas entre linhas; os valores por "
@@ -7124,9 +7117,9 @@ def _stdft_conservation_appendix(
     lines = [
         *_appendix_section(6, "app:stdft-conservacao"),
         *_provenance(
-            f"exemplos STDFT por célula, camada e classe em {_csv_tex('stdft_examples')}; "
-            "verificações de conservação por célula e camada, com tolerâncias e "
-            f"a amostra de validação, em {_csv_tex('conservation_by_layer')}."
+            "exemplos STDFT por célula, camada e classe; e verificações de "
+            "conservação por célula e camada, com tolerâncias e amostra de "
+            "validação, disponíveis nas tabelas suplementares."
         ),
         *_abbreviation_note(tables),
         r"\subsection{Exemplos tempo-frequência STDFT}",
@@ -7357,8 +7350,8 @@ def _overview_block(
             "capturada por um conjunto adicional de desenvolvimento."
         ),
         details=(
-            rf"Apêndice~\ref{{app:desempenho}}; {_csv_tex('transfer_selected_layers')} "
-            f"e {_csv_tex('performance_by_layer')}."
+            r"Apêndice~\ref{app:desempenho}; tabelas suplementares de seleção "
+            "de camada e desempenho."
         ),
     )
 
