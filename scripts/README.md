@@ -280,7 +280,7 @@ conjunto LaTeX portátil em português com figuras (PDF e PNG), tabelas (CSV e
 LaTeX), `report_manifest.json` e `build_local.ps1`.
 
 O **corpo principal** é orientado por perguntas e deve ocupar cerca de **16 a 20 páginas**
-no conjunto trilíngue completo. **Oito figuras principais** conduzem Resultados
+no conjunto trilíngue completo. **Sete figuras principais** conduzem Resultados
 (uma pergunta por bloco); perfis completos por célula e camada, matrizes
 retiradas do corpo e diagnósticos locais ficam em **apêndices no mesmo PDF** e
 nos CSVs do bundle — nada publicado deixa de aparecer no PDF ou nos CSVs.
@@ -293,16 +293,15 @@ apresenta um perfil separado para cada encoder, sempre nos mesmos cinco eixos:
 desempenho diagonal, comportamento ao longo das camadas, frequência,
 transferência e fidelidade.
 
-As oito figuras principais são, nesta ordem fixa:
+As sete figuras principais são, nesta ordem fixa:
 
 1. `transfer_performance_heatmaps` — visão matricial treino $\times$ avaliação;
-2. `transfer_delta_roc_auc` — queda de ROC-AUC fora da diagonal;
-3. `transfer_delta_mcc` — queda de MCC fora da diagonal;
-4. `encoder_agreement_heatmaps` — acordo entre encoders;
-5. `dft_relevance_heatmap` — relevância por faixa, encoder, idioma e camada;
-6. `language_shift_intervals` — mudança de relevância entre corpora/idiomas;
-7. `spectral_divergence_by_layer` — divergência espectral da relevância;
-8. `layer_faithfulness_intervals` — fidelidade por intervenção (camada 12 diagonal).
+2. `transfer_delta_combined` — quedas combinadas de ROC-AUC e MCC fora da diagonal;
+3. `encoder_agreement_heatmaps` — acordo entre encoders;
+4. `dft_relevance_heatmap` — relevância por faixa, encoder, idioma e camada;
+5. `language_shift_intervals` — mudança de relevância entre corpora/idiomas;
+6. `spectral_divergence_by_layer` — divergência espectral da relevância;
+7. `layer_faithfulness_intervals` — fidelidade por intervenção (camada 12 diagonal).
 
 Os CSVs de comparação com contrato estável são, nesta ordem:
 
@@ -317,11 +316,10 @@ Os **contratos CSV existentes** (colunas, identidades de comparação e demais
 tabelas por camada) **permanecem estáveis**; o gerador só acrescenta sínteses e
 LaTeX compacto.
 
-**Regra de camada selecionada na transferência.** Em cada célula dos mapas de
-transferência, a camada é selecionada exclusivamente pela maior ROC-AUC; o MCC
-mostrado vem dessa mesma camada. Os efeitos `delta_roc_auc` e `delta_mcc` nas
-figuras de queda reutilizam essa camada selecionada (regra compartilhada com
-`transfer_selected_layers.csv`), em vez de escolher camadas distintas por métrica.
+**Regra de camada selecionada na transferência.** Para cada modelo e idioma de
+origem, seleciona-se a camada de menor EER na calibração da origem antes de
+examinar qualquer teste-alvo. Todos os alvos reutilizam essa camada, e ROC-AUC e
+MCC são reportados nela sem reseleção específica por métrica.
 
 Os **sete apêndices** no mesmo PDF cobrem: (1) protocolo, inventário e
 proveniência; (2) desempenho completo por camada; (3) emergência e

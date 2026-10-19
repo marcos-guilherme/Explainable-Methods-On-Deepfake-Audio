@@ -22,6 +22,7 @@ import pandas as pd
 from .bands import F_MAX, F_MIN, N_BANDS, mel_band_edges
 from .encoder_suite import LANGUAGE_ORDER, LAYER_ORDER, ROLE_ORDER
 from .layerwise_paths import LayerwiseSuitePaths, resolve_active_generation
+from .metrics import compute_eer
 
 FINAL_LAYER = LAYER_ORDER[-1]
 # Pairs per class fixed by the faithfulness protocol (layerwise_faithfulness);
@@ -269,8 +270,7 @@ FIGURE_FAMILIES: tuple[str, ...] = (
 )
 MAIN_RESULT_FIGURES: tuple[str, ...] = (
     "transfer_performance_heatmaps",
-    "transfer_delta_roc_auc",
-    "transfer_delta_mcc",
+    "transfer_delta_combined",
     "encoder_agreement_heatmaps",
     "dft_relevance_heatmap",
     "language_shift_intervals",
@@ -310,7 +310,13 @@ def _planned_figures(
     )
     additions: list[str] = []
     if "diagonal_vs_offdiagonal" not in omitted_comparisons:
-        additions.extend(("transfer_delta_roc_auc", "transfer_delta_mcc"))
+        additions.extend(
+            (
+                "transfer_delta_combined",
+                "transfer_delta_roc_auc",
+                "transfer_delta_mcc",
+            )
+        )
     if "encoder_agreement" not in omitted_comparisons:
         additions.extend(("encoder_agreement_heatmaps", "encoder_agreement_by_layer"))
     if "language_shift" not in omitted_comparisons:
@@ -390,6 +396,8 @@ _SAMPLE_COLUMNS = frozenset(
 _VALIDATION_KIND = "bias_zeroed_model_rule_check"
 _CONSERVATION_FIELDS = (
     "bias_zeroed_validation_residual",
+    "bias_zeroed_validation_absolute_error",
+    "bias_zeroed_validation_bound",
     "max_bias_inclusive_attribution_gap",
     "max_score_recompute_absolute_error",
     "score_recompute_rtol",
@@ -460,6 +468,7 @@ class LoadedReportSource:
 
     source: ReportSource
     performance: pd.DataFrame
+    calibration_performance: pd.DataFrame
     emergence: pd.DataFrame
     band_relevance: pd.DataFrame
     class_relevance: pd.DataFrame
@@ -495,6 +504,8 @@ class ReportTables:
     models: tuple[str, ...]
     languages: tuple[str, ...]
     performance: pd.DataFrame
+    calibration_performance: pd.DataFrame
+    shortcut_audit: pd.DataFrame
     emergence: pd.DataFrame
     band_relevance: pd.DataFrame
     class_relevance: pd.DataFrame
@@ -506,6 +517,7 @@ class ReportTables:
     band_edges: pd.DataFrame
     band_edge_provenance: pd.DataFrame
     transfer_selection: pd.DataFrame
+    threshold_recalibration: pd.DataFrame
     xai_performance_association: pd.DataFrame
     planned_figures: tuple[str, ...]
     omitted_comparisons: Mapping[str, str]
@@ -1164,6 +1176,50 @@ def _load_performance(
     return performance, cell_predictions
 
 
+def _load_calibration_performance(
+    source: ReportSource, paths: LayerwiseSuitePaths
+) -> pd.DataFrame:
+    """Load source-calibration EER used to select one layer before testing."""
+    profile = source.identity.profile
+    rows: list[dict[str, object]] = []
+    for language in source.identity.languages:
+        for layer in LAYER_ORDER:
+            path = paths.thresholds(profile, layer, language)
+            context = f"{profile}/{language}/calibration/layer_{layer:02d}"
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                detector = payload["detectors"]["ad"]
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"calibration threshold artifact is unreadable for {context}"
+                ) from exc
+            if (
+                payload.get("source_language") != language
+                or payload.get("layer") != layer
+                or detector.get("method") != "eer"
+                or not _is_finite_number(detector.get("calibration_eer"))
+                or not _is_finite_number(detector.get("threshold"))
+            ):
+                raise ValueError(
+                    f"calibration threshold artifact is incompatible for {context}"
+                )
+            rows.append(
+                {
+                    "source": language,
+                    "layer": layer,
+                    "selection_split": "source_calibration",
+                    "selection_metric": "minimum_eer",
+                    "calibration_eer": float(detector["calibration_eer"]),
+                    "threshold": float(detector["threshold"]),
+                    "n": int(detector.get("n", 0)),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    frame.insert(0, "model", profile)
+    frame.insert(2, "language", frame["source"])
+    return _ordered(frame, ["model", "source", "layer"])
+
+
 def _load_emergence(source: ReportSource) -> pd.DataFrame:
     profile = source.identity.profile
     languages = source.identity.languages
@@ -1378,6 +1434,16 @@ def _load_layer_xai_cell(
             raise ValueError(f"{context}: conservation field {field} must be finite")
     if conservation["tolerance"] <= 0 or conservation.get("n") != len(samples):
         raise ValueError(f"{context}: conservation tolerance or sample count is invalid")
+    if (
+        conservation.get("bias_zeroed_validation_accepted") is not True
+        or conservation["bias_zeroed_validation_absolute_error"] < 0
+        or conservation["bias_zeroed_validation_bound"] <= 0
+        or conservation["bias_zeroed_validation_absolute_error"]
+        > conservation["bias_zeroed_validation_bound"]
+    ):
+        raise ValueError(
+            f"{context}: bias-zeroed mixed-bound certificate was not accepted"
+        )
     if conservation.get("validation_kind") != _VALIDATION_KIND:
         raise ValueError(
             f"{context}: validation_kind must be {_VALIDATION_KIND!r}, "
@@ -1483,6 +1549,11 @@ def _load_layer_xai_cell(
         "validation_kind": conservation["validation_kind"],
         "validation_sample_id": validation_sample_id,
         **{field: float(conservation[field]) for field in _CONSERVATION_FIELDS},
+        "bias_zeroed_validation_accepted": True,
+        "bias_zeroed_validation_ratio": float(
+            conservation["bias_zeroed_validation_absolute_error"]
+            / conservation["bias_zeroed_validation_bound"]
+        ),
         "max_score_recompute_ratio": max_score_ratio,
     }
     return {
@@ -1582,6 +1653,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
     _check_persisted_band_counts(source, band_edges)
 
     performance, cell_predictions = _load_performance(source, paths)
+    calibration_performance = _load_calibration_performance(source, paths)
     probe_stability = _load_probe_stability_summary(source, paths)
     layer_faithfulness = _load_layer_faithfulness_summaries(source, paths)
     emergence = _load_emergence(source)
@@ -1634,6 +1706,7 @@ def load_report_source(source: ReportSource) -> LoadedReportSource:
     return LoadedReportSource(
         source=source,
         performance=performance,
+        calibration_performance=calibration_performance,
         emergence=emergence,
         band_relevance=_ordered(
             band, ["model", "source", "target", "layer", "measure", "band"]
@@ -1750,26 +1823,188 @@ def _omitted_comparisons(
     return omitted
 
 
-def build_transfer_selection(performance: pd.DataFrame) -> pd.DataFrame:
-    """Select one layer per model/source/target by ROC-AUC only.
+def build_transfer_selection(
+    performance: pd.DataFrame, calibration: pd.DataFrame
+) -> pd.DataFrame:
+    """Select one layer per model/source on source calibration only.
 
-    MCC is copied from that same selected row; it is never maximized
-    independently. Ties in ROC-AUC resolve to the earliest layer.
+    The layer minimizing calibration EER is fixed before any target test is
+    inspected, then reused for every target. Ties resolve to the earliest layer.
+    Test ROC-AUC and MCC are copied from that preselected layer.
     """
-    columns = ["model", "source", "target", "selected_layer", "roc_auc", "mcc"]
+    columns = [
+        "model",
+        "source",
+        "target",
+        "selected_layer",
+        "selection_split",
+        "selection_metric",
+        "calibration_eer",
+        "roc_auc",
+        "mcc",
+    ]
     required = {"model", "source", "target", "layer", "roc_auc", "mcc"}
     if not required <= set(performance.columns):
         raise ValueError("performance lacks columns required for transfer reduction")
-    ranked = performance.sort_values(
-        ["model", "source", "target", "roc_auc", "layer"],
-        ascending=[True, True, True, False, True],
+    calibration_required = {"model", "source", "layer", "calibration_eer"}
+    if not calibration_required <= set(calibration.columns):
+        raise ValueError(
+            "calibration lacks columns required for leakage-free layer selection"
+        )
+    if calibration.duplicated(["model", "source", "layer"]).any():
+        raise ValueError("calibration contains duplicate model/source/layer rows")
+    if not np.isfinite(calibration["calibration_eer"].to_numpy(dtype=float)).all():
+        raise ValueError("calibration_eer must contain only finite values")
+
+    ranked = calibration.sort_values(
+        ["model", "source", "calibration_eer", "layer"],
+        ascending=[True, True, True, True],
         kind="mergesort",
     )
-    selected = ranked.groupby(
-        ["model", "source", "target"], sort=True, as_index=False
-    ).first()
-    selected = selected.rename(columns={"layer": "selected_layer"})
+    chosen = (
+        ranked.groupby(["model", "source"], sort=True, as_index=False)
+        .first()
+        .rename(columns={"layer": "selected_layer"})
+    )
+    selected = performance.merge(
+        chosen[["model", "source", "selected_layer", "calibration_eer"]],
+        left_on=["model", "source", "layer"],
+        right_on=["model", "source", "selected_layer"],
+        how="inner",
+        validate="many_to_one",
+    )
+    selected["selection_split"] = "source_calibration"
+    selected["selection_metric"] = "minimum_eer"
     return selected.loc[:, columns].reset_index(drop=True)
+
+
+def build_threshold_recalibration(
+    cell_predictions: pd.DataFrame,
+    transfer_selection: pd.DataFrame,
+    *,
+    few_shot_per_class: int = 16,
+) -> pd.DataFrame:
+    """Compare source-fixed and target few-shot thresholds on disjoint audio.
+
+    For each selected transfer cell, a deterministic class-balanced subset
+    calibrates an EER threshold. Both thresholds are evaluated on the remaining
+    target audios, so calibration examples never contribute to reported MCC.
+    """
+    if (
+        isinstance(few_shot_per_class, bool)
+        or not isinstance(few_shot_per_class, int)
+        or few_shot_per_class < 1
+    ):
+        raise ValueError("few_shot_per_class must be a positive integer")
+    prediction_required = {
+        "model",
+        "source",
+        "target",
+        "layer",
+        "sample_id",
+        "y_true",
+        "score",
+        "threshold",
+    }
+    selection_required = {"model", "source", "target", "selected_layer"}
+    if not prediction_required <= set(cell_predictions.columns):
+        raise ValueError("cell_predictions lacks threshold recalibration columns")
+    if not selection_required <= set(transfer_selection.columns):
+        raise ValueError("transfer_selection lacks selected-layer columns")
+
+    output_columns = [
+        "model",
+        "source",
+        "target",
+        "layer",
+        "calibration_protocol",
+        "few_shot_per_class",
+        "n_calibration",
+        "n_evaluation",
+        "target_calibration_eer",
+        "source_threshold",
+        "target_threshold",
+        "mcc_source_threshold",
+        "mcc_target_threshold",
+        "delta_mcc",
+        "tpr_source_threshold",
+        "fpr_source_threshold",
+        "tpr_target_threshold",
+        "fpr_target_threshold",
+    ]
+    selected = cell_predictions.merge(
+        transfer_selection[list(selection_required)],
+        left_on=["model", "source", "target", "layer"],
+        right_on=["model", "source", "target", "selected_layer"],
+        how="inner",
+        validate="many_to_one",
+    )
+    selected = selected[selected["source"] != selected["target"]]
+    rows: list[dict[str, object]] = []
+    keys = ["model", "source", "target", "layer"]
+    for identity, group in selected.groupby(keys, sort=True):
+        calibration_indices: list[int] = []
+        for label in (0, 1):
+            class_group = group[group["y_true"] == label]
+            if len(class_group) <= few_shot_per_class:
+                raise ValueError(
+                    "few-shot calibration must leave evaluation audio in each class"
+                )
+            ranked = class_group.assign(
+                _sample_hash=class_group["sample_id"].map(
+                    lambda value: hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+                )
+            ).sort_values(["_sample_hash", "sample_id"], kind="mergesort")
+            calibration_indices.extend(
+                ranked.index[:few_shot_per_class].astype(int).tolist()
+            )
+        calibration = group.loc[calibration_indices]
+        evaluation = group.drop(index=calibration_indices)
+        target_eer, target_threshold = compute_eer(
+            calibration["score"].to_numpy(dtype=float),
+            calibration["y_true"].to_numpy(dtype=int),
+        )
+        source_thresholds = group["threshold"].drop_duplicates().to_numpy(dtype=float)
+        if len(source_thresholds) != 1:
+            raise ValueError("selected cell must have exactly one source threshold")
+        source_threshold = float(source_thresholds[0])
+        labels = evaluation["y_true"].to_numpy(dtype=int)
+        scores = evaluation["score"].to_numpy(dtype=float)
+        source_prediction = (scores >= source_threshold).astype(int)
+        target_prediction = (scores >= target_threshold).astype(int)
+        source_mcc, _ = _fast_mcc(labels, source_prediction)
+        target_mcc, _ = _fast_mcc(labels, target_prediction)
+
+        def rates(prediction: np.ndarray) -> tuple[float, float]:
+            positive = labels == 1
+            negative = ~positive
+            return (
+                float(prediction[positive].mean()),
+                float(prediction[negative].mean()),
+            )
+
+        source_tpr, source_fpr = rates(source_prediction)
+        target_tpr, target_fpr = rates(target_prediction)
+        rows.append(
+            {
+                **dict(zip(keys, identity)),
+                "calibration_protocol": "target_few_shot_disjoint",
+                "few_shot_per_class": few_shot_per_class,
+                "n_calibration": int(len(calibration)),
+                "n_evaluation": int(len(evaluation)),
+                "target_calibration_eer": float(target_eer),
+                "source_threshold": source_threshold,
+                "target_threshold": float(target_threshold),
+                "mcc_source_threshold": source_mcc,
+                "mcc_target_threshold": target_mcc,
+                "delta_mcc": target_mcc - source_mcc,
+                "tpr_source_threshold": source_tpr,
+                "fpr_source_threshold": source_fpr,
+                "tpr_target_threshold": target_tpr,
+                "fpr_target_threshold": target_fpr,
+            }
+        )
+    return _ordered(pd.DataFrame(rows, columns=output_columns), keys)
 
 
 def build_xai_performance_associations(
@@ -2855,13 +3090,43 @@ def comparison_completeness(
     }
 
 
-def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
+def build_report_tables(
+    sources: Sequence[LoadedReportSource],
+    *,
+    shortcut_audit: pd.DataFrame | None = None,
+) -> ReportTables:
     """Merge loaded sources into deterministic, identity-labelled report tables."""
     loaded = list(sources)
     if not loaded:
         raise ValueError("at least one loaded report source is required")
     if any(not isinstance(item, LoadedReportSource) for item in loaded):
         raise TypeError("sources must be LoadedReportSource instances")
+    if shortcut_audit is None:
+        shortcut_audit = pd.DataFrame()
+    elif not isinstance(shortcut_audit, pd.DataFrame):
+        raise TypeError("shortcut_audit must be a pandas DataFrame")
+    else:
+        required_audit = {
+            "language",
+            "role",
+            "n_bonafide",
+            "n_spoof",
+            "bonafide_corpora",
+            "spoof_corpora",
+            "corpus_label_cramers_v",
+            "file_formats",
+            "feature",
+            "bonafide_median",
+            "spoof_median",
+            "roc_auc",
+            "orientation_invariant_auc",
+        }
+        missing_audit = required_audit - set(shortcut_audit.columns)
+        if missing_audit:
+            raise ValueError(
+                f"shortcut_audit lacks columns {sorted(missing_audit)}"
+            )
+        shortcut_audit = shortcut_audit.copy().reset_index(drop=True)
     identities = [
         (
             item.source.identity.profile,
@@ -2881,6 +3146,11 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     performance = merged("performance", ["model", "source", "target", "layer"])
     if performance.duplicated(["model", "source", "target", "layer"]).any():
         raise ValueError("duplicate model/language cells across report sources")
+    calibration_performance = merged(
+        "calibration_performance", ["model", "source", "layer"]
+    )
+    if calibration_performance.duplicated(["model", "source", "layer"]).any():
+        raise ValueError("duplicate calibration rows across report sources")
 
     cell_predictions = merged("cell_predictions", list(_PER_SAMPLE_KEYS))
     if cell_predictions.duplicated(list(_PER_SAMPLE_KEYS)).any():
@@ -2999,10 +3269,36 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
     has_aligned_faithfulness = not _displayable_faithfulness_rows(
         aligned_faithfulness
     ).empty
+    transfer_selection = build_transfer_selection(
+        performance, calibration_performance
+    )
+    selected_for_recalibration = cell_predictions.merge(
+        transfer_selection[
+            ["model", "source", "target", "selected_layer"]
+        ],
+        left_on=["model", "source", "target", "layer"],
+        right_on=["model", "source", "target", "selected_layer"],
+        how="inner",
+    )
+    selected_for_recalibration = selected_for_recalibration[
+        selected_for_recalibration["source"]
+        != selected_for_recalibration["target"]
+    ]
+    if selected_for_recalibration.empty:
+        recalibration_shots = 16
+    else:
+        minimum_class_size = int(
+            selected_for_recalibration.groupby(
+                ["model", "source", "target", "y_true"], sort=False
+            ).size().min()
+        )
+        recalibration_shots = min(16, minimum_class_size - 1)
     return ReportTables(
         models=models,
         languages=languages,
         performance=performance,
+        calibration_performance=calibration_performance,
+        shortcut_audit=shortcut_audit,
         emergence=merged("emergence", ["model", "source", "target"]),
         band_relevance=band_relevance,
         class_relevance=class_relevance,
@@ -3016,7 +3312,12 @@ def build_report_tables(sources: Sequence[LoadedReportSource]) -> ReportTables:
         stdft_payloads=payloads,
         band_edges=band_edges,
         band_edge_provenance=provenance,
-        transfer_selection=build_transfer_selection(performance),
+        transfer_selection=transfer_selection,
+        threshold_recalibration=build_threshold_recalibration(
+            cell_predictions,
+            transfer_selection,
+            few_shot_per_class=recalibration_shots,
+        ),
         xai_performance_association=build_xai_performance_associations(
             performance, band_relevance
         ),
@@ -3233,7 +3534,10 @@ def build_results_synthesis(tables: ReportTables) -> pd.DataFrame:
     rows.append(
         {
             "question": "Remover as faixas mais relevantes altera mais o escore?",
-            "evidence": "Top-minus-random e top-minus-bottom com ICs persistidos.",
+            "evidence": (
+                "Diferenças principais menos aleatórias e principais menos "
+                "inferiores com ICs persistidos."
+            ),
             "result": faithfulness_result,
             "caution": "Intervenção STFT controlada; não implica causalidade no mundo real.",
         }
@@ -3684,15 +3988,15 @@ def _figure_transfer_heatmaps(plt, tables, figures_dir):
         (),
         heading="Transferência por idioma de treino e avaliação",
         description=(
-            "Para cada célula treino→avaliação, a camada é escolhida pela maior "
-            "ROC-AUC. O painel de MCC reutiliza essa mesma camada."
+            "Para cada modelo e idioma de origem, a camada é fixada pelo menor "
+            "EER na calibração da origem e reutilizada em todos os alvos."
         ),
-        metric="ROC-AUC e MCC na camada selecionada por ROC-AUC",
+        metric="ROC-AUC e MCC na camada selecionada pela calibração da origem",
         units="ROC-AUC (0–1) e MCC (−1 a 1), adimensionais",
         transformation=(
-            "em cada célula origem→alvo, selecionar a camada de ROC-AUC máxima; "
-            "mostrar ROC-AUC e MCC dessa mesma camada selecionada, sem maximizar "
-            "o MCC independentemente"
+            "em cada modelo e origem, selecionar o menor EER de calibração "
+            "(desempate pela camada mais baixa); mostrar ROC-AUC e MCC de teste "
+            "nessa camada, sem consultar o alvo durante a seleção"
         ),
     )
     fig.suptitle(record.title, fontsize=9)
@@ -3804,7 +4108,7 @@ def _figure_transfer_effect(
         units="adimensional",
         transformation=(
             "uma linha por transferência fora da diagonal na camada selecionada "
-            "pela ROC-AUC da própria célula; intervalo percentil bootstrap de 95%"
+            "pelo menor EER na calibração da origem; intervalo percentil bootstrap de 95%"
         ),
         cells=cells,
     )
@@ -3820,6 +4124,110 @@ def _figure_transfer_delta_roc_auc(plt, tables, figures_dir):
 
 def _figure_transfer_delta_mcc(plt, tables, figures_dir):
     return _figure_transfer_effect(plt, tables, figures_dir, metric="delta_mcc")
+
+
+def _figure_transfer_delta_combined(plt, tables, figures_dir):
+    name = "transfer_delta_combined"
+    metrics = (
+        ("delta_roc_auc", "Δ ROC-AUC"),
+        ("delta_mcc", "Δ MCC"),
+    )
+    frames = {
+        metric: selected_transfer_effects(tables, metric)
+        for metric, _ in metrics
+    }
+    if any(frame.empty for frame in frames.values()):
+        raise ValueError(f"{name} figure requested but selected effects are incomplete")
+    models = tuple(
+        model
+        for model in tables.models
+        if all(model in set(frame["model"]) for frame in frames.values())
+    )
+    pairs = sorted(
+        set(
+            frames["delta_roc_auc"][["source", "target"]].itertuples(
+                index=False, name=None
+            )
+        )
+    )
+    pair_position = {pair: index for index, pair in enumerate(pairs)}
+    fig, axes = plt.subplots(
+        2,
+        len(models),
+        figsize=(_FIGURE_WIDTH, 2.0 + 0.48 * len(pairs)),
+        squeeze=False,
+        sharey=True,
+        constrained_layout=True,
+    )
+    for row_index, (metric, label) in enumerate(metrics):
+        frame = frames[metric]
+        for column, model in enumerate(models):
+            ax = axes[row_index, column]
+            rows = frame[frame["model"] == model].sort_values(
+                ["source", "target"], kind="stable"
+            )
+            positions = np.asarray(
+                [
+                    pair_position[(str(item.source), str(item.target))]
+                    for item in rows.itertuples(index=False)
+                ],
+                dtype=float,
+            )
+            estimates = rows["estimate"].to_numpy(dtype=float)
+            low = rows["ci_low"].to_numpy(dtype=float)
+            high = rows["ci_high"].to_numpy(dtype=float)
+            valid_interval = np.isfinite(low) & np.isfinite(high) & (low <= high)
+            ax.hlines(
+                positions[valid_interval],
+                low[valid_interval],
+                high[valid_interval],
+                linewidth=1.0,
+            )
+            valid_estimate = np.isfinite(estimates)
+            ax.scatter(
+                estimates[valid_estimate],
+                positions[valid_estimate],
+                marker="o",
+                s=15,
+                zorder=3,
+            )
+            ax.axvline(0.0, color="0.45", linestyle="--", linewidth=0.8)
+            if row_index == 0:
+                ax.set_title(_model_name(model), fontsize=8)
+            ax.set_xlabel(label, fontsize=7)
+            ax.tick_params(axis="both", labelsize=7)
+            ax.locator_params(axis="x", nbins=4)
+    for ax in axes[:, 0]:
+        ax.set_yticks(range(len(pairs)))
+        ax.set_yticklabels(
+            [_transfer_pretty(source, target) for source, target in pairs]
+        )
+        ax.set_ylim(len(pairs) - 0.5, -0.5)
+    cells = tuple(
+        frames["delta_roc_auc"][["model", "source", "target"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    record = _record(
+        tables,
+        name,
+        (),
+        heading="Efeito de transferência em ranking e decisão",
+        description=(
+            "Δ ROC-AUC e Δ MCC na camada escolhida pela calibração da origem, "
+            "sempre contra o sistema diagonal do mesmo alvo. Pontos são "
+            "estimativas e segmentos, intervalos bootstrap de 95%."
+        ),
+        metric="Δ ROC-AUC e Δ MCC fora da diagonal − diagonal",
+        units="adimensional",
+        transformation=(
+            "duas linhas de painéis para as mesmas transferências e encoders; "
+            "camada fixada pelo menor EER na calibração da origem"
+        ),
+        cells=cells,
+    )
+    fig.suptitle(record.title, fontsize=9)
+    return _with_files(record, _save_report_figure(fig, name, figures_dir))
 
 
 def _grid_shape(count: int, max_columns: int = 3) -> tuple[int, int]:
@@ -4330,11 +4738,11 @@ def build_conservation_series(tables: ReportTables) -> pd.DataFrame:
     panels = (
         (
             "bias_zeroed_single_sample",
-            "bias_zeroed_validation_residual",
-            "Verificação bias-zeroed do modelo/regra\n(resíduo relativo)",
+            "bias_zeroed_validation_ratio",
+            "Verificação bias-zeroed do modelo/regra\n(erro / limite misto)",
             scope_bias,
-            tolerance,
-            tolerance_label,
+            1.0,
+            "limite misto atol + rtol·|evidência| (razão = 1)",
         ),
         (
             "dft_xai_cohort",
@@ -4416,14 +4824,16 @@ def _figure_conservation(plt, tables, figures_dir):
         description=(
             "Quatro verificações com escopos distintos, cada uma contra o seu limite. "
             "A verificação bias-zeroed usa uma única amostra para validar a decomposição "
-            "modelo/regra, não o conjunto inteiro; o resíduo da DFT cobre o conjunto "
+            "modelo/regra e é aceita pelo limite misto absoluto/relativo, não pela "
+            "comparação direta do resíduo relativo com rtol; o resíduo da DFT cobre o conjunto "
             "fixo de amostras XAI; o resíduo "
             "da STDFT cobre apenas o subconjunto STDFT; o recálculo do score é aceito "
             f"pela regra rtol/atol, não pela tolerância de conservação. Escopos: {scopes}."
         ),
         metric="piores resíduos de conservação por camada e razão do recálculo do score",
         units=(
-            "resíduos relativos adimensionais nas verificações bias-zeroed, DFT e STDFT "
+            "razão erro/limite misto na verificação bias-zeroed (limite: 1); "
+            "resíduos relativos adimensionais nas verificações DFT e STDFT "
             "(limite: tolerância de conservação); razão do recálculo do score |\u0394p| / "
             "(atol + rtol\u00b7|p|) (limite: 1); escala logarítmica"
         ),
@@ -4439,7 +4849,7 @@ def _figure_conservation(plt, tables, figures_dir):
 _ENCODER_AGREEMENT_TRANSFORMATION = (
     "mediana por camada agregada sobre células treino→avaliação; faixa sombreada "
     "entre quartis 25 e 75 % dessas células (não reproduz ci_low/ci_high); "
-    "intervalos bootstrap por linha permanecem no CSV, não nos resumos TeX compactos"
+    "intervalos bootstrap por linha permanecem no material suplementar"
 )
 _BOOTSTRAP_CI_TRANSFORMATION = (
     "cada curva usa o ponto estimado persistido e a faixa sombreada reproduz "
@@ -5395,7 +5805,8 @@ def _figure_layer_faithfulness_intervals(
         description=(
             f"Camada {FINAL_LAYER}, escopo diagonal e "
             f"{_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras por classe; "
-            "diferenças pareadas top-minus-random e top-minus-bottom. Limite "
+            "diferenças pareadas principais menos aleatórias e principais "
+            "menos inferiores. Limite "
             "principal: a intervenção STFT controlada não implica causalidade "
             "no mundo real."
         ),
@@ -5418,6 +5829,7 @@ _FIGURE_BUILDERS = {
     "performance_by_layer": _figure_performance,
     "fixed_threshold_by_layer": _figure_fixed_threshold,
     "transfer_performance_heatmaps": _figure_transfer_heatmaps,
+    "transfer_delta_combined": _figure_transfer_delta_combined,
     "transfer_delta_roc_auc": _figure_transfer_delta_roc_auc,
     "transfer_delta_mcc": _figure_transfer_delta_mcc,
     "dft_relevance_heatmap": _figure_heatmap,
@@ -5559,7 +5971,9 @@ if (-not (Test-Path "report.pdf")) {{
 """
 _TABLE_CSVS: tuple[tuple[str, str], ...] = (
     ("performance_by_layer", "performance"),
+    ("calibration_performance_by_layer", "calibration_performance"),
     ("transfer_selected_layers", "transfer_selection"),
+    ("threshold_recalibration", "threshold_recalibration"),
     ("xai_performance_association", "xai_performance_association"),
     ("emergence_layers", "emergence"),
     ("dft_band_relevance", "band_relevance"),
@@ -5625,7 +6039,8 @@ def _tt_breakable(value: object) -> str:
 
 
 def _csv_tex(name: str) -> str:
-    return _tt_breakable(f"tables/{name}.csv").replace("/", r"/\allowbreak{}")
+    del name
+    return "material tabular suplementar"
 
 
 def _true_minus(text: str) -> str:
@@ -5740,7 +6155,7 @@ def _report_title(tables: ReportTables) -> str:
     if len(models) == 1 and len(languages) == 1:
         return f"Estudo de caso: {models[0]} em {languages[0]}"
     return (
-        f"Relatório layer-wise de XAI: {_join_pt(models)} "
+        f"Transferência cross-corpus/cross-lingual e XAI layer-wise: {_join_pt(models)} "
         f"({_join_pt(languages)})"
     )
 
@@ -5775,9 +6190,16 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
         )
     elif record.name == "transfer_performance_heatmaps":
         body = (
-            "Desempenho na camada de maior ROC-AUC de cada combinação. "
+            "Desempenho na camada escolhida pelo menor EER na calibração da origem. "
             "As linhas indicam o idioma de treino e as colunas, o de avaliação; "
             "a parte superior mostra ROC-AUC e a inferior, o MCC da mesma camada."
+        )
+    elif record.name == "transfer_delta_combined":
+        body = (
+            r"Mudanças de ROC-AUC (linha superior) e MCC (linha inferior) na "
+            "transferência, em relação ao sistema diagonal do mesmo alvo. Pontos "
+            f"são estimativas, segmentos são intervalos bootstrap de {_ci_percent_tex()} "
+            "e a linha tracejada marca zero."
         )
     elif record.name in ("transfer_delta_roc_auc", "transfer_delta_mcc"):
         metric = "ROC-AUC" if record.name.endswith("roc_auc") else "MCC"
@@ -5813,7 +6235,8 @@ def _caption_pt(record: FigureRecord, tables: ReportTables) -> str:
             "As colunas separam os encoders, as linhas as classes, o eixo "
             r"horizontal mostra a diferença média e o vertical, $k$. "
             "O formato do marcador identifica o idioma, as cores distinguem "
-            "top-minus-random de top-minus-bottom e o deslocamento vertical separa "
+            "principais menos aleatórias de principais menos inferiores e o "
+            "deslocamento vertical separa "
             "os controles."
         )
     elif record.name == "dft_relevance_heatmap":
@@ -5880,7 +6303,8 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
     atol = _joined_sci(table["score_recompute_atol"])
     return {
         "bias_zeroed_single_sample": (
-            "resíduo relativo bias-zeroed, validação do modelo/regra em uma "
+            "razão entre erro absoluto e limite misto bias-zeroed "
+            "(atol + rtol$\\cdot$|evidência|), validação do modelo/regra em uma "
             f"única amostra (tipo {kind}; amostra {sample}; n=1)"
         ),
         "dft_xai_cohort": (
@@ -5901,7 +6325,7 @@ def _conservation_scopes(tables: ReportTables) -> dict[str, str]:
 def _conservation_caption(tables: ReportTables) -> str:
     return (
         "Verificações numéricas de conservação por camada, em escala logarítmica: "
-        "resíduo bias-zeroed, resíduos da DFT e da STDFT e erro no recálculo do "
+        "razão erro/limite bias-zeroed, resíduos da DFT e da STDFT e erro no recálculo do "
         "escore. Cada painel tem seu próprio limite de aceitação."
     )
 
@@ -6038,11 +6462,12 @@ def _executive_summary_section(tables: ReportTables) -> list[str]:
         f"{len(tables.languages)} idioma(s) e {len(selected)} combinações de "
         f"treino e avaliação; contém {scope}.",
         "",
-        f"A maior ROC-AUC após a redução por célula é {_num(best['roc_auc'])}, "
+        f"A maior ROC-AUC após a seleção por calibração é {_num(best['roc_auc'])}, "
         f"na camada {int(best['selected_layer'])} de "
         f"{_cell_tex((best['model'], best['source'], best['target']))}; o MCC "
-        f"reportado ({_num(best['mcc'])}) vem dessa mesma camada. A redução "
-        "seleciona exclusivamente pela ROC-AUC e nunca maximiza o MCC em separado.",
+        f"reportado ({_num(best['mcc'])}) vem dessa mesma camada. A camada é "
+        r"fixada pelo menor EER nos 1\,204 áudios de calibração da origem, sem "
+        "consultar os conjuntos de teste.",
         "",
         *_itemize(_executive_comparison_items(tables)),
         *fidelity_stability,
@@ -6194,7 +6619,7 @@ def _orientation_section(
         "linhas e o idioma de avaliação nas colunas. Cada bloco de "
         r"Resultados (Seção~\ref{sec:resultados}) traz uma pergunta, a figura, "
         "até três achados, a interpretação, a principal cautela e o caminho até o "
-        "detalhe completo nos apêndices e CSVs.",
+        "detalhe completo nos apêndices e no material suplementar.",
         "",
         r"\subsection*{Glossário}",
         *_itemize(_glossary_items()),
@@ -6205,30 +6630,8 @@ def _orientation_section(
 def _inventory_lines(
     tables: ReportTables, sources: Sequence[LoadedReportSource]
 ) -> list[str]:
-    ordered = sorted(sources, key=_source_sort_key)
-    rows = []
-    for item in ordered:
-        identity = item.source.identity
-        layers = sorted({key[1] for key in item.source.layer_xai_generations})
-        rows.append(
-            _row(
-                [
-                    _tt(identity.profile),
-                    escape_latex(", ".join(identity.languages)),
-                    escape_latex(identity.scope),
-                    f"{layers[0]}--{layers[-1]}",
-                    _tt(str(item.source.status["config_hash"])[:12]),
-                ]
-            )
-        )
     case_study = len(tables.models) == 1 and len(tables.languages) == 1
-    lines = [
-        "Este relatório é gerado de forma determinística a partir de "
-        "artefatos persistidos de execuções concluídas. A geração é somente "
-        "leitura: nenhum encoder é carregado, nenhuma explicação é recalculada "
-        "e nenhuma GPU é necessária.",
-        "",
-    ]
+    lines: list[str] = []
     if case_study:
         lines.append(
             f"Esta edição é um estudo de caso de modelo único "
@@ -6257,38 +6660,11 @@ def _inventory_lines(
             + qualifier
         )
     lines.append("")
-    if rows:
-        lines += [
-            r"\begin{table}[H]",
-            r"\centering",
-            r"\small",
-            r"\setlength{\tabcolsep}{4pt}",
-            r"\caption{Inventário dos experimentos consumidos; o hash da configuração mostra os 12 primeiros caracteres.}",
-            r"\label{tab:inventario}",
-            _FIT_WIDTH_OPEN,
-            r"\begin{tabular}{lllll}",
-            r"\toprule",
-            _row(
-                [
-                    "Modelo",
-                    "Idiomas",
-                    "Escopo",
-                    "Camadas",
-                    "Hash da config.",
-                ]
-            ),
-            r"\midrule",
-            *rows,
-            r"\bottomrule",
-            r"\end{tabular}}",
-            r"\end{table}",
-            "",
-        ]
     return lines
 
 
 def _provenance(text: str) -> list[str]:
-    return [rf"\textit{{Proveniência:}} {text}", ""]
+    return [rf"\textit{{Dados analisados:}} {text}", ""]
 
 
 def _appendix_section(index: int, label: str) -> list[str]:
@@ -6367,11 +6743,8 @@ def _protocol_appendix(
     return [
         *_appendix_section(0, "app:protocolo"),
         *_provenance(
-            "planos de execução dos experimentos listados em "
-            f"{_tt_breakable(_MANIFEST_NAME)}; bordas das bandas em "
-            f"{_csv_tex('band_edges')}, com a origem de cada borda em "
-            f"{_csv_tex('band_edge_provenance')}; conjunto fixo de amostras XAI "
-            f"por camada em {_csv_tex('cohort_by_layer')}."
+            "planos de execução persistidos; configuração das bandas mel; "
+            "e conjunto fixo de amostras XAI por camada."
         ),
         *counts_intro,
         *_itemize(items),
@@ -6401,14 +6774,17 @@ def _performance_appendix(
         *_appendix_section(1, "app:desempenho"),
         *_provenance(
             "métricas por camada (ROC-AUC, EER diagnóstico, acurácia, MCC, TPR "
-            f"e FPR) em {_csv_tex('performance_by_layer')}; camada selecionada "
-            f"por célula em {_csv_tex('transfer_selected_layers')}"
+            f"e FPR) em {_csv_tex('performance_by_layer')}; desempenho de "
+            f"calibração em {_csv_tex('calibration_performance_by_layer')}; "
+            f"camada selecionada por fonte em {_csv_tex('transfer_selected_layers')}; "
+            f"recalibração few-shot em {_csv_tex('threshold_recalibration')}"
             + stability_csv
             + "."
         ),
-        "As curvas por camada usam um único conjunto de teste por célula e não "
-        "têm intervalo de confiança. Nas métricas de decisão, o limiar é "
-        "calibrado na origem e não é recalibrado no idioma de avaliação.",
+        "A camada reportada na síntese é selecionada exclusivamente na calibração "
+        "da origem, pelo menor EER, antes de examinar qualquer conjunto-alvo. A "
+        "mesma camada é usada nos três alvos de cada fonte. As curvas exploratórias "
+        "mostram todas as camadas no teste e não têm intervalo de confiança.",
         "",
     ]
     for name in present:
@@ -6451,6 +6827,30 @@ def _performance_appendix(
             f"{_num(off_metrics['tpr'].min())} a {_num(off_metrics['tpr'].max())} "
             f"e a FPR de {_num(off_metrics['fpr'].min())} a "
             f"{_num(off_metrics['fpr'].max())}.",
+            "",
+        ]
+    recalibration = tables.threshold_recalibration
+    if not recalibration.empty:
+        positive = int((recalibration["delta_mcc"] > 0).sum())
+        shots = sorted(
+            {int(value) for value in recalibration["few_shot_per_class"]}
+        )
+        lines += [
+            r"\subsection{Perda de ranking versus deslocamento do limiar}",
+            "Para separar degradação da ordenação de deslocamento da escala dos "
+            "escores, o limiar fixo da origem é comparado com um limiar EER "
+            "recalibrado em um subconjunto balanceado do alvo. Esse subconjunto "
+            "é removido da avaliação; portanto, as duas versões de MCC usam "
+            "exatamente os mesmos áudios restantes.",
+            "",
+            f"A recalibração usa {_join_pt([str(value) for value in shots])} "
+            "áudio(s) por classe nesta edição. O MCC aumenta em "
+            f"{positive} de {len(recalibration)} transferências; a mudança "
+            f"mediana é {_num(float(recalibration['delta_mcc'].median()))}. "
+            "Este resultado quantifica adaptação supervisionada few-shot e não "
+            "deve ser confundido com desempenho zero-shot.",
+            "",
+            r"\input{tables/threshold_recalibration.tex}",
             "",
         ]
     lines += [r"\input{tables/performance_by_layer.tex}", ""]
@@ -6599,7 +6999,7 @@ def _relevance_appendix(
             f"{_signed(rho.min())} a {_signed(rho.max())}"
         )
     lines += [
-        summary + "; o CSV registra o motivo de cada indisponibilidade. "
+        summary + "; o material suplementar registra o motivo de cada indisponibilidade. "
         f"Esta análise é descritiva, usa apenas n={len(LAYER_ORDER)} camadas por "
         "célula quando disponível e não sustenta inferência nem interpretação "
         "causal.",
@@ -6618,7 +7018,7 @@ def _comparisons_appendix(
             *lines,
             *_provenance(
                 "nesta edição não há comparação entre modelos ou idiomas; "
-                "nenhum CSV de comparação foi gerado."
+                "não há resultados tabulares comparativos."
             ),
         ]
     lines += [
@@ -6630,7 +7030,7 @@ def _comparisons_appendix(
             r"(Seção~\ref{sec:orientacao})."
         ),
         "As tabelas agregam medianas e faixas entre linhas; os valores por "
-        "linha ficam nos CSV.",
+        "linha ficam no material suplementar.",
         "",
     ]
     for name in present:
@@ -6669,7 +7069,7 @@ def _faithfulness_appendix(tables: ReportTables) -> list[str]:
             *lines,
             *_provenance(
                 "nesta edição não há artefatos de intervenção sobre as faixas "
-                "relevantes; nenhum CSV de fidelidade foi gerado."
+                "relevantes; não há resultados tabulares de fidelidade."
             ),
         ]
     return [
@@ -6684,7 +7084,8 @@ def _faithfulness_appendix(tables: ReportTables) -> list[str]:
         r"top-$k$ (mais relevantes), bottom-$k$ (menos relevantes) e "
         "aleatórias com energia RMS igualada, com recomputação AttnLRP "
         r"$\rightarrow$ STDFT sobre o subconjunto fixo de amostras XAI. "
-        "Valores positivos de top-minus-random ou top-minus-bottom "
+        "Valores positivos das comparações principais menos aleatórias ou "
+        "principais menos inferiores "
         "sugerem, com cautela, que remover as faixas mais relevantes segundo o "
         "DFT-LRP altera mais o escore do probe do que remover os controles; a "
         "filtragem STFT e o reescalonamento RMS são fontes de variação "
@@ -6711,7 +7112,8 @@ def _abbreviation_note(tables: ReportTables) -> list[str]:
         return []
     return [
         "Os identificadores de amostra longos aparecem abreviados (início, "
-        "reticências e fim); os identificadores completos estão nos CSV.",
+        "reticências e fim); os identificadores completos estão no material "
+        "suplementar.",
         "",
     ]
 
@@ -6764,8 +7166,11 @@ def _stdft_conservation_appendix(
             )
         lines += [
             "As verificações cobrem populações diferentes e obedecem a limites "
-            f"próprios: três usam a tolerância de conservação ({tolerance}) e o "
-            "recálculo do score usa a razão rtol/atol, com limite 1.",
+            f"próprios: DFT e STDFT usam a tolerância de conservação ({tolerance}); "
+            "bias-zeroed e recálculo do score usam razões contra limites mistos, "
+            "aceitas até 1. Assim, um resíduo relativo bias-zeroed maior que rtol "
+            "não constitui falha quando o erro absoluto permanece dentro do limite "
+            "atol + rtol$\\cdot$|evidência|.",
             "",
             *_itemize(items),
             *_figure_block(figures["conservation_diagnostics"], tables),
@@ -6910,7 +7315,7 @@ def _overview_block(
     if not off_diagonal.empty:
         findings.append(_selection_text("Nas células de transferência", off_diagonal))
     findings.append(
-        f"A maior ROC-AUC selecionada é {_num(best['roc_auc'])}, na camada "
+        f"A maior ROC-AUC entre as camadas pré-selecionadas é {_num(best['roc_auc'])}, na camada "
         f"{int(best['selected_layer'])} de "
         f"{_cell_tex((best['model'], best['source'], best['target']))}; o MCC "
         f"dessa camada é {_num(best['mcc'])}."
@@ -6947,9 +7352,9 @@ def _overview_block(
         findings=findings,
         interpretation=interpretation,
         caution=(
-            "a camada de cada célula é escolhida pela maior ROC-AUC no próprio "
-            "conjunto de teste, o que torna o valor exibido otimista; o MCC vem "
-            "dessa camada e não é maximizado separadamente."
+            "a seleção usa o menor EER em uma única partição de calibração da "
+            "origem; embora evite vazamento do teste, sua variabilidade não é "
+            "capturada por um conjunto adicional de desenvolvimento."
         ),
         details=(
             rf"Apêndice~\ref{{app:desempenho}}; {_csv_tex('transfer_selected_layers')} "
@@ -7026,7 +7431,7 @@ def _transfer_block(
             "avaliado em outro, em relação ao sistema diagonal do mesmo "
             "conjunto-alvo?"
         ),
-        figure_names=("transfer_delta_roc_auc", "transfer_delta_mcc"),
+        figure_names=("transfer_delta_combined",),
         findings=findings,
         interpretation=interpretation,
         caution=(
@@ -7248,6 +7653,31 @@ def _frequency_profile_block(
         if len(model_findings) <= 3
         else [_join_pt(model_findings) + "."]
     )
+    interpretation = (
+        "A faixa mais frequentemente dominante é aquela com a maior massa "
+        "média de relevância absoluta normalizada no maior número de camadas. "
+        "Em caso de empate, todas as faixas co-dominantes são mantidas. Os "
+        "itens resumem essa recorrência; o mapa preserva o perfil completo das "
+        "24 bandas em cada uma das 12 camadas, inclusive concentrações "
+        "secundárias e mudanças entre camadas."
+    )
+    wav2vec = claims[claims["model"] == "wav2vec2_base"]
+    if (
+        not wav2vec.empty
+        and len(wav2vec["language"].unique()) == len(tables.languages)
+        and (wav2vec["layers_dominant"] == wav2vec["n_layers"]).all()
+        and wav2vec["band_label"].astype(str).str.contains("1324").all()
+    ):
+        interpretation += (
+            " A concentração estável de Wav2Vec2 Base em 1324--1544 Hz é "
+            "compatível com a hipótese de que sua quantização latente e perda "
+            "contrastiva preservem pistas espectrais diferentes das enfatizadas "
+            "pela predição mascarada de clusters no HuBERT e pelo pré-treino "
+            "mascarado com perturbação no WavLM. O experimento não manipula o "
+            "objetivo de pré-treino; portanto, essa conexão é uma interpretação "
+            "arquitetural, não uma demonstração causal nem prova de que a faixa "
+            "corresponda especificamente ao segundo formante."
+        )
     return _result_block(
         tables,
         figures,
@@ -7259,14 +7689,7 @@ def _frequency_profile_block(
         ),
         figure_names=("dft_relevance_heatmap",),
         findings=findings,
-        interpretation=(
-            "A faixa mais frequentemente dominante é aquela com a maior massa "
-            "média de relevância absoluta normalizada no maior número de camadas. "
-            "Em caso de empate, todas as faixas co-dominantes são mantidas. Os "
-            "itens resumem essa recorrência; o mapa preserva o perfil completo das "
-            "24 bandas em cada uma das 12 camadas, inclusive concentrações "
-            "secundárias e mudanças entre camadas."
-        ),
+        interpretation=interpretation,
         caution=(
             "a dominância é relativa à massa de relevância do probe no conjunto "
             "fixo de amostras XAI, não uma pista acústica causal. Diferenças entre "
@@ -7459,11 +7882,63 @@ def _synthesis_scope_tex(tables: ReportTables) -> str:
     return f"{_count_word_pt(rows)} perguntas comparativas"
 
 
+def _shortcut_audit_block(
+    tables: ReportTables, _figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    audit = tables.shortcut_audit
+    if audit.empty:
+        return []
+    first = audit.iloc[0]
+    strongest = audit.loc[audit["orientation_invariant_auc"].idxmax()]
+    portuguese_transfer = tables.transfer_selection[
+        (tables.transfer_selection["source"] == "por")
+        & (tables.transfer_selection["target"] != "por")
+    ]
+    transfer_text = ""
+    if not portuguese_transfer.empty:
+        below = int((portuguese_transfer["roc_auc"] < 0.5).sum())
+        transfer_text = (
+            f" Nos probes treinados em português, {below} de "
+            f"{len(portuguese_transfer)} avaliações cross-corpus/cross-lingual "
+            "ficam abaixo de ROC-AUC 0,5 na camada pré-selecionada, consistente "
+            "com uma associação específica do domínio de origem."
+        )
+    return [
+        r"\subsection{Diagnóstico de atalhos no corpus português}",
+        r"\label{sec:resultado-shortcut-portugues}",
+        f"No conjunto de teste, a classe coincide com o corpus: os áudios reais "
+        f"vêm de {escape_latex(first['bonafide_corpora'])} e os sintéticos de "
+        f"{escape_latex(first['spoof_corpora'])}, com V de Cramér "
+        f"{_num(first['corpus_label_cramers_v'])}. Portanto, idioma, corpus e "
+        "classe não estão identificados separadamente nesse subconjunto.",
+        "",
+        f"Todos os arquivos processados compartilham o formato "
+        f"{escape_latex(first['file_formats'])}, descartando codec, número de "
+        "canais e taxa de amostragem como separadores após o pré-processamento. "
+        f"Entretanto, a característica simples mais separadora é "
+        f"{escape_latex(str(strongest['feature']))}, com ROC-AUC "
+        f"{_num(strongest['orientation_invariant_auc'])}; sua mediana é "
+        f"{_num(strongest['bonafide_median'])} nos reais e "
+        f"{_num(strongest['spoof_median'])} nos sintéticos."
+        + transfer_text,
+        "",
+        "Essas diferenças demonstram atalhos plausíveis de duração e amplitude, "
+        "mas não provam que o probe da camada 1 use uma característica específica. "
+        "A conclusão confirmatória exige controles com duração, energia e margens "
+        "de silêncio igualadas ou dados reais e sintéticos provenientes do mesmo "
+        "corpus e canal.",
+        "",
+        r"\input{tables/shortcut_audit.tex}",
+        "",
+    ]
+
+
 def _main_results_section(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
     blocks = (
         _overview_block,
+        _shortcut_audit_block,
         _transfer_block,
         _agreement_block,
         _frequency_profile_block,
@@ -7519,9 +7994,8 @@ def _cross_cutting_limitations_section(tables: ReportTables) -> list[str]:
         f"Os intervalos percentis de {_ci_percent_tex()} quantificam apenas a "
         "variação obtida ao reamostrar os áudios observados; não incluem novas execuções do pipeline "
         "nem substituem testes de hipótese.",
-        "O relatório não recalcula explicações, não seleciona amostras e não "
-        "treina probes; todos os valores vêm dos artefatos listados em "
-        f"{_tt_breakable(_MANIFEST_NAME)}.",
+        "As análises secundárias usam probes, explicações e amostras fixados antes "
+        "da geração das sínteses apresentadas.",
     ]
     return [
         rf"\section{{{_SECTION_TITLES_PT[3]}}}",
@@ -7920,8 +8394,8 @@ def _aligned_layer_faithfulness(tables: ReportTables) -> pd.DataFrame:
 _FAITHFULNESS_CONTROLS = ("top_minus_random", "top_minus_bottom")
 _FAITHFULNESS_COMPARISON_PT: Mapping[str, str] = MappingProxyType(
     {
-        "top_minus_random": "top-minus-random",
-        "top_minus_bottom": "top-minus-bottom",
+        "top_minus_random": "principais menos aleatórias",
+        "top_minus_bottom": "principais menos inferiores",
     }
 )
 _FAITHFULNESS_CONTROL_COLORS: Mapping[str, str] = MappingProxyType(
@@ -8023,7 +8497,8 @@ def _faithfulness_scope_note(aligned: pd.DataFrame) -> str:
         f"{_count_word_pt(FAITHFULNESS_PER_CLASS)} amostras por classe no "
         "subconjunto XAI (contrato fixo do protocolo de fidelidade). "
         "Top-$k$ e bottom-$k$ referem-se às faixas mais e menos relevantes "
-        "segundo o DFT-LRP; top-minus-random e top-minus-bottom são diferenças "
+        "segundo o DFT-LRP; principais menos aleatórias e principais menos "
+        "inferiores são diferenças "
         "médias pareadas frente a controles aleatórios ou às faixas menos "
         "relevantes. "
         "As contagens abaixo são descritivas, sem correção por comparações "
@@ -8166,8 +8641,7 @@ def _layer_faithfulness_tex(tables: ReportTables) -> str:
             r"\setlength{\tabcolsep}{4pt}",
             r"\caption{Resumo descritivo da fidelidade por intervenção "
             rf"(camada~{FINAL_LAYER}, células diagonais): contagens sobre células agregadas "
-            r"por modelo e comparação. Detalhe completo em "
-            r"\texttt{layer\_faithfulness\_summary.csv}.}",
+            r"por modelo e comparação; resultados por célula no material suplementar.}",
             r"\label{tab:layer-faithfulness-summary}",
             _FIT_WIDTH_OPEN,
             r"\begin{tabular}{llrrrr}",
@@ -8223,8 +8697,8 @@ def _probe_stability_tex(tables: ReportTables) -> str:
             r"\setlength{\tabcolsep}{4pt}",
             r"\caption{Sensibilidade do treino do probe: mediana e máximo do "
             r"desvio-padrão de ROC-AUC e MCC sobre células camada$\times$origem"
-            r"$\times$destino (três bootstraps estratificados). Detalhe completo "
-            r"em \texttt{probe\_stability\_by\_layer.csv}.}",
+            r"$\times$destino (três bootstraps estratificados); resultados por "
+            r"camada no material suplementar.}",
             r"\label{tab:probe-stability-summary}",
             _FIT_WIDTH_OPEN,
             r"\begin{tabular}{lrrrr}",
@@ -8303,6 +8777,110 @@ def _performance_tex(tables: ReportTables) -> str:
     return "\n".join(blocks)
 
 
+def _threshold_recalibration_tex(tables: ReportTables) -> str:
+    frame = tables.threshold_recalibration
+    if frame.empty:
+        return ""
+    body = [
+        _row(
+            [
+                escape_latex(_model_name(str(row.model))),
+                (
+                    f"{escape_latex(row.source)}$\\rightarrow$"
+                    f"{escape_latex(row.target)}"
+                ),
+                int(row.layer),
+                int(row.n_calibration),
+                int(row.n_evaluation),
+                _num(row.mcc_source_threshold),
+                _num(row.mcc_target_threshold),
+                _num(row.delta_mcc),
+            ]
+        )
+        for row in frame.itertuples(index=False)
+    ]
+    return "\n".join(
+        [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\setlength{\tabcolsep}{3pt}",
+            r"\caption{MCC na camada selecionada pela calibração da origem. "
+            r"O limiar recalibrado usa um subconjunto few-shot balanceado do "
+            r"alvo, excluído da avaliação restante.}",
+            r"\label{tab:threshold-recalibration}",
+            _FIT_WIDTH_OPEN,
+            r"\begin{tabular}{llrrrrrr}",
+            r"\toprule",
+            _row(
+                [
+                    "Modelo",
+                    "Transferência",
+                    "Camada",
+                    "$n$ calib.",
+                    "$n$ aval.",
+                    "Limiar da origem",
+                    "Limiar recalibrado",
+                    "$\\Delta$ MCC",
+                ]
+            ),
+            r"\midrule",
+            *body,
+            r"\bottomrule",
+            r"\end{tabular}}",
+            r"\end{table}",
+            "",
+        ]
+    )
+
+
+def _shortcut_audit_tex(tables: ReportTables) -> str:
+    frame = tables.shortcut_audit
+    if frame.empty:
+        return ""
+    feature_labels = {
+        "duration_s": "Duração (s)",
+        "peak": "Pico absoluto",
+        "rms": "RMS global",
+        "first_250ms_rms": "RMS nos primeiros 250 ms",
+        "leading_silence_s": "Silêncio inicial (s)",
+    }
+    body = [
+        _row(
+            [
+                escape_latex(feature_labels.get(str(row.feature), str(row.feature))),
+                _num(row.bonafide_median),
+                _num(row.spoof_median),
+                _num(row.roc_auc),
+            ]
+        )
+        for row in frame.itertuples(index=False)
+    ]
+    first = frame.iloc[0]
+    return "\n".join(
+        [
+            r"\begin{table}[H]",
+            r"\centering",
+            r"\small",
+            r"\caption{Diagnóstico de atalhos no teste em português. Áudios reais "
+            f"vêm de {escape_latex(first['bonafide_corpora'])} e sintéticos de "
+            f"{escape_latex(first['spoof_corpora'])} "
+            f"(V de Cramér = {_num(first['corpus_label_cramers_v'])}); formato "
+            f"processado: {escape_latex(first['file_formats'])}.}}",
+            r"\label{tab:shortcut-audit}",
+            r"\begin{tabular}{lrrr}",
+            r"\toprule",
+            _row(["Característica", "Mediana real", "Mediana sintética", "ROC-AUC"]),
+            r"\midrule",
+            *body,
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}",
+            "",
+        ]
+    )
+
+
 def _emergence_tex(tables: ReportTables) -> str:
     body = []
     for row in tables.emergence.itertuples(index=False):
@@ -8368,9 +8946,9 @@ def _conservation_tex(tables: ReportTables) -> str:
             r"\centering",
             r"\small",
             r"\caption{Pior caso por camada de cada verificação de conservação "
-            r"(máximo sobre as células). As três primeiras colunas são resíduos "
-            r"relativos comparados à tolerância de conservação; a última é a "
-            r"razão do recálculo do score, aceita até 1.}",
+            r"(máximo sobre as células). Bias-zeroed e recálculo do score são "
+            r"razões erro/limite aceitas até 1; DFT e STDFT são resíduos "
+            r"relativos comparados à tolerância de conservação.}",
             r"\label{tab:conservation}",
             r"\begin{tabular}{rrrrr}",
             r"\toprule",
@@ -8447,8 +9025,7 @@ def _encoder_agreement_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo do acordo entre encoders: mediana e extensão agregadas por par "
-        "de modelos e métrica (limites por linha apenas no CSV). Detalhe "
-        "completo em \\texttt{encoder\\_agreement.csv}.",
+        "de modelos e métrica; limites por linha no material suplementar.",
         "tab:encoder-agreement-summary",
         ["Par", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
@@ -8480,8 +9057,7 @@ def _language_shift_tex(tables: ReportTables) -> str:
     return _comparison_compact_table(
         "Resumo compacto da mudança de relevância entre idiomas-alvo (JS): mediana "
         "e faixa agregadas sobre linhas da tabela por modelo e grupo (não repete "
-        "os limites linha a linha). Detalhe completo em "
-        "\\texttt{language\\_shift.csv}.",
+        "os limites linha a linha); detalhes no material suplementar.",
         "tab:language-shift-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
@@ -8513,8 +9089,7 @@ def _diagonal_vs_offdiagonal_tex(tables: ReportTables) -> str:
     return _comparison_compact_table(
         "Resumo compacto diagonal versus fora da diagonal ($\\Delta$ ROC-AUC e "
         "$\\Delta$ MCC) por modelo e métrica: medianas e faixas agregadas, sem "
-        "repetir os limites linha a linha. Detalhe completo em "
-        "\\texttt{diagonal\\_vs\\_offdiagonal.csv}.",
+        "repetir os limites linha a linha; detalhes no material suplementar.",
         "tab:diagonal-off-summary",
         ["Modelo", "Métrica", "Linhas", "Mediana", "Faixa", "Status (contagens)"],
         body,
@@ -8545,8 +9120,8 @@ def _spectral_divergence_tex(tables: ReportTables) -> str:
         )
     return _comparison_compact_table(
         "Resumo compacto da divergência espectral (Wasserstein em Hz) por modelo "
-        "e grupo: medianas e faixas agregadas (limites completos no CSV). "
-        "Detalhe completo em \\texttt{spectral\\_divergence.csv}.",
+        "e grupo: medianas e faixas agregadas; limites completos no material "
+        "suplementar.",
         "tab:spectral-divergence-summary",
         ["Modelo", "Grupo", "Linhas", "Mediana (Hz)", "Faixa (Hz)", "Status (contagens)"],
         body,
@@ -8611,9 +9186,18 @@ def write_report_tables(tables: ReportTables, tables_dir: str | Path) -> tuple[s
         written.append(f"{name}.csv")
     fragments = {
         "performance_by_layer": _performance_tex(tables),
+        "threshold_recalibration": _threshold_recalibration_tex(tables),
+        "shortcut_audit": _shortcut_audit_tex(tables),
         "emergence_layers": _emergence_tex(tables),
         "conservation_by_layer": _conservation_tex(tables),
     }
+    if not tables.shortcut_audit.empty:
+        tables.shortcut_audit.to_csv(
+            tables_dir / "shortcut_audit.csv",
+            index=False,
+            lineterminator="\n",
+        )
+        written.append("shortcut_audit.csv")
     stability_tex = _probe_stability_tex(tables)
     if stability_tex.strip():
         fragments["probe_stability_by_layer"] = stability_tex
@@ -8691,6 +9275,9 @@ def _consumed_artifacts(source: ReportSource) -> list[dict[str, str]]:
         )
         stage_id = f"{profile}:cell:{layer:02d}:{origin}:{target}"
         files.add(root / ".state" / f"{stage_id.replace(':', '__')}.json")
+    for language in source.identity.languages:
+        for layer in LAYER_ORDER:
+            files.add(paths.thresholds(profile, layer, language))
     consumed = [
         {"path": path.relative_to(root).as_posix(), "sha256": _sha256_of(path)}
         for path in files
@@ -8906,7 +9493,10 @@ def _previous_bundle_files(output: Path) -> list[Path]:
 
 
 def generate_report_bundle(
-    result_dirs: Sequence[str | Path], output_dir: str | Path
+    result_dirs: Sequence[str | Path],
+    output_dir: str | Path,
+    *,
+    shortcut_audit_path: str | Path | None = None,
 ) -> Path:
     """Validate explicit result directories and write a portable report bundle.
 
@@ -8928,7 +9518,12 @@ def generate_report_bundle(
     loaded = [
         load_report_source(validate_result_directory(root)) for root in roots
     ]
-    tables = build_report_tables(loaded)
+    shortcut_audit = (
+        pd.read_csv(Path(shortcut_audit_path))
+        if shortcut_audit_path is not None
+        else None
+    )
+    tables = build_report_tables(loaded, shortcut_audit=shortcut_audit)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
@@ -9027,13 +9622,26 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="new or previously generated report bundle directory",
     )
+    parser.add_argument(
+        "--shortcut-audit",
+        type=Path,
+        metavar="CSV",
+        help=(
+            "optional output of brspeech_xai.shortcut_audit to include in the "
+            "scientific report"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        output = generate_report_bundle(args.result, args.output)
+        output = generate_report_bundle(
+            args.result,
+            args.output,
+            shortcut_audit_path=args.shortcut_audit,
+        )
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

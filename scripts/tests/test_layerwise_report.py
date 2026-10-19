@@ -612,6 +612,9 @@ def _write_layer_xai_generation(
             "validation_kind": _VALIDATION_KIND,
             "validation_sample_id": str(cohort[0][0]),
             "bias_zeroed_validation_residual": 1e-6 * layer,
+            "bias_zeroed_validation_absolute_error": 1e-4 * layer,
+            "bias_zeroed_validation_bound": 0.015 + 1e-4 * layer,
+            "bias_zeroed_validation_accepted": True,
             "max_bias_inclusive_attribution_gap": 2e-4,
             "max_score_recompute_absolute_error": float(
                 samples["score_recompute_absolute_error"].max()
@@ -947,6 +950,34 @@ def write_scientific_result_root(
     publish_generation(
         root / "aggregates", aggregate_writer, role="suite_aggregates"
     )
+
+    for source in languages:
+        for layer in LAYER_ORDER:
+            threshold_path = paths.thresholds(profile, layer, source)
+            threshold_path.parent.mkdir(parents=True, exist_ok=True)
+            threshold_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "source_language": source,
+                        "layer": layer,
+                        "calibration_source": (
+                            f"{source}/calibration/layer_{layer:02d}"
+                        ),
+                        "calibration_fallback_train": False,
+                        "detectors": {
+                            "ad": {
+                                "method": "eer",
+                                "threshold": 0.5,
+                                "calibration_eer": abs(layer - 7) / 100,
+                                "n": 1204,
+                                "counts": {"bonafide": 602, "spoof": 602},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
 
     for layer, source, target in cells:
         cell_dir = paths.cell(profile, layer, source, target)
@@ -1443,6 +1474,7 @@ def test_conservation_table_records_validation_scope_and_score_rule(eng_tables):
     assert set(table["score_recompute_rtol"]) == {_SCORE_RTOL}
     assert set(table["score_recompute_atol"]) == {_SCORE_ATOL}
     assert (table["max_score_recompute_ratio"] < 1.0).all()
+    assert (table["bias_zeroed_validation_ratio"] < 1.0).all()
 
 
 def test_conservation_series_separate_scopes_and_do_not_share_one_tolerance(
@@ -1471,7 +1503,9 @@ def test_conservation_series_separate_scopes_and_do_not_share_one_tolerance(
     assert "rtol" in score["scope"] and "atol" in score["scope"]
     assert set(by_panel["score_recompute_rtol_atol"]["limit"]) == {1.0}
     assert "rtol" in score["limit_label"]
-    for panel in ("bias_zeroed_single_sample", "dft_xai_cohort", "stdft_subset"):
+    assert set(by_panel["bias_zeroed_single_sample"]["limit"]) == {1.0}
+    assert "misto" in by_panel["bias_zeroed_single_sample"].iloc[0]["limit_label"]
+    for panel in ("dft_xai_cohort", "stdft_subset"):
         assert set(by_panel[panel]["limit"]) == {1e-3}
         assert "tolerância" in by_panel[panel].iloc[0]["limit_label"]
     layer_12_score = by_panel["score_recompute_rtol_atol"].iloc[-1]["value"]
@@ -1699,6 +1733,7 @@ def test_multiple_languages_render_every_family_without_comparison_figures(
         "language_shift",
         "diagonal_vs_offdiagonal",
         "spectral_divergence",
+        "transfer_delta_combined",
         "transfer_delta_roc_auc",
         "transfer_delta_mcc",
         "language_shift_intervals",
@@ -1871,6 +1906,7 @@ def test_manifest_records_relative_sorted_hash_complete_provenance(
         paths
     )
     assert any(path.endswith("/metrics.json") for path in paths)
+    assert any(path.endswith("/thresholds.json") for path in paths)
     assert any(path.startswith(".state/") for path in paths)
     for item in consumed:
         assert set(item) == {"path", "sha256"}
@@ -1965,6 +2001,9 @@ def test_bundle_persists_transfer_reduction_and_xai_association_tables(
         "source",
         "target",
         "selected_layer",
+        "selection_split",
+        "selection_metric",
+        "calibration_eer",
         "roc_auc",
         "mcc",
     ]
@@ -1990,8 +2029,8 @@ def test_transfer_heatmap_caption_states_shared_layer_reduction(eng_figures):
     record = next(
         item for item in eng_figures if item.name == "transfer_performance_heatmaps"
     )
-    assert "ROC-AUC máxima" in record.transformation
-    assert "mesma camada selecionada" in record.transformation
+    assert "menor EER de calibração" in record.transformation
+    assert "sem consultar o alvo" in record.transformation
 
 
 def test_bundle_is_byte_deterministic_across_regeneration_and_locations(
@@ -2144,48 +2183,168 @@ def test_tex_scientific_statements_follow_the_loaded_values(
     eng_tables, eng_loaded, eng_figures, tmp_path
 ):
     performance = eng_tables.performance.copy()
+    calibration = eng_tables.calibration_performance.copy()
     performance.loc[performance["layer"] == 7, "roc_auc"] = 0.9991
     performance.loc[performance["layer"] != 7, "roc_auc"] = 0.6
+    calibration["calibration_eer"] = 0.4
+    calibration.loc[calibration["layer"] == 7, "calibration_eer"] = 0.01
     modified = dataclasses.replace(
         eng_tables,
         performance=performance,
-        transfer_selection=report_module.build_transfer_selection(performance),
+        transfer_selection=report_module.build_transfer_selection(
+            performance, calibration
+        ),
     )
     path = tmp_path / "report.tex"
 
     write_report_tex(path, modified, eng_figures, [eng_loaded])
 
     tex = _read_text(path)
-    claim = "A maior ROC-AUC selecionada é 0,999, na camada 7"
+    claim = "A maior ROC-AUC após a seleção por calibração é 0,999, na camada 7"
     assert claim in tex.split(r"\appendix", 1)[0]
     baseline = tmp_path / "baseline.tex"
     write_report_tex(baseline, eng_tables, eng_figures, [eng_loaded])
     assert claim not in _read_text(baseline)
 
 
-def test_transfer_reduction_selects_layer_by_roc_auc_and_reuses_its_mcc(
-    eng_tables,
+def test_transfer_reduction_selects_one_source_layer_by_calibration_eer(
 ):
-    performance = eng_tables.performance.copy()
-    performance.loc[:, "roc_auc"] = 0.60
-    performance.loc[:, "mcc"] = 0.10
-    performance.loc[performance["layer"] == 4, ["roc_auc", "mcc"]] = [0.91, 0.22]
-    performance.loc[performance["layer"] == 9, ["roc_auc", "mcc"]] = [0.88, 0.97]
+    performance = pd.DataFrame(
+        [
+            {
+                "model": "hubert_base",
+                "source": "eng",
+                "target": target,
+                "layer": layer,
+                "roc_auc": 0.91 if layer == 4 else 0.88 if layer == 9 else 0.60,
+                "mcc": 0.22 if layer == 4 else 0.97 if layer == 9 else 0.10,
+            }
+            for target in ("eng", "por")
+            for layer in range(1, 13)
+        ]
+    )
+    calibration = performance[["model", "source", "layer"]].drop_duplicates()
+    calibration["calibration_eer"] = 0.40
+    calibration.loc[calibration["layer"] == 9, "calibration_eer"] = 0.05
 
-    selected = report_module.build_transfer_selection(performance)
+    selected = report_module.build_transfer_selection(performance, calibration)
 
     assert list(selected.columns) == [
         "model",
         "source",
         "target",
         "selected_layer",
+        "selection_split",
+        "selection_metric",
+        "calibration_eer",
         "roc_auc",
         "mcc",
     ]
     row = selected.iloc[0]
-    assert int(row["selected_layer"]) == 4
-    assert row["roc_auc"] == pytest.approx(0.91)
-    assert row["mcc"] == pytest.approx(0.22)
+    assert int(row["selected_layer"]) == 9
+    assert row["selection_split"] == "source_calibration"
+    assert row["selection_metric"] == "minimum_eer"
+    assert row["calibration_eer"] == pytest.approx(0.05)
+    assert row["roc_auc"] == pytest.approx(0.88)
+    assert row["mcc"] == pytest.approx(0.97)
+
+
+def test_loader_and_report_tables_use_persisted_source_calibration(eng_loaded):
+    calibration = eng_loaded.calibration_performance
+    assert len(calibration) == 12
+    assert set(calibration.columns) >= {
+        "model",
+        "source",
+        "layer",
+        "calibration_eer",
+    }
+
+    tables = build_report_tables([eng_loaded])
+
+    assert set(tables.transfer_selection["selected_layer"]) == {7}
+    assert set(tables.transfer_selection["selection_split"]) == {
+        "source_calibration"
+    }
+
+
+def test_report_tables_include_optional_shortcut_audit(eng_loaded, tmp_path):
+    audit = pd.DataFrame(
+        [
+            {
+                "language": "por",
+                "role": "test",
+                "n_bonafide": 603,
+                "n_spoof": 603,
+                "bonafide_corpora": "CORAA",
+                "spoof_corpora": "MLAAD",
+                "corpus_label_cramers_v": 1.0,
+                "file_formats": "WAV/PCM_16/mono/16000Hz",
+                "feature": "duration_s",
+                "bonafide_median": 2.36,
+                "spoof_median": 10.027,
+                "roc_auc": 0.928,
+                "orientation_invariant_auc": 0.928,
+            }
+        ]
+    )
+
+    tables = build_report_tables([eng_loaded], shortcut_audit=audit)
+    written = set(write_report_tables(tables, tmp_path / "tables"))
+
+    pd.testing.assert_frame_equal(tables.shortcut_audit, audit)
+    assert {
+        "shortcut_audit.csv",
+        "shortcut_audit.tex",
+    } <= written
+    tex = (tmp_path / "tables" / "shortcut_audit.tex").read_text(
+        encoding="utf-8"
+    )
+    assert r"\label{tab:shortcut-audit}" in tex
+    assert "CORAA" in tex and "MLAAD" in tex
+
+
+def test_threshold_recalibration_separates_few_shot_calibration_from_evaluation():
+    predictions = pd.DataFrame(
+        [
+            {
+                "model": "hubert_base",
+                "source": "zho",
+                "target": "eng",
+                "layer": 4,
+                "sample_id": f"sample-{label}-{index:02d}",
+                "y_true": label,
+                "score": 0.2 if label == 0 else 0.8,
+                "prediction": 0,
+                "threshold": 0.9,
+            }
+            for label in (0, 1)
+            for index in range(10)
+        ]
+    )
+    selection = pd.DataFrame(
+        [
+            {
+                "model": "hubert_base",
+                "source": "zho",
+                "target": "eng",
+                "selected_layer": 4,
+            }
+        ]
+    )
+
+    result = report_module.build_threshold_recalibration(
+        predictions, selection, few_shot_per_class=2
+    )
+
+    row = result.iloc[0]
+    assert row["calibration_protocol"] == "target_few_shot_disjoint"
+    assert int(row["n_calibration"]) == 4
+    assert int(row["n_evaluation"]) == 16
+    assert row["source_threshold"] == pytest.approx(0.9)
+    assert row["target_threshold"] == pytest.approx(0.8)
+    assert row["mcc_source_threshold"] == pytest.approx(0.0)
+    assert row["mcc_target_threshold"] == pytest.approx(1.0)
+    assert row["delta_mcc"] == pytest.approx(1.0)
 
 
 def test_xai_performance_association_uses_twelve_layers_and_marks_gaps_unavailable(
@@ -2243,13 +2402,23 @@ def test_consolidated_scope_does_not_claim_comparisons_are_unavailable(
                 copies.append(copy)
         return pd.concat(copies, ignore_index=True)
 
+    calibration = pd.concat(
+        [
+            eng_tables.calibration_performance.assign(
+                source=source, language=source
+            )
+            for source in languages
+        ],
+        ignore_index=True,
+    )
     tables = dataclasses.replace(
         eng_tables,
         languages=languages,
         performance=expand(eng_tables.performance),
+        calibration_performance=calibration,
         band_relevance=expand(eng_tables.band_relevance),
         transfer_selection=report_module.build_transfer_selection(
-            expand(eng_tables.performance)
+            expand(eng_tables.performance), calibration
         ),
         xai_performance_association=report_module.build_xai_performance_associations(
             expand(eng_tables.performance), expand(eng_tables.band_relevance)
@@ -2272,7 +2441,7 @@ def test_consolidated_scope_does_not_claim_comparisons_are_unavailable(
     assert "afirmações comparativas entre modelos ou entre idiomas não estão disponíveis" not in tex
     assert "transferência sob mudança de corpus/idioma" in tex
     assert "causado pelo idioma" not in tex
-    assert "não identificam um efeito causal do idioma" in tex
+    assert "não isolam o efeito do idioma" in tex
 
 
 def test_tex_keeps_the_appendix_section_when_its_figure_is_unavailable(
@@ -2601,8 +2770,8 @@ _LAYERWISE_REPORT_WINDOWS_BUILD = (
 )
 _VISIBLE_MAIN_FIGURES_LIST = re.compile(
     r"(?ms)"
-    r"(?:As oito figuras principais são, nesta ordem fixa:|"
-    r"The eight main result figures are, in fixed order:)\s*\n"
+    r"(?:As sete figuras principais são, nesta ordem fixa:|"
+    r"The seven main result figures are, in fixed order:)\s*\n"
     r"(?P<list>(?:\d+\.\s+`[^`]+`[^\n]*\n)+)"
 )
 _VISIBLE_STABLE_CSV_LIST = re.compile(
@@ -2650,8 +2819,8 @@ def parse_visible_main_result_figures(text: str) -> tuple[str, ...]:
     if not match:
         raise ValueError("missing visible ordered main-result-figures list")
     items = _parse_numbered_backtick_items(match.group("list"))
-    if len(items) != 8:
-        raise ValueError(f"expected 8 main figures, found {len(items)}")
+    if len(items) != 7:
+        raise ValueError(f"expected 7 main figures, found {len(items)}")
     return items
 
 
@@ -2675,20 +2844,22 @@ def _extract_bounded_paragraph(pattern: re.Pattern[str], section: str, label: st
 
 
 def _assert_transfer_layer_selection_rule(paragraph: str) -> None:
-    assert "transfer_selected_layers.csv" in paragraph
-    assert "delta_roc_auc" in paragraph and "delta_mcc" in paragraph
+    lower = paragraph.lower()
+    assert "eer" in lower and ("calibração" in lower or "calibration" in lower)
     assert re.search(
-        r"(maximum ROC-AUC|maior ROC-AUC).{0,500}(same layer|mesma camada)",
+        r"(minimum EER|menor EER).{0,500}"
+        r"(before\s+inspecting|antes de\s+examinar|sem\s+consultar).{0,250}"
+        r"(target test|teste-alvo|teste)",
         paragraph,
         re.IGNORECASE | re.DOTALL,
-    ), "ROC-AUC layer selection must precede same-layer MCC in one bounded paragraph"
+    ), "the source calibration split must select the layer before target tests"
     assert re.search(
-        r"(reuse|reutiliz).{0,250}(selected layer|camada selecionada|"
-        r"transfer_selected_layers\.csv)|"
-        r"(selected layer|camada selecionada).{0,250}(reuse|reutiliz)",
+        r"(every target reuses|todos os alvos reutilizam).{0,300}"
+        r"(ROC-AUC).{0,100}(MCC).{0,300}"
+        r"(without metric-specific reselection|sem reseleção específica por métrica)",
         paragraph,
         re.IGNORECASE | re.DOTALL,
-    ), "delta effects must reuse the ROC-AUC-selected layer"
+    ), "all targets and both metrics must reuse the source-selected layer"
 
 
 def _assert_bootstrap_uncertainty_policy(paragraph: str) -> None:
@@ -2728,7 +2899,7 @@ def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
 
     assert "16 a 20 páginas" in section
     assert "apêndices no mesmo PDF" in section
-    assert "oito figuras principais" in section
+    assert "sete figuras principais" in section
     assert "não persistidos" in section and "draws bootstrap" in section
 
     try:
@@ -2765,7 +2936,7 @@ def test_docs_describe_question_driven_body_and_same_pdf_appendices():
     for text in texts:
         assert "16 a 20 páginas" in text
         assert "apêndices no mesmo PDF" in text
-        assert "oito figuras principais" in text
+        assert "sete figuras principais" in text
         assert "não persistidos" in text and "draws bootstrap" in text
 
 
@@ -2776,15 +2947,14 @@ def test_docs_layerwise_report_semantic_contract(relative):
 
 def test_parse_visible_main_result_figures_rejects_reordered_list():
     sample = (
-        "The eight main result figures are, in fixed order:\n\n"
-        "1. `transfer_delta_roc_auc` — drop;\n"
+        "The seven main result figures are, in fixed order:\n\n"
+        "1. `transfer_delta_combined` — drop;\n"
         "2. `transfer_performance_heatmaps` — heatmaps;\n"
-        "3. `transfer_delta_mcc` — mcc;\n"
-        "4. `encoder_agreement_heatmaps` — agreement;\n"
-        "5. `dft_relevance_heatmap` — frequency profiles;\n"
-        "6. `language_shift_intervals` — shift;\n"
-        "7. `spectral_divergence_by_layer` — spectral;\n"
-        "8. `layer_faithfulness_intervals` — faithfulness;\n"
+        "3. `encoder_agreement_heatmaps` — agreement;\n"
+        "4. `dft_relevance_heatmap` — frequency profiles;\n"
+        "5. `language_shift_intervals` — shift;\n"
+        "6. `spectral_divergence_by_layer` — spectral;\n"
+        "7. `layer_faithfulness_intervals` — faithfulness;\n"
     )
     figures = parse_visible_main_result_figures(sample)
     assert figures != report_module.MAIN_RESULT_FIGURES
@@ -2794,8 +2964,8 @@ def test_parse_visible_main_result_figures_rejects_reordered_list():
     "mutator",
     [
         lambda text: text.replace(
-            "2. `transfer_delta_roc_auc`",
-            "2. `transfer_delta_roc_auc_typo`",
+            "2. `transfer_delta_combined`",
+            "2. `transfer_delta_combined_typo`",
             1,
         ),
         lambda text: text.replace(
@@ -3205,11 +3375,7 @@ def _captions(tex: str) -> list[str]:
 def test_figure_captions_omit_internal_model_identifiers(
     eng_tex, two_model_roots, tmp_path
 ):
-    captions = [
-        caption
-        for caption in _captions(eng_tex)
-        if not caption.startswith("Inventário")
-    ]
+    captions = _captions(eng_tex)
     assert len(captions) >= 6
     for caption in captions:
         assert r"\texttt{hubert\_base}" not in caption, caption
@@ -4087,7 +4253,7 @@ def test_full_sample_ids_remain_in_the_provenance_tables(
     assert "\u2026" not in manifest_text
 
 
-def test_tex_narrative_shows_only_the_short_id_and_points_to_the_csv(
+def test_tex_narrative_shows_only_the_short_id_and_points_to_supplement(
     long_id_bundle,
 ):
     tex = _read_text(long_id_bundle / "report.tex").replace(r"\allowbreak{}", "")
@@ -4097,8 +4263,8 @@ def test_tex_narrative_shows_only_the_short_id_and_points_to_the_csv(
     short = abbreviate_sample_id(_LONG_IDS[0]).replace("\u2026", r"\ldots{}")
     assert short.replace("_", r"\_") in tex
     assert "identificadores completos" in tex
-    assert r"tables/conservation\_by\_layer.csv" in tex
-    assert r"tables/stdft\_examples.csv" in tex
+    assert "material suplementar" in tex
+    assert ".csv" not in tex
     assert _pdflatex_safe(tex)
 
 
@@ -4117,15 +4283,11 @@ def _table_block(tex: str, label: str) -> str:
     return match.group(0)
 
 
-@pytest.mark.parametrize("label", ["tab:inventario", "tab:performance-"])
+@pytest.mark.parametrize("label", ["tab:performance-"])
 def test_wide_tables_are_constrained_to_the_text_width(
     eng_tex, eng_bundle, label
 ):
-    source = (
-        eng_tex
-        if label == "tab:inventario"
-        else _read_text(eng_bundle / "tables" / "performance_by_layer.tex")
-    )
+    source = _read_text(eng_bundle / "tables" / "performance_by_layer.tex")
     block = _table_block(source, label)
     assert r"\small" in block
     assert re.search(r"\\setlength\{\\tabcolsep\}\{[0-9.]+pt\}", block)
@@ -4134,14 +4296,12 @@ def test_wide_tables_are_constrained_to_the_text_width(
     assert r"\end{tabular}}" in block
 
 
-def test_inventory_header_is_compact(eng_tex):
-    block = _table_block(eng_tex, "tab:inventario")
-    header = next(line for line in block.splitlines() if "Camadas" in line)
-    cells = [cell.strip() for cell in header.rstrip("\\ ").split("&")]
-    assert "Hash da config." in cells
-    assert max(len(cell) for cell in cells) <= 18
-    assert "12 primeiros" not in header
-    assert "12 primeiros caracteres" in block
+def test_scientific_narrative_omits_software_audit_metadata(eng_tex):
+    assert r"\label{tab:inventario}" not in eng_tex
+    assert "Hash da config." not in eng_tex
+    assert "report_manifest.json" not in eng_tex
+    assert "gerado de forma determinística" not in eng_tex
+    assert ".csv" not in eng_tex
 
 
 def test_section_title_is_short_and_babel_is_brazilian(eng_tex):
@@ -4456,8 +4616,8 @@ def test_faithfulness_figure_exposes_scope_zero_line_and_both_controls(
         full_comparison_tables, tmp_path / "faithfulness"
     )
     text = "\n".join(captured["layer_faithfulness_intervals"]["texts"])
-    assert "top-minus-random" in text
-    assert "top-minus-bottom" in text
+    assert "principais menos aleatórias" in text
+    assert "principais menos inferiores" in text
     assert 0.0 in zero_lines
     record = next(r for r in records if r.name == "layer_faithfulness_intervals")
     assert "camada 12" in record.caption.lower()
@@ -4601,6 +4761,31 @@ def test_faithfulness_and_synthesis_are_exported_and_referenced(
     assert report.count(r"\appendix") == 1
 
 
+def test_threshold_recalibration_is_exported_as_scientific_table(
+    full_comparison_tables, tmp_path
+):
+    tables_dir = tmp_path / "tables"
+    written = set(write_report_tables(full_comparison_tables, tables_dir))
+
+    assert {
+        "threshold_recalibration.csv",
+        "threshold_recalibration.tex",
+    } <= written
+    tex = (tables_dir / "threshold_recalibration.tex").read_text(
+        encoding="utf-8"
+    )
+    assert r"\label{tab:threshold-recalibration}" in tex
+    assert "Limiar da origem" in tex
+    assert "Limiar recalibrado" in tex
+    appendix = "\n".join(
+        report_module._performance_appendix(
+            full_comparison_tables, {}
+        )
+    )
+    assert r"\input{tables/threshold_recalibration.tex}" in appendix
+    assert "selecionada exclusivamente na calibração da origem" in appendix
+
+
 def test_faithfulness_planned_without_aligned_rows_fails_closed(eng_tables, tmp_path):
     tables = dataclasses.replace(
         eng_tables, planned_figures=("layer_faithfulness_intervals",)
@@ -4734,8 +4919,7 @@ _RENDERED_COMPARISON_FAMILIES = _COMPARISON_FAMILIES[1:]
 _BASE_RENDERED_FAMILIES = _EIGHT_FAMILIES + _RENDERED_COMPARISON_FAMILIES
 _MAIN_RESULT_FIGURES = (
     "transfer_performance_heatmaps",
-    "transfer_delta_roc_auc",
-    "transfer_delta_mcc",
+    "transfer_delta_combined",
     "encoder_agreement_heatmaps",
     "dft_relevance_heatmap",
     "language_shift_intervals",
@@ -4884,6 +5068,13 @@ def full_comparison_tex(full_comparison_tables, tmp_path_factory) -> str:
     path = tmp_path / "report.tex"
     write_report_tex(path, full_comparison_tables, figures, [])
     return _read_text(path)
+
+
+def test_multilingual_report_is_framed_as_cross_corpus_cross_lingual(
+    full_comparison_tex,
+):
+    assert "Transferência cross-corpus/cross-lingual" in full_comparison_tex
+    assert "efeito causal do idioma" in full_comparison_tex
 
 
 def test_encoder_agreement_heatmap_uses_layer_medians(full_comparison_tables):
@@ -5147,7 +5338,7 @@ def test_transfer_heatmap_caption_keeps_train_rows_evaluation_columns_and_shared
         record
         for record in records
         if record.name == "transfer_performance_heatmaps"
-    ).transformation.endswith("sem maximizar o MCC independentemente")
+    ).transformation.endswith("sem consultar o alvo durante a seleção")
 
 
 def test_full_report_executive_summary_reports_all_four_comparisons_from_data(
@@ -5298,7 +5489,7 @@ def test_main_result_blocks_follow_approved_order_with_their_figures(
     assert positions == sorted(positions)
     expected_figures = (
         ("transfer_performance_heatmaps",),
-        ("transfer_delta_roc_auc", "transfer_delta_mcc"),
+        ("transfer_delta_combined",),
         ("encoder_agreement_heatmaps",),
         ("dft_relevance_heatmap",),
         ("language_shift_intervals",),
@@ -5318,7 +5509,8 @@ def test_main_result_blocks_follow_approved_order_with_their_figures(
         )[0]
         assert 1 <= findings.count(r"\item ") <= 3, heading
         assert "Detalhe completo:" in block
-        assert ".csv}" in block
+        assert "material tabular suplementar" in block
+        assert ".csv" not in block
     for name in _MAIN_RESULT_FIGURES:
         assert full_comparison_tex.count(rf"\label{{fig:{name}}}") == 1
     synthesis = body.index(r"\input{tables/results_synthesis.tex}")
@@ -5606,7 +5798,7 @@ def test_cross_cutting_limitations_and_encoder_conclusion(full_comparison_tex):
     conclusion = body.split(r"\section{Conclusão}", 1)[1]
     assert "não isolam o efeito do idioma" in limitations
     assert "mudança conjunta de corpus/idioma" in limitations
-    for local in ("intercambiáveis", "Wasserstein", "top-minus-random"):
+    for local in ("intercambiáveis", "Wasserstein", "principais menos aleatórias"):
         assert local not in limitations, local
     assert "não identificam um efeito causal do idioma" in conclusion
     assert (
@@ -5756,8 +5948,8 @@ def test_performance_appendix_keeps_limits_removed_from_short_captions(
         r"\section{", 1
     )[0]
     figures = appendix.split(r"\subsection{Ranking sem limiar", 1)[0]
-    assert "um único conjunto de teste por célula" in figures
-    assert "não é recalibrado no idioma de avaliação" in figures
+    assert "selecionada exclusivamente na calibração" in figures
+    assert "mesma camada é usada nos três alvos" in figures
 
 
 def test_comparison_narrative_explains_method_and_links_each_result(
@@ -5775,8 +5967,7 @@ def test_comparison_narrative_explains_method_and_links_each_result(
         "language_shift_intervals",
         "spectral_divergence_by_layer",
         "encoder_agreement_heatmaps",
-        "transfer_delta_roc_auc",
-        "transfer_delta_mcc",
+        "transfer_delta_combined",
     ):
         assert rf"\label{{fig:{family}}}" in body
     for family in ("diagonal_vs_offdiagonal", "encoder_agreement_by_layer"):
@@ -5789,8 +5980,8 @@ def test_comparison_narrative_explains_method_and_links_each_result(
     for family in _COMPARISON_FAMILIES:
         assert rf"\input{{tables/{family}.tex}}" in section
         assert rf"\input{{tables/{family}.tex}}" not in body
-        csv = rf"\texttt{{tables/{family.replace('_', chr(92) + '_')}.csv}}"
-        assert csv in body.replace(r"\allowbreak{}", "")
+    assert "material tabular suplementar" in body
+    assert ".csv" not in body
     assert r"\label{fig:encoder_agreement}" not in full_comparison_tex
     assert r"\texttt{ci\_low}--\texttt{ci\_high}" in section
     assert "ci_low--ci_high" not in section
@@ -5827,7 +6018,7 @@ def test_local_limitations_sit_in_the_caution_of_their_result_block(
 ):
     body = _main_body(full_comparison_tex)
     expected = {
-        _MAIN_RESULT_HEADINGS[0]: "não é maximizado separadamente",
+            _MAIN_RESULT_HEADINGS[0]: "variabilidade não é capturada",
         _MAIN_RESULT_HEADINGS[1]: "não sua causa",
         _MAIN_RESULT_HEADINGS[2]: "não torna os modelos intercambiáveis",
         _MAIN_RESULT_HEADINGS[3]: "não uma pista acústica causal",
@@ -5865,6 +6056,7 @@ def test_render_emits_comparison_and_transfer_effect_artifacts(
     records = render_report_figures(full_comparison_tables, figures_dir)
     names = {path.name for path in figures_dir.iterdir()}
     rendered_comparisons = _RENDERED_COMPARISON_FAMILIES + (
+        "transfer_delta_combined",
         "transfer_delta_roc_auc",
         "transfer_delta_mcc",
         "encoder_agreement_heatmaps",
@@ -6186,8 +6378,8 @@ def test_write_report_tables_exports_full_comparison_csvs_and_compact_tex(
         )
         tex = (tmp_path / "tables" / f"{family}.tex").read_text(encoding="utf-8")
         assert r"\begin{tabular}" in tex
-        assert "Detalhe completo" in tex or "detalhe completo" in tex
-        assert family.replace("_", r"\_") in tex or family in tex
+        assert "material suplementar" in tex
+        assert r"\label{tab:" in tex
 
 
 def test_comparison_summary_tex_column_counts_are_consistent(
@@ -6282,6 +6474,7 @@ def test_multiple_languages_add_language_comparison_figures(tmp_path):
         "language_shift",
         "diagonal_vs_offdiagonal",
         "spectral_divergence",
+        "transfer_delta_combined",
         "transfer_delta_roc_auc",
         "transfer_delta_mcc",
         "language_shift_intervals",
@@ -6548,7 +6741,7 @@ def test_encoder_agreement_record_distinguishes_cell_iqr_from_bootstrap(
     lowered = record.transformation.lower()
     assert "quartis" in lowered or "interquartil" in lowered
     assert "não reproduz ci_low/ci_high" in lowered
-    assert "csv" in lowered
+    assert "material suplementar" in lowered
 
 
 def test_comparison_tex_summaries_use_readable_model_and_metric_labels(
@@ -7150,18 +7343,22 @@ def test_appendix_shows_every_detail_figure_exactly_once(
     figures = render_report_figures(full_comparison_tables, tmp_path / "figures")
     appendix = _appendix(full_comparison_tex)
     main_figures = set(_MAIN_RESULT_FIGURES)
+    standalone_supplement = {"transfer_delta_roc_auc", "transfer_delta_mcc"}
     for record in figures:
         label = rf"\label{{fig:{record.name}}}"
+        if record.name in standalone_supplement:
+            assert label not in full_comparison_tex
+            continue
         assert full_comparison_tex.count(label) == 1, record.name
         if record.name not in main_figures:
             assert label in appendix, record.name
 
 
-def test_appendix_sections_open_with_a_provenance_paragraph(full_comparison_tex):
+def test_appendix_sections_open_with_a_data_paragraph(full_comparison_tex):
     appendix = _appendix(full_comparison_tex)
     for label in _APPENDIX_LABELS:
         after = appendix.split(rf"\label{{{label}}}", 1)[1].lstrip("\n")
-        assert after.startswith(r"\textit{Proveniência:}"), label
+        assert after.startswith(r"\textit{Dados analisados:}"), label
 
 
 def test_single_source_appendix_keeps_stable_sections_with_unavailable_notes(
@@ -7449,13 +7646,22 @@ def test_faithfulness_figure_distinguishes_every_language_and_control(
         positions = [y for point in points for y in point["y"]]
         assert len(positions) == len(set(positions))
     legend = "\n".join(captured["layer_faithfulness_intervals"]["legend_texts"])
-    for label in ("Inglês", "Português", "Mandarim", "top-minus-random", "top-minus-bottom"):
+    for label in (
+        "Inglês",
+        "Português",
+        "Mandarim",
+        "principais menos aleatórias",
+        "principais menos inferiores",
+    ):
         assert label in legend
     record = next(r for r in records if r.name == "layer_faithfulness_intervals")
     caption = report_module._caption_pt(record, trilingual_tables)
     assert "formato do marcador" in caption
     assert "deslocamento vertical" in caption
-    assert "cores distinguem top-minus-random de top-minus-bottom" in caption
+    assert (
+        "cores distinguem principais menos aleatórias de principais menos inferiores"
+        in caption
+    )
 
 
 def test_faithfulness_figure_renders_only_models_with_aligned_data(
