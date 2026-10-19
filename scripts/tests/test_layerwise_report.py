@@ -5609,7 +5609,10 @@ def test_cross_cutting_limitations_and_encoder_conclusion(full_comparison_tex):
     for local in ("intercambiáveis", "Wasserstein", "top-minus-random"):
         assert local not in limitations, local
     assert "não identificam um efeito causal do idioma" in conclusion
-    assert r"Tabela~\ref{tab:results-synthesis}" in conclusion
+    assert (
+        r"As quatro perguntas comparativas e suas cautelas estão na "
+        r"Tabela~\ref{tab:results-synthesis}."
+    ) in conclusion
     assert conclusion.count(r"Figura~\ref") == 0
     for phrase in ("causado pelo idioma", "o idioma causa", "efeito causal do idioma é"):
         assert phrase not in body

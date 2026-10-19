@@ -7787,8 +7787,9 @@ def _cross_encoder_conclusion(tables: ReportTables) -> list[str]:
         transfer_text,
         faithfulness_text,
         "Em conjunto, os resultados mostram associação entre a escolha do encoder "
-        "e os padrões observados; não permitem atribuir essas diferenças a uma "
-        "característica específica do pré-treino ou ao idioma isoladamente.",
+        "e os padrões observados; não identificam um efeito causal do idioma nem "
+        "permitem atribuir as diferenças a uma característica específica do "
+        "pré-treino.",
         "",
     ]
 
@@ -7811,10 +7812,8 @@ def _short_conclusion_section(tables: ReportTables) -> list[str]:
     lines += _encoder_profile_sections(tables)
     lines += _cross_encoder_conclusion(tables)
     lines += [
-        "As comparações de transferência combinam mudança de corpus e idioma e, "
-        "por isso, não identificam um efeito causal do idioma.",
-        r"A Tabela~\ref{tab:results-synthesis} reúne as respostas e as cautelas "
-        f"das {_synthesis_scope_tex(tables)}.",
+        r"As quatro perguntas comparativas e suas cautelas estão na "
+        r"Tabela~\ref{tab:results-synthesis}.",
         "",
     ]
     return lines
