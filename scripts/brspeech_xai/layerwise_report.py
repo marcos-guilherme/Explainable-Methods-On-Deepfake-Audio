@@ -7531,7 +7531,7 @@ def frequency_layer_dominance(tables: ReportTables) -> pd.DataFrame:
     dominant["_language_order"] = dominant["language"].map(language_order)
     return (
         dominant.sort_values(
-            ["_model_order", "_language_order", "layer", "band"],
+            ["_language_order", "_model_order", "layer", "band"],
             kind="mergesort",
         )
         .drop(columns=["_model_order", "_language_order"])

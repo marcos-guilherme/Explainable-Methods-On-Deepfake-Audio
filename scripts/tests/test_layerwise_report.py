@@ -5645,19 +5645,63 @@ def test_frequency_profile_claims_preserve_co_dominant_bands(
     assert claims["layers_dominant"].tolist() == [halfway, len(layers) - halfway]
 
 
+_FREQUENCY_LAYER_DOMINANCE_COLUMNS = [
+    "model",
+    "language",
+    "layer",
+    "band",
+    "band_label",
+    "mean_mass",
+]
+
+
 def test_frequency_layer_dominance_covers_each_diagonal_layer(
     full_comparison_tables,
 ):
     dominance = report_module.frequency_layer_dominance(full_comparison_tables)
-    expected = {
+    assert dominance.columns.tolist() == _FREQUENCY_LAYER_DOMINANCE_COLUMNS
+    expected_cell_order = [
         (model, language, layer)
-        for model in full_comparison_tables.models
         for language in full_comparison_tables.languages
+        for model in full_comparison_tables.models
         for layer in LAYER_ORDER
+    ]
+    observed_cell_order = []
+    seen_cells: set[tuple[str, str, int]] = set()
+    for model, language, layer in zip(
+        dominance["model"], dominance["language"], dominance["layer"]
+    ):
+        key = (model, language, layer)
+        if key not in seen_cells:
+            seen_cells.add(key)
+            observed_cell_order.append(key)
+    assert observed_cell_order == expected_cell_order
+
+    language_rank = {
+        language: index
+        for index, language in enumerate(full_comparison_tables.languages)
     }
-    assert set(zip(dominance["model"], dominance["language"], dominance["layer"])) == (
-        expected
-    )
+    model_rank = {
+        model: index for index, model in enumerate(full_comparison_tables.models)
+    }
+    sort_keys = [
+        (language_rank[language], model_rank[model], layer, band)
+        for language, model, layer, band in zip(
+            dominance["language"],
+            dominance["model"],
+            dominance["layer"],
+            dominance["band"],
+        )
+    ]
+    assert sort_keys == sorted(sort_keys)
+
+
+def test_frequency_layer_dominance_empty_band_relevance(full_comparison_tables):
+    empty = full_comparison_tables.band_relevance.iloc[0:0].copy()
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=empty)
+    dominance = report_module.frequency_layer_dominance(tables)
+    assert dominance.columns.tolist() == _FREQUENCY_LAYER_DOMINANCE_COLUMNS
+    assert dominance.empty
 
 
 def test_frequency_layer_dominance_preserves_exact_ties(full_comparison_tables):
