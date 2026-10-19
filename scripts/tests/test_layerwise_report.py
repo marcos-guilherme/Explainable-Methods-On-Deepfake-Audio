@@ -2601,8 +2601,8 @@ _LAYERWISE_REPORT_WINDOWS_BUILD = (
 )
 _VISIBLE_MAIN_FIGURES_LIST = re.compile(
     r"(?ms)"
-    r"(?:As sete figuras principais são, nesta ordem fixa:|"
-    r"The seven main result figures are, in fixed order:)\s*\n"
+    r"(?:As oito figuras principais são, nesta ordem fixa:|"
+    r"The eight main result figures are, in fixed order:)\s*\n"
     r"(?P<list>(?:\d+\.\s+`[^`]+`[^\n]*\n)+)"
 )
 _VISIBLE_STABLE_CSV_LIST = re.compile(
@@ -2650,8 +2650,8 @@ def parse_visible_main_result_figures(text: str) -> tuple[str, ...]:
     if not match:
         raise ValueError("missing visible ordered main-result-figures list")
     items = _parse_numbered_backtick_items(match.group("list"))
-    if len(items) != 7:
-        raise ValueError(f"expected 7 main figures, found {len(items)}")
+    if len(items) != 8:
+        raise ValueError(f"expected 8 main figures, found {len(items)}")
     return items
 
 
@@ -2728,7 +2728,7 @@ def _assert_layerwise_report_doc_contract(relative: str, text: str) -> None:
 
     assert "16 a 20 páginas" in section
     assert "apêndices no mesmo PDF" in section
-    assert "sete figuras principais" in section
+    assert "oito figuras principais" in section
     assert "não persistidos" in section and "draws bootstrap" in section
 
     try:
@@ -2765,7 +2765,7 @@ def test_docs_describe_question_driven_body_and_same_pdf_appendices():
     for text in texts:
         assert "16 a 20 páginas" in text
         assert "apêndices no mesmo PDF" in text
-        assert "sete figuras principais" in text
+        assert "oito figuras principais" in text
         assert "não persistidos" in text and "draws bootstrap" in text
 
 
@@ -2776,14 +2776,15 @@ def test_docs_layerwise_report_semantic_contract(relative):
 
 def test_parse_visible_main_result_figures_rejects_reordered_list():
     sample = (
-        "The seven main result figures are, in fixed order:\n\n"
+        "The eight main result figures are, in fixed order:\n\n"
         "1. `transfer_delta_roc_auc` — drop;\n"
         "2. `transfer_performance_heatmaps` — heatmaps;\n"
         "3. `transfer_delta_mcc` — mcc;\n"
         "4. `encoder_agreement_heatmaps` — agreement;\n"
-        "5. `language_shift_intervals` — shift;\n"
-        "6. `spectral_divergence_by_layer` — spectral;\n"
-        "7. `layer_faithfulness_intervals` — faithfulness;\n"
+        "5. `dft_relevance_heatmap` — frequency profiles;\n"
+        "6. `language_shift_intervals` — shift;\n"
+        "7. `spectral_divergence_by_layer` — spectral;\n"
+        "8. `layer_faithfulness_intervals` — faithfulness;\n"
     )
     figures = parse_visible_main_result_figures(sample)
     assert figures != report_module.MAIN_RESULT_FIGURES
@@ -4737,6 +4738,7 @@ _MAIN_RESULT_FIGURES = (
     "transfer_delta_roc_auc",
     "transfer_delta_mcc",
     "encoder_agreement_heatmaps",
+    "dft_relevance_heatmap",
     "language_shift_intervals",
     "spectral_divergence_by_layer",
     "layer_faithfulness_intervals",
@@ -4755,13 +4757,13 @@ def test_selected_transfer_effects_reuses_the_roc_auc_selected_layer(
     assert set(selected["metric"]) == {"delta_mcc"}
 
 
-def test_full_report_declares_seven_main_result_figures(full_comparison_tables):
+def test_full_report_declares_eight_main_result_figures(full_comparison_tables):
     declared = tuple(
         name
         for name in full_comparison_tables.planned_figures
         if name in report_module.MAIN_RESULT_FIGURES
     )
-    assert declared == _MAIN_RESULT_FIGURES
+    assert set(declared) == set(_MAIN_RESULT_FIGURES)
 
 
 def test_render_rejects_unknown_planned_figure_family(eng_tables, tmp_path):
@@ -5182,6 +5184,7 @@ _MAIN_RESULT_HEADINGS = (
     "Visão geral do desempenho",
     "Quanto o desempenho cai na transferência?",
     "Até que ponto os encoders concordam?",
+    "Em quais faixas a relevância se concentra para cada encoder e idioma?",
     "Como a relevância muda entre corpora e idiomas?",
     "Quanto a relevância se desloca em frequência?",
     "As faixas apontadas sustentam a decisão?",
@@ -5211,6 +5214,7 @@ def test_full_report_body_is_question_driven_and_has_no_cell_by_cell_prose(
         "Visão geral do desempenho",
         "Quanto o desempenho cai na transferência?",
         "Até que ponto os encoders concordam?",
+        "Em quais faixas a relevância se concentra para cada encoder e idioma?",
         "Como a relevância muda entre corpora e idiomas?",
         "As faixas apontadas sustentam a decisão?",
     ):
@@ -5223,9 +5227,9 @@ def test_each_main_result_block_has_result_interpretation_and_caution(
     full_comparison_tex,
 ):
     body = full_comparison_tex.split(r"\appendix", 1)[0]
-    assert body.count(r"\textbf{Resultado:}") == 6
-    assert body.count(r"\textbf{Interpretação:}") == 6
-    assert body.count(r"\textbf{Cautela:}") == 6
+    assert body.count(r"\textbf{Resultado:}") == 7
+    assert body.count(r"\textbf{Interpretação:}") == 7
+    assert body.count(r"\textbf{Cautela:}") == 7
 
 
 def test_main_body_has_toc_orientation_and_short_glossary(full_comparison_tex):
@@ -5297,6 +5301,7 @@ def test_main_result_blocks_follow_approved_order_with_their_figures(
         ("transfer_performance_heatmaps",),
         ("transfer_delta_roc_auc", "transfer_delta_mcc"),
         ("encoder_agreement_heatmaps",),
+        ("dft_relevance_heatmap",),
         ("language_shift_intervals",),
         ("spectral_divergence_by_layer",),
         ("layer_faithfulness_intervals",),
@@ -5342,13 +5347,100 @@ def test_main_result_findings_are_derived_from_the_tables(
     fidelity = report_module.faithfulness_claim(
         report_module._aligned_layer_faithfulness(full_comparison_tables)
     )
-    block = _result_block(body, _MAIN_RESULT_HEADINGS[5])
+    block = _result_block(body, _MAIN_RESULT_HEADINGS[6])
     for row in fidelity.itertuples(index=False):
         assert f"{row.ci_above_zero_n} de {row.total}" in block
     selected = full_comparison_tables.transfer_selection
     diagonal = selected[selected["source"] == selected["target"]]
     block = _result_block(body, _MAIN_RESULT_HEADINGS[0])
     assert report_module._num(diagonal["roc_auc"].median()) in block
+
+
+def test_frequency_profile_claims_cover_every_diagonal_model_language(
+    full_comparison_tables,
+):
+    claims = report_module.frequency_profile_claims(full_comparison_tables)
+    expected = {
+        (model, language)
+        for model in full_comparison_tables.models
+        for language in full_comparison_tables.languages
+    }
+    assert set(zip(claims["model"], claims["language"])) == expected
+    assert set(claims["n_layers"]) == {12}
+    assert claims["layers_dominant"].between(1, 12).all()
+    assert claims["band_label"].str.endswith(" Hz").all()
+    assert claims["mean_mass"].between(0.0, 1.0).all()
+
+
+def test_main_frequency_profile_names_each_encoder_and_language_from_data(
+    full_comparison_tables, full_comparison_tex
+):
+    claims = report_module.frequency_profile_claims(full_comparison_tables)
+    block = _result_block(
+        _main_body(full_comparison_tex),
+        "Em quais faixas a relevância se concentra para cada encoder e idioma?",
+    )
+    assert r"\label{fig:dft_relevance_heatmap}" in block
+    assert "mais frequentemente dominante" in block
+    assert "não uma pista acústica causal" in block
+    for row in claims.itertuples(index=False):
+        assert report_module._model_name(row.model) in block
+        assert report_module._language_name(row.language) in block
+        assert row.band_label.replace("–", "--") in block
+        assert f"{row.layers_dominant} de {row.n_layers} camadas" in block
+
+
+def test_frequency_profile_claims_preserve_co_dominant_bands(
+    full_comparison_tables,
+):
+    frame = full_comparison_tables.band_relevance
+    model = full_comparison_tables.models[0]
+    language = full_comparison_tables.languages[0]
+    selected = frame[
+        (frame["model"] == model)
+        & (frame["source"] == language)
+        & (frame["target"] == language)
+        & (frame["measure"] == "absolute_normalized")
+    ].copy()
+    selected["mean"] = 0.0
+    layers = sorted(selected["layer"].unique())
+    halfway = len(layers) // 2
+    selected.loc[
+        (selected["band"] == 1) & selected["layer"].isin(layers[:halfway]), "mean"
+    ] = 1.0
+    selected.loc[
+        (selected["band"] == 2) & selected["layer"].isin(layers[halfway:]), "mean"
+    ] = 1.0
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=selected)
+
+    claims = report_module.frequency_profile_claims(tables)
+
+    assert claims["band"].tolist() == [1, 2]
+    assert claims["layers_dominant"].tolist() == [halfway, len(layers) - halfway]
+
+
+def test_frequency_heatmap_uses_the_same_diagonal_scope_as_its_claims(
+    full_comparison_tables, tmp_path
+):
+    records = {
+        record.name: record
+        for record in render_report_figures(full_comparison_tables, tmp_path)
+    }
+    cells = records["dft_relevance_heatmap"].cells
+    assert cells
+    assert all(source == target for _, source, target in cells)
+
+
+def test_missing_frequency_profile_does_not_leave_a_dangling_reference(
+    full_comparison_tables, tmp_path
+):
+    empty = full_comparison_tables.band_relevance.iloc[0:0].copy()
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=empty)
+    path = tmp_path / "report.tex"
+    write_report_tex(path, tables, [], [])
+    tex = _read_text(path)
+    assert r"\label{sec:resultado-faixas-frequencia}" not in tex
+    assert r"\ref{sec:resultado-faixas-frequencia}" not in tex
 
 
 def test_main_findings_follow_modified_table_values(
@@ -5396,13 +5488,14 @@ def test_synthesis_is_described_as_its_comparative_questions_only(
     for text in (synthesis, conclusion):
         assert "cada pergunta" not in text
         assert "quatro perguntas comparativas" in text
-    assert "visão geral do desempenho" in synthesis
+    assert "visão geral do desempenho" in synthesis.lower()
+    assert "perfil por faixa de frequência" in synthesis.lower()
 
 
 def test_faithfulness_prose_describes_score_change_not_decision_change(
     full_comparison_tables, full_comparison_tex
 ):
-    block = _result_block(_main_body(full_comparison_tex), _MAIN_RESULT_HEADINGS[5])
+    block = _result_block(_main_body(full_comparison_tex), _MAIN_RESULT_HEADINGS[6])
     prose = block.split("\n", 1)[1]
     assert "escore" in prose
     assert "decisão" not in prose
@@ -5547,9 +5640,10 @@ def test_local_limitations_sit_in_the_caution_of_their_result_block(
         _MAIN_RESULT_HEADINGS[0]: "não é maximizado separadamente",
         _MAIN_RESULT_HEADINGS[1]: "não sua causa",
         _MAIN_RESULT_HEADINGS[2]: "não torna os modelos intercambiáveis",
-        _MAIN_RESULT_HEADINGS[3]: "não isola um efeito do idioma",
-        _MAIN_RESULT_HEADINGS[4]: "não identifica a causa do deslocamento",
-        _MAIN_RESULT_HEADINGS[5]: "não implica causalidade no mundo real",
+        _MAIN_RESULT_HEADINGS[3]: "não uma pista acústica causal",
+        _MAIN_RESULT_HEADINGS[4]: "não isola um efeito do idioma",
+        _MAIN_RESULT_HEADINGS[5]: "não identifica a causa do deslocamento",
+        _MAIN_RESULT_HEADINGS[6]: "não implica causalidade no mundo real",
     }
     for heading, phrase in expected.items():
         caution = _result_block(body, heading).split(r"\textbf{Cautela:}", 1)[1]

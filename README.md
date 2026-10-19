@@ -503,7 +503,7 @@ trilingual executions above, whose results will live in the `eng-por-zho`
 directories.
 
 The didactic report keeps a question-driven main body (about **16 a 20 páginas**
-for the full trilingual bundle) driven by **sete figuras principais**. Full
+for the full trilingual bundle) driven by **oito figuras principais**. Full
 per-cell matrices, layer profiles, and local diagnostics move to **apêndices no mesmo PDF**
 and to the bundle CSVs so nothing published disappears from the PDF or tables.
 Seven appendix sections mirror protocol/provenance, full performance,
@@ -511,15 +511,16 @@ emergence/reorganization, spectral relevance and XAI↔performance association,
 complete bootstrap comparison tables, detailed faithfulness, and STDFT/conservation
 examples.
 
-The seven main result figures are, in fixed order:
+The eight main result figures are, in fixed order:
 
 1. `transfer_performance_heatmaps` — train × evaluation heatmaps;
 2. `transfer_delta_roc_auc` — off-diagonal ROC-AUC drop;
 3. `transfer_delta_mcc` — off-diagonal MCC drop;
 4. `encoder_agreement_heatmaps` — encoder agreement;
-5. `language_shift_intervals` — relevance shift across corpora/languages;
-6. `spectral_divergence_by_layer` — spectral relevance divergence;
-7. `layer_faithfulness_intervals` — layer-12 diagonal faithfulness.
+5. `dft_relevance_heatmap` — frequency-band relevance by encoder and language;
+6. `language_shift_intervals` — relevance shift across corpora/languages;
+7. `spectral_divergence_by_layer` — spectral relevance divergence;
+8. `layer_faithfulness_intervals` — layer-12 diagonal faithfulness.
 
 Stable comparison CSV basenames, in fixed order:
 

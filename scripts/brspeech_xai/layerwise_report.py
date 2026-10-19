@@ -272,6 +272,7 @@ MAIN_RESULT_FIGURES: tuple[str, ...] = (
     "transfer_delta_roc_auc",
     "transfer_delta_mcc",
     "encoder_agreement_heatmaps",
+    "dft_relevance_heatmap",
     "language_shift_intervals",
     "spectral_divergence_by_layer",
     "layer_faithfulness_intervals",
@@ -279,7 +280,6 @@ MAIN_RESULT_FIGURES: tuple[str, ...] = (
 APPENDIX_FIGURES: tuple[str, ...] = (
     "performance_by_layer",
     "fixed_threshold_by_layer",
-    "dft_relevance_heatmap",
     "class_relevance_by_layer",
     "decision_reorganization_by_layer",
     "encoder_agreement_by_layer",
@@ -3848,7 +3848,7 @@ def _style_heatmap_axis(ax, labels: Sequence[str], columns: int) -> None:
 
 def _figure_heatmap(plt, tables, figures_dir):
     name = "dft_relevance_heatmap"
-    cells = _summary_cells(tables)
+    cells = tuple(cell for cell in _cells(tables) if cell[1] == cell[2])
     nrows, ncols = _grid_shape(len(cells))
     fig, axes = plt.subplots(
         nrows,
@@ -6645,7 +6645,7 @@ def _identified_layers_text(
 def _relevance_appendix(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
-    names = ("dft_relevance_heatmap", "class_relevance_by_layer")
+    names = ("class_relevance_by_layer",)
     lines = [
         *_appendix_section(3, "app:relevancia"),
         *_provenance(
@@ -7187,6 +7187,145 @@ def _profiles_detail(figures: Mapping[str, FigureRecord], name: str) -> str:
     )
 
 
+def frequency_profile_claims(tables: ReportTables) -> pd.DataFrame:
+    """Return the recurring dominant band for each diagonal model/language cell."""
+    columns = [
+        "model",
+        "language",
+        "band",
+        "band_label",
+        "mean_mass",
+        "layers_dominant",
+        "n_layers",
+    ]
+    frame = tables.band_relevance
+    selected = frame[
+        (frame["source"] == frame["target"])
+        & (frame["measure"] == "absolute_normalized")
+    ].copy()
+    if selected.empty:
+        return pd.DataFrame(columns=columns)
+
+    selected["language"] = selected["target"]
+    identity = ["model", "language", "layer"]
+    per_layer = (
+        selected.sort_values(
+            identity + ["mean", "band"],
+            ascending=[True, True, True, False, True],
+            kind="mergesort",
+        )
+        .drop_duplicates(identity)
+        .loc[:, identity + ["band", "band_label"]]
+    )
+    dominance = (
+        per_layer.groupby(
+            ["model", "language", "band", "band_label"], as_index=False, sort=True
+        )
+        .size()
+        .rename(columns={"size": "layers_dominant"})
+    )
+    mean_mass = (
+        selected.groupby(["model", "language", "band"], as_index=False, sort=True)[
+            "mean"
+        ]
+        .mean()
+        .rename(columns={"mean": "mean_mass"})
+    )
+    layer_counts = (
+        selected.groupby(["model", "language"], as_index=False, sort=True)["layer"]
+        .nunique()
+        .rename(columns={"layer": "n_layers"})
+    )
+    claims = dominance.merge(
+        mean_mass, on=["model", "language", "band"], validate="one_to_one"
+    ).merge(layer_counts, on=["model", "language"], validate="many_to_one")
+    maximum = claims.groupby(["model", "language"])["layers_dominant"].transform(
+        "max"
+    )
+    claims = claims[claims["layers_dominant"] == maximum].copy()
+    model_order = {model: index for index, model in enumerate(tables.models)}
+    language_order = {
+        language: index for index, language in enumerate(tables.languages)
+    }
+    claims["_model_order"] = claims["model"].map(model_order)
+    claims["_language_order"] = claims["language"].map(language_order)
+    return (
+        claims.sort_values(
+            ["_model_order", "_language_order", "band"], kind="mergesort"
+        )
+        .drop(columns=["_model_order", "_language_order"])
+        .reset_index(drop=True)
+        .loc[:, columns]
+    )
+
+
+def _frequency_profile_block(
+    tables: ReportTables, figures: Mapping[str, FigureRecord]
+) -> list[str]:
+    claims = frequency_profile_claims(tables)
+    if claims.empty or "dft_relevance_heatmap" not in figures:
+        return []
+    model_findings = []
+    for model in tables.models:
+        rows = claims[claims["model"] == model]
+        if rows.empty:
+            continue
+        parts = []
+        for language in tables.languages:
+            language_rows = rows[rows["language"] == language]
+            if language_rows.empty:
+                continue
+            labels = [
+                escape_latex(str(label)).replace("–", "--")
+                for label in language_rows["band_label"]
+            ]
+            layers_dominant = int(language_rows["layers_dominant"].iloc[0])
+            n_layers = int(language_rows["n_layers"].iloc[0])
+            parts.append(
+                f"{escape_latex(_language_name(language))}: {_join_pt(labels)} em "
+                f"{layers_dominant} de {n_layers} camadas"
+            )
+        model_findings.append(
+            f"{escape_latex(_model_name(model))}: {_join_pt(parts)}"
+        )
+    findings = (
+        [f"{finding}." for finding in model_findings]
+        if len(model_findings) <= 3
+        else [_join_pt(model_findings) + "."]
+    )
+    return _result_block(
+        tables,
+        figures,
+        key="faixas-frequencia",
+        heading="Em quais faixas a relevância se concentra para cada encoder e idioma?",
+        question=(
+            "em quais faixas de frequência a relevância do probe se concentra ao "
+            "longo das camadas, para cada encoder e idioma?"
+        ),
+        figure_names=("dft_relevance_heatmap",),
+        findings=findings,
+        interpretation=(
+            "A faixa mais frequentemente dominante é aquela com a maior massa "
+            "média de relevância absoluta normalizada no maior número de camadas. "
+            "Em caso de empate, todas as faixas co-dominantes são mantidas. Os "
+            "itens resumem essa recorrência; o mapa preserva o perfil completo das "
+            "24 bandas em cada uma das 12 camadas, inclusive concentrações "
+            "secundárias e mudanças entre camadas."
+        ),
+        caution=(
+            "a dominância é relativa à massa de relevância do probe no conjunto "
+            "fixo de amostras XAI, não uma pista acústica causal. Diferenças entre "
+            "os painéis refletem conjuntamente corpus, idioma, modelo e probe."
+        ),
+        details=(
+            r"contraste entre áudio real e sintético no "
+            r"Apêndice~\ref{app:relevancia} "
+            r"(Figura~\ref{fig:class_relevance_by_layer}); "
+            f"{_csv_tex('dft_band_relevance')}."
+        ),
+    )
+
+
 def _relevance_shift_block(
     tables: ReportTables, figures: Mapping[str, FigureRecord]
 ) -> list[str]:
@@ -7371,6 +7510,7 @@ def _main_results_section(
         _overview_block,
         _transfer_block,
         _agreement_block,
+        _frequency_profile_block,
         _relevance_shift_block,
         _spectral_block,
         _faithfulness_block,
@@ -7385,15 +7525,26 @@ def _main_results_section(
     ]
     for block in blocks:
         lines += block(tables, figures)
+    descriptive_sections = [
+        r"visão geral do desempenho (Seção~\ref{sec:resultado-desempenho})"
+    ]
+    if (
+        not frequency_profile_claims(tables).empty
+        and "dft_relevance_heatmap" in figures
+    ):
+        descriptive_sections.append(
+            r"perfil por faixa de frequência "
+            r"(Seção~\ref{sec:resultado-faixas-frequencia})"
+        )
     lines += [
         r"\subsection{Síntese}",
         r"A Tabela~\ref{tab:results-synthesis} resume as "
         f"{_synthesis_scope_tex(tables)}, uma por linha: transferência, acordo "
         "entre encoders, mudança de relevância (que reúne a distância "
         "Jensen--Shannon e a divergência espectral) e fidelidade, com a "
-        "evidência usada, o resultado e a cautela correspondente. A visão geral "
-        "do desempenho não tem linha própria; seus valores estão na "
-        r"Seção~\ref{sec:resultado-desempenho}.",
+        "evidência usada, o resultado e a cautela correspondente. "
+        f"{_join_pt(descriptive_sections).capitalize()} "
+        + ("não têm linhas próprias." if len(descriptive_sections) > 1 else "não tem linha própria."),
         "",
         r"\input{tables/results_synthesis.tex}",
         "",
