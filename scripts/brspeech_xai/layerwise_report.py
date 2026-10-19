@@ -6406,6 +6406,10 @@ def _performance_appendix(
             + stability_csv
             + "."
         ),
+        "As curvas por camada usam um único conjunto de teste por célula e não "
+        "têm intervalo de confiança. Nas métricas de decisão, o limiar é "
+        "calibrado na origem e não é recalibrado no idioma de avaliação.",
+        "",
     ]
     for name in present:
         lines += _figure_block(figures[name], tables)
@@ -7608,7 +7612,7 @@ def _profile_frequency_text(tables: ReportTables, model: str) -> str:
         )
     if not parts:
         return "Não há resumo de relevância por faixa disponível para este encoder."
-    return "Faixas mais frequentemente dominantes: " + "; ".join(parts) + "."
+    return "Faixas dominantes no maior número de camadas: " + "; ".join(parts) + "."
 
 
 def _profile_transfer_text(tables: ReportTables, model: str) -> str:
@@ -7620,7 +7624,9 @@ def _profile_transfer_text(tables: ReportTables, model: str) -> str:
         if claim["n"]:
             parts.append(
                 f"$\\Delta$ {label} com mediana {_signed(claim['median'])}; "
-                f"{claim['negative_n']} de {claim['n']} estimativas negativas"
+                f"{claim['negative_n']} de {claim['n']} estimativas negativas e "
+                f"{claim['ci_below_zero_n']} de {claim['n']} intervalos "
+                "inteiramente abaixo de zero"
             )
     if not parts:
         return "Não há células fora da diagonal disponíveis para este encoder."
@@ -7739,8 +7745,8 @@ def _cross_encoder_conclusion(tables: ReportTables) -> list[str]:
         "Na frequência, " + "; ".join(stable_frequency) + "."
         if stable_frequency
         else (
-            "Os perfis de frequência mudam entre encoders e podem mudar entre "
-            "idiomas."
+            "Não há dados suficientes para destacar um padrão de frequência "
+            "comum a todos os idiomas de um encoder."
         )
     )
 

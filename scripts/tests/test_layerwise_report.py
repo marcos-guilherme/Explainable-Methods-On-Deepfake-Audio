@@ -5680,6 +5680,26 @@ def test_encoder_profile_numbers_are_derived_from_the_loaded_tables(
     assert report_module._num(0.123) in changed_profile
 
 
+def test_encoder_profile_transfer_includes_bootstrap_interval_counts(
+    full_comparison_tables,
+):
+    text = "\n".join(report_module._encoder_profile_sections(full_comparison_tables))
+    for model in full_comparison_tables.models:
+        heading = rf"\subsection{{{report_module._model_name(model)}}}"
+        profile = text.split(heading, 1)[1].split(r"\subsection{", 1)[0]
+        for metric in ("delta_roc_auc", "delta_mcc"):
+            rows = report_module.selected_transfer_effects(
+                full_comparison_tables, metric
+            )
+            rows = rows[rows["model"] == model]
+            claim = report_module.transfer_effect_claim(rows)
+            assert (
+                f"{claim['ci_below_zero_n']} de {claim['n']} intervalos "
+                "inteiramente abaixo de zero"
+                in profile
+            )
+
+
 def test_cross_encoder_conclusion_compares_layers_transfer_and_faithfulness(
     full_comparison_tables,
 ):
@@ -5714,6 +5734,27 @@ def test_cross_encoder_conclusion_compares_layers_transfer_and_faithfulness(
         assert report_module._model_name(leader) in comparison
         row = faithfulness[faithfulness["model"] == leader].iloc[0]
         assert f"{int(row['ci_above_zero_n'])} de {int(row['total'])}" in comparison
+
+
+def test_cross_encoder_frequency_fallback_does_not_invent_a_difference(
+    full_comparison_tables,
+):
+    empty = full_comparison_tables.band_relevance.iloc[0:0].copy()
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=empty)
+    comparison = "\n".join(report_module._cross_encoder_conclusion(tables))
+    assert "perfis de frequência mudam entre encoders" not in comparison
+    assert "não há dados suficientes" in comparison.lower()
+
+
+def test_performance_appendix_keeps_limits_removed_from_short_captions(
+    full_comparison_tex,
+):
+    appendix = full_comparison_tex.split(r"\label{app:desempenho}", 1)[1].split(
+        r"\section{", 1
+    )[0]
+    figures = appendix.split(r"\subsection{Ranking sem limiar", 1)[0]
+    assert "um único conjunto de teste por célula" in figures
+    assert "não é recalibrado no idioma de avaliação" in figures
 
 
 def test_comparison_narrative_explains_method_and_links_each_result(
@@ -7187,6 +7228,26 @@ def trilingual_tables(tmp_path_factory):
     return build_report_tables(
         [load_report_source(validate_result_directory(root)) for root in roots]
     )
+
+
+def test_trilingual_conclusion_profiles_all_three_encoders(trilingual_tables):
+    text = "\n".join(report_module._encoder_profile_sections(trilingual_tables))
+    headings = [
+        rf"\subsection{{{report_module._model_name(model)}}}"
+        for model in ("hubert_base", "wav2vec2_base", "wavlm_base")
+    ]
+    positions = [text.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    for heading in headings:
+        profile = text.split(heading, 1)[1].split(r"\subsection{", 1)[0]
+        for axis in (
+            "Desempenho diagonal",
+            "Ao longo das camadas",
+            "Frequência",
+            "Transferência",
+            "Fidelidade",
+        ):
+            assert rf"\textbf{{{axis}.}}" in profile
 
 
 def _drawn_text_boxes(fig, renderer):
