@@ -5694,8 +5694,7 @@ def test_encoder_profile_transfer_includes_bootstrap_interval_counts(
             rows = rows[rows["model"] == model]
             claim = report_module.transfer_effect_claim(rows)
             assert (
-                f"{claim['ci_below_zero_n']} de {claim['n']} intervalos "
-                "inteiramente abaixo de zero"
+                f"ICs abaixo de zero {claim['ci_below_zero_n']}/{claim['n']}"
                 in profile
             )
 

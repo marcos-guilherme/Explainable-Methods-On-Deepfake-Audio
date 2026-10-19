@@ -7541,8 +7541,8 @@ def _profile_diagonal_text(tables: ReportTables, model: str) -> str:
     if rows.empty:
         return "Não há células diagonais disponíveis para este encoder."
     return (
-        f"Nas {len(rows)} células diagonais, a ROC-AUC selecionada tem mediana "
-        f"{_num(rows['roc_auc'].median())} e o MCC da mesma camada, "
+        f"Em {len(rows)} células diagonais: ROC-AUC selecionada mediana "
+        f"{_num(rows['roc_auc'].median())}; MCC da mesma camada "
         f"{_num(rows['mcc'].median())}."
     )
 
@@ -7582,12 +7582,10 @@ def _profile_layer_text(tables: ReportTables, model: str) -> str:
         else "não disponível"
     )
     return (
-        f"As camadas escolhidas nas células diagonais são {selected_text}. "
-        f"A mediana da ROC-AUC diagonal é {_num(by_layer.loc[first_layer])} na "
-        f"camada {first_layer} e {_num(by_layer.loc[last_layer])} na camada "
-        f"{last_layer}; o maior valor mediano, {_num(peak)}, ocorre "
-        f"{peak_location}. "
-        "A comparação entre extremos não implica evolução monotônica."
+        f"Camadas escolhidas na diagonal: {selected_text}. ROC-AUC diagonal "
+        f"mediana: {_num(by_layer.loc[first_layer])} na camada {first_layer}, "
+        f"{_num(by_layer.loc[last_layer])} na {last_layer}; máximo {_num(peak)} "
+        f"{peak_location}. Isso não implica evolução monotônica."
     )
 
 
@@ -7606,13 +7604,13 @@ def _profile_frequency_text(tables: ReportTables, model: str) -> str:
             for label in language_rows["band_label"]
         ]
         parts.append(
-            f"{escape_latex(_language_name(language))}: {_join_pt(labels)} em "
-            f"{int(language_rows['layers_dominant'].iloc[0])} de "
-            f"{int(language_rows['n_layers'].iloc[0])} camadas"
+            f"{escape_latex(_language_name(language))}: {_join_pt(labels)} "
+            f"({int(language_rows['layers_dominant'].iloc[0])}/"
+            f"{int(language_rows['n_layers'].iloc[0])} camadas)"
         )
     if not parts:
         return "Não há resumo de relevância por faixa disponível para este encoder."
-    return "Faixas dominantes no maior número de camadas: " + "; ".join(parts) + "."
+    return "Faixas dominantes por recorrência: " + "; ".join(parts) + "."
 
 
 def _profile_transfer_text(tables: ReportTables, model: str) -> str:
@@ -7623,10 +7621,9 @@ def _profile_transfer_text(tables: ReportTables, model: str) -> str:
         claim = transfer_effect_claim(rows)
         if claim["n"]:
             parts.append(
-                f"$\\Delta$ {label} com mediana {_signed(claim['median'])}; "
-                f"{claim['negative_n']} de {claim['n']} estimativas negativas e "
-                f"{claim['ci_below_zero_n']} de {claim['n']} intervalos "
-                "inteiramente abaixo de zero"
+                f"$\\Delta$ {label}: mediana {_signed(claim['median'])}, "
+                f"negativas {claim['negative_n']}/{claim['n']}, ICs abaixo de "
+                f"zero {claim['ci_below_zero_n']}/{claim['n']}"
             )
     if not parts:
         return "Não há células fora da diagonal disponíveis para este encoder."
@@ -7641,10 +7638,9 @@ def _profile_faithfulness_text(tables: ReportTables, model: str) -> str:
         return "Não há resultados de fidelidade alinhados para este encoder."
     row = claim.iloc[0]
     return (
-        f"{int(row['ci_above_zero_n'])} de {int(row['total'])} intervalos ficam "
-        "inteiramente acima de zero e "
-        f"{int(row['ci_below_zero_n'])} de {int(row['total'])} ficam "
-        "inteiramente abaixo de zero."
+        f"ICs inteiramente acima de zero: {int(row['ci_above_zero_n'])}/"
+        f"{int(row['total'])}; abaixo de zero: {int(row['ci_below_zero_n'])}/"
+        f"{int(row['total'])}."
     )
 
 
