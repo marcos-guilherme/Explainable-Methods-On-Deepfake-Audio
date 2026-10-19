@@ -2301,6 +2301,10 @@ def test_report_tables_include_optional_shortcut_audit(eng_loaded, tmp_path):
     )
     assert r"\label{tab:shortcut-audit}" in tex
     assert "CORAA" in tex and "MLAAD" in tex
+    narrative = "\n".join(report_module._shortcut_audit_block(tables, {}))
+    assert "WAV PCM de 16 bits, mono e 16 kHz" in narrative
+    assert "característica simples mais separadora é duração" in narrative
+    assert "WAV/PCM" not in narrative and "duration\\_s" not in narrative
 
 
 def test_threshold_recalibration_separates_few_shot_calibration_from_evaluation():

@@ -7890,6 +7890,21 @@ def _shortcut_audit_block(
         return []
     first = audit.iloc[0]
     strongest = audit.loc[audit["orientation_invariant_auc"].idxmax()]
+    feature_labels = {
+        "duration_s": "duração",
+        "peak": "pico absoluto",
+        "rms": "RMS global",
+        "first_250ms_rms": "RMS nos primeiros 250 ms",
+        "leading_silence_s": "silêncio inicial",
+    }
+    feature_label = feature_labels.get(
+        str(strongest["feature"]), str(strongest["feature"])
+    )
+    file_format = (
+        "WAV PCM de 16 bits, mono e 16 kHz"
+        if str(first["file_formats"]) == "WAV/PCM_16/mono/16000Hz"
+        else escape_latex(first["file_formats"])
+    )
     portuguese_transfer = tables.transfer_selection[
         (tables.transfer_selection["source"] == "por")
         & (tables.transfer_selection["target"] != "por")
@@ -7912,11 +7927,11 @@ def _shortcut_audit_block(
         f"{_num(first['corpus_label_cramers_v'])}. Portanto, idioma, corpus e "
         "classe não estão identificados separadamente nesse subconjunto.",
         "",
-        f"Todos os arquivos processados compartilham o formato "
-        f"{escape_latex(first['file_formats'])}, descartando codec, número de "
+        f"Todos os arquivos processados compartilham o formato {file_format}, "
+        "descartando codec, número de "
         "canais e taxa de amostragem como separadores após o pré-processamento. "
         f"Entretanto, a característica simples mais separadora é "
-        f"{escape_latex(str(strongest['feature']))}, com ROC-AUC "
+        f"{escape_latex(feature_label)}, com ROC-AUC "
         f"{_num(strongest['orientation_invariant_auc'])}; sua mediana é "
         f"{_num(strongest['bonafide_median'])} nos reais e "
         f"{_num(strongest['spoof_median'])} nos sintéticos."
