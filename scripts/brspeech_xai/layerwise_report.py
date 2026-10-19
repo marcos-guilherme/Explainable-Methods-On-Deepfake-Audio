@@ -7603,35 +7603,38 @@ def frequency_profile_claims(tables: ReportTables) -> pd.DataFrame:
     )
 
 
-def _frequency_profile_table(claims: pd.DataFrame) -> str:
+def _frequency_profile_table(tables: ReportTables, claims: pd.DataFrame) -> str:
+    headers = ["Idioma", *[_model_name(model) for model in tables.models]]
     body = []
-    for (model, language), rows in claims.groupby(
-        ["model", "language"], sort=False
-    ):
-        labels = [
-            escape_latex(str(label)).replace("–", "--")
-            for label in rows["band_label"]
-        ]
-        body.append(
-            [
-                escape_latex(_model_name(str(model))),
-                escape_latex(_language_name(str(language))),
-                _join_pt(labels),
-                (
-                    f"{int(rows['layers_dominant'].iloc[0])} de "
-                    f"{int(rows['n_layers'].iloc[0])}"
-                ),
+    for language in tables.languages:
+        row: list[object] = [escape_latex(_language_name(language))]
+        for model in tables.models:
+            model_rows = claims[
+                (claims["model"] == model) & (claims["language"] == language)
             ]
-        )
+            if model_rows.empty:
+                row.append(_NOT_AVAILABLE)
+                continue
+            labels = [
+                escape_latex(str(label)).replace("–", "--")
+                for label in model_rows["band_label"]
+            ]
+            layers_dominant = int(model_rows["layers_dominant"].iloc[0])
+            n_layers = int(model_rows["n_layers"].iloc[0])
+            row.append(f"{_join_pt(labels)} ({layers_dominant}/{n_layers})")
+        body.append(row)
+    n_layers = int(claims["n_layers"].iloc[0]) if not claims.empty else 12
     caption = (
         "Faixas com maior massa média de relevância no maior número de camadas "
-        "da Figura~\\ref{fig:dft_relevance_heatmap}. Empates aparecem como "
-        "faixas co-dominantes."
+        "da Figura~\\ref{fig:dft_relevance_heatmap}, por idioma e encoder. "
+        "A recorrência indica em quantas camadas do encoder a faixa é dominante "
+        f"(formato n/{n_layers}), não o índice de uma camada selecionada. "
+        "Empates aparecem como faixas co-dominantes."
     )
     return _comparison_compact_table(
         caption,
         "tab:frequency-profile-summary",
-        ["Modelo", "Idioma", "Faixa(s) dominante(s)", "Camadas"],
+        headers,
         body,
     )
 
@@ -7718,7 +7721,7 @@ def _frequency_profile_block(
             r"(Figura~\ref{fig:class_relevance_by_layer}); "
             f"{_csv_tex('dft_band_relevance')}."
         ),
-        evidence_blocks=(_frequency_profile_table(claims),),
+        evidence_blocks=(_frequency_profile_table(tables, claims),),
     )
 
 

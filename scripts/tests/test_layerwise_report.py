@@ -5585,6 +5585,27 @@ def test_main_frequency_profile_names_each_encoder_and_language_from_data(
         assert f"{row.layers_dominant} de {row.n_layers} camadas" in block
 
 
+def test_frequency_profile_table_pivots_by_language(full_comparison_tables):
+    claims = report_module.frequency_profile_claims(full_comparison_tables)
+    table = report_module._frequency_profile_table(full_comparison_tables, claims)
+    expected_headers = ["Idioma"] + [
+        report_module._model_name(model) for model in full_comparison_tables.models
+    ]
+    for header in expected_headers:
+        assert header in table
+    assert table.count(r"\\") == len(full_comparison_tables.languages) + 1
+    language_names = [
+        report_module._language_name(language)
+        for language in full_comparison_tables.languages
+    ]
+    assert len(language_names) == len(set(language_names))
+    for name in language_names:
+        assert name in table
+    assert "recorrência" in table
+    assert "não o índice de uma camada selecionada" in table
+    assert "/12)" in table or f"/{int(claims['n_layers'].iloc[0])})" in table
+
+
 def test_frequency_profile_table_decodes_figure_before_the_findings(
     full_comparison_tables, full_comparison_tex
 ):
@@ -5599,21 +5620,19 @@ def test_frequency_profile_table_decodes_figure_before_the_findings(
 
     table_text = block[table : block.index(r"\end{table}", table)]
     claims = report_module.frequency_profile_claims(full_comparison_tables)
-    assert table_text.count(r"\\") == len(
-        claims[["model", "language"]].drop_duplicates()
-    ) + 1
+    for model in full_comparison_tables.models:
+        assert report_module._model_name(model) in table_text
+    assert table_text.count(r"\\") == len(full_comparison_tables.languages) + 1
+    for language in full_comparison_tables.languages:
+        assert report_module._language_name(language) in table_text
     for (model, language), rows in claims.groupby(["model", "language"], sort=False):
         labels = [
             str(label).replace("–", "--") for label in rows["band_label"].tolist()
         ]
-        assert report_module._model_name(model) in table_text
-        assert report_module._language_name(language) in table_text
-        for label in labels:
-            assert label in table_text
-        assert (
-            f"{int(rows['layers_dominant'].iloc[0])} de "
-            f"{int(rows['n_layers'].iloc[0])}"
-        ) in table_text
+        cell = report_module._join_pt(labels)
+        layers_dominant = int(rows["layers_dominant"].iloc[0])
+        n_layers = int(rows["n_layers"].iloc[0])
+        assert f"{cell} ({layers_dominant}/{n_layers})" in table_text
 
 
 def test_frequency_profile_claims_preserve_co_dominant_bands(
