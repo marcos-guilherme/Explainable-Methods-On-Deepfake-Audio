@@ -5613,6 +5613,10 @@ def test_cross_cutting_limitations_and_encoder_conclusion(full_comparison_tex):
         r"As quatro perguntas comparativas e suas cautelas estão na "
         r"Tabela~\ref{tab:results-synthesis}."
     ) in conclusion
+    assert (
+        "Nos perfis, a fidelidade se restringe à camada 12 das células diagonais, "
+        "com 8 pares por classe."
+    ) in conclusion
     assert conclusion.count(r"Figura~\ref") == 0
     for phrase in ("causado pelo idioma", "o idioma causa", "efeito causal do idioma é"):
         assert phrase not in body

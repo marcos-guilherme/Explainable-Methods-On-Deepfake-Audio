@@ -7802,6 +7802,18 @@ def _short_conclusion_section(tables: ReportTables) -> list[str]:
         if len(tables.models) == 1
         else f"Os {len(tables.models)} perfis abaixo usam"
     )
+    aligned_faithfulness = _aligned_layer_faithfulness(tables)
+    faithfulness_scope: list[str] = []
+    if not aligned_faithfulness.empty:
+        layers = sorted({int(value) for value in aligned_faithfulness["layer"]})
+        pairs = sorted({int(value) for value in aligned_faithfulness["n_pairs"]})
+        layer_text = _join_pt([str(layer) for layer in layers])
+        pair_text = _join_pt([str(pair) for pair in pairs])
+        faithfulness_scope = [
+            f"Nos perfis, a fidelidade se restringe à camada {layer_text} das "
+            f"células diagonais, com {pair_text} pares por classe.",
+            "",
+        ]
     lines = [
         rf"\section{{{_SECTION_TITLES_PT[4]}}}",
         r"\label{sec:conclusao}",
@@ -7810,6 +7822,7 @@ def _short_conclusion_section(tables: ReportTables) -> list[str]:
         "ao longo das camadas, relevância em frequência, transferência e "
         "fidelidade.",
         "",
+        *faithfulness_scope,
     ]
     lines += _encoder_profile_sections(tables)
     lines += _cross_encoder_conclusion(tables)
