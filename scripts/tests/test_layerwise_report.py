@@ -5585,25 +5585,152 @@ def test_main_frequency_profile_names_each_encoder_and_language_from_data(
         assert f"{row.layers_dominant} de {row.n_layers} camadas" in block
 
 
+def _parse_frequency_profile_compact_table(table: str) -> tuple[str, list[str], list[list[str]]]:
+    cap_start = table.index(r"\caption{") + len(r"\caption{")
+    depth = 1
+    index = cap_start
+    while index < len(table) and depth:
+        if table[index] == "{":
+            depth += 1
+        elif table[index] == "}":
+            depth -= 1
+            if depth == 0:
+                caption = table[cap_start:index]
+                break
+        index += 1
+    else:
+        raise AssertionError("caption not found")
+    header_block = table.split(r"\toprule", 1)[1].split(r"\midrule", 1)[0]
+    header_line = header_block.strip().splitlines()[0].strip()
+    headers = [cell.strip() for cell in header_line.removesuffix(r" \\").split(" & ")]
+    body_block = table.split(r"\midrule", 1)[1].split(r"\bottomrule", 1)[0]
+    body = []
+    for line in body_block.strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        body.append(
+            [cell.strip() for cell in stripped.removesuffix(r" \\").split(" & ")]
+        )
+    return caption, headers, body
+
+
+def _frequency_tables_with_wav2vec_from_hubert(tables: report_module.ReportTables):
+    hubert_rows = tables.band_relevance[
+        tables.band_relevance["model"] == "hubert_base"
+    ].copy()
+    wav2vec_rows = hubert_rows.copy()
+    wav2vec_rows["model"] = "wav2vec2_base"
+    band_relevance = pd.concat(
+        [tables.band_relevance, wav2vec_rows], ignore_index=True
+    )
+    models = tuple(sorted(band_relevance["model"].unique()))
+    return dataclasses.replace(
+        tables, models=models, band_relevance=band_relevance
+    )
+
+
 def test_frequency_profile_table_pivots_by_language(full_comparison_tables):
     claims = report_module.frequency_profile_claims(full_comparison_tables)
     table = report_module._frequency_profile_table(full_comparison_tables, claims)
+    caption, headers, body = _parse_frequency_profile_compact_table(table)
     expected_headers = ["Idioma"] + [
         report_module._model_name(model) for model in full_comparison_tables.models
     ]
-    for header in expected_headers:
-        assert header in table
-    assert table.count(r"\\") == len(full_comparison_tables.languages) + 1
+    assert headers == expected_headers
+    assert len(body) == len(full_comparison_tables.languages)
     language_names = [
         report_module._language_name(language)
         for language in full_comparison_tables.languages
     ]
-    assert len(language_names) == len(set(language_names))
-    for name in language_names:
-        assert name in table
-    assert "recorrência" in table
-    assert "não o índice de uma camada selecionada" in table
-    assert "/12)" in table or f"/{int(claims['n_layers'].iloc[0])})" in table
+    assert [row[0] for row in body] == [
+        report_module.escape_latex(name) for name in language_names
+    ]
+    n_layers = int(claims["n_layers"].iloc[0])
+    assert "recorrência" in caption
+    assert "não o índice de uma camada selecionada" in caption
+    assert f"n/{n_layers}" in caption
+    body_text = "\n".join(" & ".join(row) for row in body)
+    assert "não o índice de uma camada selecionada" not in body_text
+    assert f"n/{n_layers}" not in body_text
+
+
+def test_frequency_profile_table_header_order_three_models(full_comparison_tables):
+    tables = _frequency_tables_with_wav2vec_from_hubert(full_comparison_tables)
+    claims = report_module.frequency_profile_claims(tables)
+    table = report_module._frequency_profile_table(tables, claims)
+    _, headers, _ = _parse_frequency_profile_compact_table(table)
+    assert headers == [
+        "Idioma",
+        "HuBERT Base",
+        "Wav2Vec2 Base",
+        "WavLM Base",
+    ]
+
+
+def test_frequency_profile_table_missing_claim_renders_not_available(
+    full_comparison_tables,
+):
+    claims = report_module.frequency_profile_claims(full_comparison_tables)
+    model = full_comparison_tables.models[0]
+    language = full_comparison_tables.languages[0]
+    incomplete = claims[
+        ~((claims["model"] == model) & (claims["language"] == language))
+    ].reset_index(drop=True)
+    table = report_module._frequency_profile_table(
+        full_comparison_tables, incomplete
+    )
+    _, headers, body = _parse_frequency_profile_compact_table(table)
+    model_index = headers.index(report_module._model_name(model))
+    language_row = next(
+        row
+        for row in body
+        if row[0] == report_module.escape_latex(report_module._language_name(language))
+    )
+    assert len(language_row) == len(headers)
+    assert language_row[model_index] == report_module._NOT_AVAILABLE
+
+
+def test_frequency_profile_table_joins_co_dominant_labels(full_comparison_tables):
+    frame = full_comparison_tables.band_relevance
+    model = full_comparison_tables.models[0]
+    language = full_comparison_tables.languages[0]
+    selected = frame[
+        (frame["model"] == model)
+        & (frame["source"] == language)
+        & (frame["target"] == language)
+        & (frame["measure"] == "absolute_normalized")
+    ].copy()
+    selected["mean"] = 0.0
+    layers = sorted(selected["layer"].unique())
+    halfway = len(layers) // 2
+    selected.loc[
+        (selected["band"] == 1) & selected["layer"].isin(layers[:halfway]), "mean"
+    ] = 1.0
+    selected.loc[
+        (selected["band"] == 2) & selected["layer"].isin(layers[halfway:]), "mean"
+    ] = 1.0
+    tables = dataclasses.replace(full_comparison_tables, band_relevance=selected)
+    claims = report_module.frequency_profile_claims(tables)
+    table = report_module._frequency_profile_table(tables, claims)
+    _, headers, body = _parse_frequency_profile_compact_table(table)
+    model_index = headers.index(report_module._model_name(model))
+    language_row = next(
+        row
+        for row in body
+        if row[0] == report_module.escape_latex(report_module._language_name(language))
+    )
+    labels = [
+        report_module.escape_latex(str(label)).replace("–", "--")
+        for label in claims.loc[
+            (claims["model"] == model) & (claims["language"] == language),
+            "band_label",
+        ]
+    ]
+    layers_dominant = int(claims["layers_dominant"].iloc[0])
+    n_layers = int(claims["n_layers"].iloc[0])
+    expected = f"{report_module._join_pt(labels)} ({layers_dominant}/{n_layers})"
+    assert language_row[model_index] == expected
 
 
 def test_frequency_profile_table_decodes_figure_before_the_findings(
